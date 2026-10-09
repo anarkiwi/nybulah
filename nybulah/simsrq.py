@@ -31,7 +31,10 @@ USB_BANK = 32
 # and handshake packets plus two turnarounds of 7.5 bit times, at 12 Mbit/s.
 USB_PACKET_US = (35 + (8 + 8 + 8 * USB_BANK + 16 + 3) + 19 + 15) / 12
 STREAM_TIMEOUT_US = 20_000.0  # no SRQ fall: drive gone (metadata every <256 cycles)
-STREAM_QUIET_US = 1_000.0  # SRQ idle this long after ATN: the drive has stopped
+# ATN hold (x.c stream_stop): the drive's longest wait between ATN checks, 256
+# bytes of 8 cells at zone 0 and 285 rpm, then until SRQ stays released this long.
+STREAM_ATN_MIN_US = 256 * 8 * 4.0 * 300 / 285
+STREAM_QUIET_US = 1_000.0
 STREAM_ATN_US = 50_000.0  # longest ATN hold
 
 
@@ -59,10 +62,9 @@ class SrqTiming:
 
     @property
     def frame(self):
-        """Stream: earliest and latest clock of the poll that must see SRQ high, after
-        the last rise settles and before the next byte's earliest fall."""
-        last = SRQ_LAST * self.f + self.rise
-        return last, (SR_PERIOD - 1) * self.f - SRQ_POLL - 1
+        """Stream (x_timing.h SRQ_FRAME, SRQ_WAIT): earliest clock of the poll that must
+        see SRQ released, latest of the first poll for the next fall."""
+        return SRQ_LAST * self.f + self.rise, (SR_PERIOD - 1) * self.f - self.poll
 
     @property
     def start(self):
@@ -249,10 +251,10 @@ class SimSRQ(SimX):
                 code = fmt.A_FRAMING
             if code is None:
                 t = self._poll_until(
-                    IEC_SRQ, True, at, at + STREAM_TIMEOUT_US, SRQ_POLL / 16, 0.0
+                    IEC_SRQ, True, at, at + STREAM_TIMEOUT_US, st.poll / 16, 0.0
                 )
-                code = fmt.A_TIMEOUT if t is None else None
-                t = at + STREAM_TIMEOUT_US if t is None else t
+                if t is None:
+                    code, at = fmt.A_TIMEOUT, at + STREAM_TIMEOUT_US
             if code is not None:
                 break
         self.now = at
@@ -261,10 +263,12 @@ class SimSRQ(SimX):
         return usb.close(code)
 
     def _stop_drive(self):
-        """Hold ATN until SRQ stays released STREAM_QUIET_US (bounded), then release."""
+        """Hold ATN STREAM_ATN_MIN_US, then until SRQ stays released STREAM_QUIET_US
+        (at most STREAM_ATN_US), then release it."""
         t0 = self.now
         self._host(IEC_ATN, t0)
-        last = t0
+        last = t0 + STREAM_ATN_MIN_US - STREAM_QUIET_US
+        self.now = max(self.now, last)
         while self.now - last < STREAM_QUIET_US and self.now - t0 < STREAM_ATN_US:
             nxt = self._poll_until(
                 IEC_SRQ, True, self.now, last + STREAM_QUIET_US, SRQ_POLL / 16, 0.0

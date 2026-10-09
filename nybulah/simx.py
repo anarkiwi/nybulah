@@ -340,6 +340,16 @@ class TimedDrive1541(Drive1541):
         self._t0, self._c0 = 0.0, 0
         super().__init__(*args, **kw)
         self.bus.clock = lambda: self.time(self.cycles)
+        self._atn = False
+        if isinstance(self.bus, TimedBus):
+            self.bus.listeners.append(self._atn_change)
+
+    def _atn_change(self, lines, t):
+        """ATN acknowledge is combinational: DATA follows the host's ATN at once."""
+        atn = bool(lines & IEC_ATN)
+        if atn != self._atn:
+            self._atn = atn
+            self.bus.record(self, self.via_lines(), t)
 
     def time(self, cycles):
         """Microseconds at a cycle count, across clock-speed changes."""
@@ -395,6 +405,7 @@ class TimedDrive1571(TimedDrive1541):
     """
 
     MODEL, EXPANSION = Drive1571.MODEL, Drive1571.EXPANSION
+    PA_TRK0, port_a = Drive1571.PA_TRK0, Drive1571.port_a
 
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)

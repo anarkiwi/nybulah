@@ -678,8 +678,11 @@ def load_captures(folder):
     for path in sorted(pathlib.Path(folder).glob("read-*.npz")):
         cap = nibbler.Capture.load(path)
         key = cap.halftrack | (SIDE1 if cap.side else 0)
+        index = getattr(cap, "index_bits", lambda: None)()
         captures.setdefault(key, []).append(
-            Capture(segments(cap).bits, cap.density, framed=cap)
+            Capture(segments(cap).bits, cap.density, index=index)
+            if index is not None and len(index) > 1
+            else Capture(segments(cap).bits, cap.density, framed=cap)
         )
     return captures
 

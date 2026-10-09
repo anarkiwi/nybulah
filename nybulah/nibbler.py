@@ -11,7 +11,7 @@ import numpy as np
 
 from . import passes
 from . import stream as fmt
-from .analysis.capture import capture_bits, trailing_ones
+from .analysis.capture import _hidden, capture_bits, trailing_ones
 from .analysis.gcr import SYNC_MIN_BITS, bit_rate, bits_per_revolution, speed_zone
 from .analysis.gcr import to_bits
 from .analysis.sector import header_tracks
@@ -146,6 +146,17 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     def index(self):
         """Stream: data positions of the rising index edges, else None."""
         return None if self.parsed is None else self.parsed.index
+
+    def index_bits(self):
+        """Stream: bit offsets in :meth:`bits` of the index edges, else None."""
+        if self.parsed is None:
+            return None
+        keep = self.positions < self.valid_bytes
+        pos = self.positions[keep]
+        _, _, extra = _hidden(to_bits(self.data), pos, self.sync_bits[keep])
+        before = np.searchsorted(pos, self.index, side="right")
+        cum = np.concatenate(([0], np.cumsum(extra)))
+        return 8 * self.index + cum[before]
 
     @property
     def stream_status(self):
@@ -393,7 +404,7 @@ def _v1_byte_cycles(cap, sync_cycles):
     return (unwrap(t0, t1, expected) - syncs) / len(cap.data)
 
 
-STREAM_REVS = 2
+STREAM_REVS = 1
 
 
 def stream_size(revolutions):

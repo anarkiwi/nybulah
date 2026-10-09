@@ -27,8 +27,8 @@
 ; - CLK changes 14 or more cycles after a write and 2 or more before the
 ;   next write: the adapter samples it 4 to 14 cycles after a write.
 ;
-;   nw   V at 0 and 6 of 11, SYNC at 5; entered 28+ after a write; writes 12
-;        cycles after the bvs that sees V.
+;   nw   V at 0 and 6 of 15, SYNC at 5; entered 28+ after a write; writes 12
+;        cycles after the bvs that sees V; ATN and T1 every 256 idle polls.
 ;   pwo  after a write from nw: due metadata at 40 unless V by 22, the
 ;        index, every 256th byte ATN and T1; else nw at 29.
 ;   pwb  after a timed write: V at 1 -> read, write at 43; due metadata at
@@ -143,14 +143,33 @@ gw:     lda IEC                         ; host go: CLK
         clv
         jmp nw
 
+; Metadata byte A 45 or more cycles after any write, CLK released at 16.
+meta:   sta tse
+        ldy #SR_PERIOD / 5 + 1
+:       dey
+        bne :-
+        ldx #CLK_OUT
+        stx IEC
+        sta CIA_SDR                     ; t = 0
+        ldy #2
+:       dey
+        bne :-
+        lda #0
+        sta IEC                         ; t = 16
+        rts
+
         .segment "CODE"
 
-; Byte ready (or SYNC low); entered 28 or more cycles after a write.
+; Byte ready (or SYNC low); entered 28 or more cycles after a write. Every
+; 256 polls without either (no disk turning) ATN and T1 are checked.
 nw:     BR bvs, nv
         lda VIA2PB
         BR bvs, nv
-        BR bmi, nw
-        jmp ss
+        BR bpl, nws
+        dex
+        BR bne, nw
+        jmp pws
+nws:    jmp ss
 nv:     ldx VIA2PA
         clv
         stx CIA_SDR                     ; t = 0
@@ -166,14 +185,14 @@ pwo:    lda pm
         jmp nw                          ; 29
 
 ; Due metadata at 40 (42 from pwb), CLK at 17; a byte arriving by 22 goes
-; first (ee) and the metadata stays due.
+; first (ee, or pv writing it as soon as allowed) and the metadata stays due.
 pwm:    ldy pm
         lda #CLK_OUT
         BR bvs, ee                      ; t = 12
         sta IEC                         ; t = 17
-        BR bvs, ee                      ; t = 18
+        BR bvs, pv                      ; t = 18
         nop
-        BR bvs, ee                      ; t = 22
+        BR bvs, pv                      ; t = 22
         nop
         lda pm2
         sta pm
@@ -181,11 +200,17 @@ pwm:    ldy pm
         sta pm2
         sty CIA_SDR                     ; t = 40
         jmp mpw
+pv:     lda #0                          ; the byte first, at 41 (45)
+        sta IEC
+        ldx VIA2PA
+        clv
+        nop
+        jmp tv
 
 pwe:    jsr edge
         jmp nw
 
-; Every 256 bytes from nw: ATN and the no-index timeout.
+; Every 256 bytes from nw, or 256 idle polls: ATN and the no-index timeout.
 pws:    lda IEC
         bpl :+
         jmp abort
@@ -248,6 +273,8 @@ sp:     ldy #SYNC_POLLS
         bmi se
         dey
         BR bne, :-
+        lda IEC
+        bmi sab
         lda IFR1
         and #IRQ_T1
         beq :+
@@ -276,10 +303,14 @@ sp:     ldy #SYNC_POLLS
         stx CIA_SDR                     ; t = 0
         jmp sp
 
+sab:    jmp abort
+
 ; SYNC high: stamp, then wait for the shifter, reading a byte that arrives
 ; meanwhile. A byte (held or waiting) goes first and SYNC_END becomes due, as
 ; it does behind due metadata, so SYNC_ENDs keep their order.
 sxi:    lda T2CL                        ; the shifter is idle
+        and #$FC
+        ora #M_SEND
         sta tse
         ldy #0
         bvc sx
@@ -288,6 +319,8 @@ sxi:    lda T2CL                        ; the shifter is idle
         iny
         bne sx
 se:     lda T2CL                        ; 7 (8) cycles after the SYNC read
+        and #$FC
+        ora #M_SEND
         sta tse
         ldy #0
 sw:     bvc :+
@@ -298,8 +331,6 @@ sw:     bvc :+
         and #ICR_SP
         beq sw
 sx:     lda tse
-        and #$FC
-        ora #M_SEND
         dey
         beq sxd                         ; a byte held
         bvs sxh                         ; a byte waiting
@@ -309,11 +340,25 @@ sx:     lda tse
         jmp mpw
 sxh:    ldx VIA2PA
         clv
-sxd:    jsr due
-        lda #0
-        sta IEC
-        jmp tv
-sxm:    jsr due
+sxd:    ldy #0
+        sty IEC
+        stx CIA_SDR                     ; t = 0: the byte, then SYNC_END due
+        ldy pm
+        bne :+
+        sta pm
+        jmp pwb
+:       sta pm2
+        jmp pwb
+sxm:    stx CIA_SDR                     ; t = 0: the oldest due metadata
+        ldx pm2
+        stx pm
+        ldy #0
+        sty pm2
+        cpx #0
+        bne :+
+        sta pm                          ; SYNC_END behind it
+        jmp mpw
+:       sta pm2
         jmp mpw
 
 ; Index level changed (A = the change): toggle it; on a rising edge make INDEX
@@ -374,19 +419,4 @@ done:   tax
         ora #PCR_SOE_OFF
         sta PCR2
         txa
-        rts
-
-; Metadata byte A 45 or more cycles after any write, CLK released at 16.
-meta:   sta tse
-        ldy #SR_PERIOD / 5 + 1
-:       dey
-        bne :-
-        ldx #CLK_OUT
-        stx IEC
-        sta CIA_SDR                     ; t = 0
-        ldy #2
-:       dey
-        bne :-
-        lda #0
-        sta IEC                         ; t = 16
         rts

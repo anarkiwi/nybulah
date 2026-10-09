@@ -28,11 +28,11 @@ ADAPTER = {
 }
 DRIVE_END = {M_END: "done", M_END_NOINDEX: "noindex", M_END_ATN: "atn"}
 
-START_T2, END_T2 = (11, 11), (7, 8)  # SYNC read that saw the change -> T2 read
+START_T2, END_T2 = (12, 12), (7, 8)  # SYNC read that saw the change -> T2 read
 START_LATE, END_LATE = 125, 70  # longest wait for a SYNC read (data paths, sync loop)
-NW_POLL = 11  # SYNC read period in nw and in the sync loop's polls
+NW_POLL = 15  # SYNC read period in nw
 NW_SYNC = 34  # write of a byte from nw -> nw's first SYNC read after it
-NW_WRITE = (12, 18)  # byte ready -> its write from nw
+NW_WRITE = (12, 21)  # byte ready -> its write from nw
 QUANT = 3  # T2 bits dropped by the timestamps
 CPU_HZ = 2_000_000
 
