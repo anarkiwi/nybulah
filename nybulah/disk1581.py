@@ -39,11 +39,17 @@ def dry(drive, headers=False):
 
 
 def home(drive, report, max_steps):
-    """Restore within the dry run's steps and max_steps; back to the estimate."""
+    """Restore within the dry run's steps and max_steps, then back to the estimate;
+    ``homed`` and the drive's ``restore`` trace go in the report, also when
+    TrackError is raised."""
     if report["steps"] > max_steps:
         raise ValueError(f"homing needs {report['steps']} steps, over {max_steps}")
-    drive.home(report["steps"])
-    report["homed"] = drive.sense()["t0"]
+    try:
+        drive.home(report["steps"])
+    except TrackError as e:
+        report |= {"homed": False, "restore": e.trace, "error": str(e)}
+        raise
+    report |= {"homed": True, "restore": drive.home_trace}
     drive.seek(min(report["estimate"], MAX_CYL))
     return report
 

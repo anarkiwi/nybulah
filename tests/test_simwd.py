@@ -55,9 +55,9 @@ def untouched(wd):
 
 
 def command(wd, cmd, c0, data=None, poll=16, limit=12 * REV):
-    """Issue cmd at c0, then service."""
+    """Issue cmd at c0, then service from the first valid status read."""
     wd.write(0, cmd, c0)
-    return service(wd, c0, data, poll, limit)
+    return service(wd, c0 + simwd.STATUS_VALID - poll, data, poll, limit)
 
 
 def service(wd, c0, data=None, poll=16, limit=12 * REV):
@@ -91,17 +91,77 @@ def seek(wd, cyl, c=0):
 def test_restore_stops_at_tr00_after_exactly_c_pulses(start):
     wd = drive(None, start)
     wd.write(0, RESTORE, 100)
+    first = 100 + simwd.DIR_SETUP
     for k in range(start):
-        wd.sync(100 + k * T12 - 1)
+        wd.sync(first + k * T12 - 1)
         assert wd.cylinder == start - k and wd.busy
-        wd.sync(100 + k * T12)
+        wd.sync(first + k * T12)
         assert wd.cylinder == start - k - 1
-    wd.sync(100 + start * T12 - 1)
+    wd.sync(first + start * T12 - 1)
     assert wd.busy
-    wd.sync(100 + start * T12)
+    wd.sync(first + start * T12)
     assert not wd.busy and wd.cylinder == 0 == wd.track
     assert wd.pulses == start and untouched(wd)
     assert wd.read(0, 10**7) & (T0 | BUSY | RNF) == T0
+
+
+def test_status_bits_become_valid_after_the_datasheet_delays():
+    wd = drive(None, 3)
+    before = wd.read(0, 0)
+    assert before & (BUSY | T0) == 0
+    wd.write(0, STEP_OUT, 100)
+    assert wd.read(0, 100 + simwd.BUSY_VALID - 1) == before
+    assert wd.read(0, 100 + simwd.BUSY_VALID) == before | BUSY
+    assert wd.read(0, 100 + simwd.STATUS_VALID) & (BUSY | MO) == BUSY | MO
+    assert wd.early == 2 and wd.pulses == 1
+
+
+def naive_restore(wd, first_read, poll=16):
+    """Restore polled from first_read cycles after the command until BUSY reads clear,
+    then a force interrupt; the status that read clear."""
+    wd.write(0, RESTORE, 0)
+    c = first_read
+    while (st := wd.read(0, c)) & BUSY:
+        c += poll
+    wd.write(0, FORCE, c + poll)
+    return st
+
+
+def test_an_immediate_poll_forces_out_a_restore_before_its_first_pulse():
+    wd = drive(None, 3)
+    st = naive_restore(wd, 8)
+    wd.sync(10 * T12)
+    assert wd.pulses == 0 and wd.cylinder == 3 and not st & T0 and wd.early == 1
+    wd = drive(None, 3)
+    st = naive_restore(wd, simwd.STATUS_VALID)
+    assert wd.pulses == 3 and wd.cylinder == 0 and st & T0 and wd.early == 0
+    assert untouched(wd)
+
+
+def test_idle_force_interrupt_hides_tr00_behind_busy_as_on_hardware():
+    """The 1581 sequence of artifacts/hw11 (bounded Restore of 39, then the check after
+    settling): $A1, $A5, $A4, then $81 with the head on TR00, $80 once idle (dry2),
+    and T0 again only from a type I command: a Seek to the track register's value,
+    which issues no pulse."""
+    hold = 2 * simwd.STATUS_VALID
+    wd = drive(None, 39, force_busy=hold)
+    wd.write(0, RESTORE, 0)
+    assert wd.read(0, simwd.STATUS_VALID) == MO | SU | BUSY
+    deadline = (2 * 39 - 1) * T12 // 2
+    assert wd.read(0, deadline - 1) == MO | SU | T0 | BUSY
+    wd.write(0, FORCE, deadline)
+    assert wd.read(0, deadline + simwd.STATUS_VALID) == MO | SU | T0
+    assert wd.pulses == 39 and wd.track == 0xFF - 39 and wd.cylinder == 0
+    settle = deadline + 18 * 2000
+    wd.write(0, FORCE, settle)
+    wd.write(0, RESTORE, settle + simwd.FORCE_GAP)
+    assert wd.read(0, settle + simwd.FORCE_GAP + simwd.STATUS_VALID) == MO | BUSY
+    assert wd.read(0, settle + hold - 1) == MO | BUSY
+    assert wd.read(0, settle + hold) == MO and wd.cylinder == 0
+    c = settle + hold + simwd.FORCE_GAP
+    wd.write(3, wd.track, c)
+    _, _, _, st = command(wd, SEEK, c + simwd.FORCE_GAP)
+    assert st == MO | SU | T0 and wd.pulses == 39 and wd.early == 0
 
 
 @pytest.mark.parametrize("steps, bumps", [(1, 0), (40, 0), (41, 0), (43, 2)])
@@ -140,7 +200,7 @@ def test_step_rates_by_chip():
     for chip, rate, cycles in ((1772, 2, 4000), (1770, 2, 40_000), (1770, 1, T12)):
         wd = drive(None, 0, chip=chip)
         _, _, end, _ = command(wd, 0x48 | rate, 0, poll=1)
-        assert end == cycles
+        assert end == simwd.DIR_SETUP + cycles
 
 
 def test_seek_with_verify(media):
@@ -368,10 +428,10 @@ def test_force_interrupt(media):
     st = wd.read(0, REV // 2 + 1)
     assert st & BUSY
     wd.write(0, FORCE, REV // 2 + 2)
-    kept = wd.read(0, REV // 2 + 40)
+    kept = wd.read(0, REV // 2 + 2 + simwd.STATUS_VALID)
     assert not kept & BUSY and kept & ~MO == st & ~(MO | BUSY)
     wd.write(0, FORCE, REV)
-    assert wd.read(0, REV + 100) & (T0 | IP | BUSY) == T0 | IP
+    assert wd.read(0, REV + 100) & (T0 | IP | BUSY) == IP
     assert not wd.read(0, REV + 9000) & IP
     wd.write(0, FORCE, REV + 9010)
     wd.write(0, READ_SECTOR, REV + 9020)
@@ -386,10 +446,10 @@ def test_spin_up_sequence_and_motor_timeout(media):
     _, _, end, st = command(wd, 0x00, 1000)
     assert st & (MO | SU) == MO | SU and 5 * REV < end < 6 * REV + 64
     _, _, end2, _ = command(wd, 0x00, end)
-    assert end2 - end < 64
+    assert end2 - end == simwd.STATUS_VALID
     assert wd.read(0, end2 + 10 * REV) & (MO | SU) == 0
     _, _, end3, st = command(wd, 0x04 | 0x08, end2 + 10 * REV)
-    assert end3 - end2 > 10 * REV + simwd.SETTLE and not st & (MO | RNF)
+    assert end3 - end2 > 10 * REV + simwd.SETTLE and st & (MO | RNF) == MO
     _, _, end4, _ = command(wd, READ_ADDRESS | 0x04, end3)
     assert end4 - end3 >= simwd.SETTLE
 

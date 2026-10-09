@@ -37,7 +37,7 @@ FIELDS = {
     "buf": 6,
     "len": 8,
 }
-PB_AT, T0_AT, T1_AT, ID_AT, P_SIZE = 10, 11, 14, 17, 23
+PB_AT, T0_AT, T1_AT, ID_AT, RS_AT = 10, 11, 14, 17, 23
 LIST_TMO = 4 * ms.LIST_ENTRIES  # drive/mfmstream.s: TMO after the list
 BUFFER, BUFFER_END = 0x0C00, 0x2000  # the DOS track cache (equate.src buffcache)
 MAX_CYL = 80  # drive/mfm.inc: DOS pmaxtrk 79, cylinder 80 used by Wheels
@@ -49,7 +49,7 @@ NOMINAL_US = 200_000  # 300 rpm
 BYTE_US = 32  # 250 kbit/s MFM
 TRACK_BYTES = mfm.TRACK_BYTES
 RNF_REVS = 5  # datasheet: Read Sector / Read Address give up after 5 revolutions
-ST_T0, ST_IP, ST_WP, ST_MO = 0x04, 0x02, 0x40, 0x80
+ST_BUSY, ST_T0, ST_IP, ST_WP, ST_MO = 0x01, 0x04, 0x02, 0x40, 0x80
 ST_FAIL = 0xFF
 PA_SIDE, PA_RDY, PA_MOTOR, PA_LED, PA_CHANGE = 0x01, 0x02, 0x04, 0x40, 0x80
 PB_WPRT = 0x40
@@ -60,7 +60,34 @@ STATUS = {"t0": ST_T0, "index": ST_IP, "wprot": ST_WP, "motor": ST_MO}
 
 
 class TrackError(IOError):
-    """The drive refused or could not complete a 1581 operation."""
+    """The drive refused or could not complete a 1581 operation; ``trace`` holds what
+    the drive saw, when it reported it."""
+
+    def __init__(self, message, trace=None):
+        super().__init__(message)
+        self.trace = trace
+
+
+def restore_trace(steps, result, elapsed_us, rs):
+    """The drive's account of a bounded Restore (drive/mfm.s P_RS): statuses, whether
+    BUSY was up at the first valid read, what ended the wait and the step pulses
+    issued (from the track register when the deadline stopped the WD, else the
+    elapsed step periods)."""
+    trace = {"steps": steps, "result": result}
+    if not steps:
+        return trace
+    first, last, forced, track = rs
+    deadline = bool(last & ST_BUSY)
+    return trace | {
+        "first_status": first,
+        "busy_seen": bool(first & ST_BUSY),
+        "end": "deadline" if deadline else "busy_fell",
+        "last_status": last,
+        "forced_status": forced,
+        "track_register": track,
+        "elapsed_us": elapsed_us,
+        "pulses": 0xFF - track if deadline else round(elapsed_us / STEP_US),
+    }
 
 
 def _bits(value, names):
@@ -91,7 +118,7 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
             raise ValueError(f"device {mon.dev} is a {mon.model}, not a 1581")
         self.mon, self.sleep = mon, sleep or time.sleep
         self.settle_s, self.spinup_s = settle_s, spinup_s
-        self.cylinder = self.entry = None
+        self.cylinder = self.entry = self.home_trace = None
         self.period_us = NOMINAL_US
         self.cache_used = False
         self.select = 0
@@ -218,18 +245,28 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
 
     def home(self, steps):
         """Restore with at most ``steps`` step pulses (the estimate, where ``close``
-        returns the head unless ``estimate`` ran); TR00 must be sensed or TrackError is
-        raised with the head where the pulses left it."""
+        returns the head unless ``estimate`` ran); TR00 must be sensed at the end and
+        again after the settling time, or TrackError (with ``home_trace``) is raised
+        with the head where the pulses left it."""
         if not 0 <= steps <= MAX_CYL:
             raise TrackError(f"homing needs 0..{MAX_CYL} steps, not {steps}")
         if self.entry is None:
             self.entry = steps
+        self.cylinder = None
         a, _, _ = self._call("restore", arg=steps)
+        trace = self.home_trace = restore_trace(
+            steps, a, self._stamp(T1_AT), self._result(RS_AT, 4)
+        )
         if a:
-            self.cylinder = None
-            raise TrackError(f"TR00 not sensed within {steps} steps (status ${a:02X})")
-        self.cylinder = 0
+            raise TrackError(
+                f"TR00 not sensed within {steps} steps (status ${a:02X})", trace
+            )
         self.sleep(self.settle_s)
+        settled = self.sense()
+        trace["settled_status"], trace["settled_t0"] = settled["status"], settled["t0"]
+        if not trace["settled_t0"]:
+            raise TrackError("TR00 sensed by the Restore but not after settling", trace)
+        self.cylinder = 0
 
     def seek(self, cylinder):
         """Seek from the homed track register; settles."""

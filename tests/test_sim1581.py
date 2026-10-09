@@ -299,6 +299,7 @@ def test_fsdir_puts_cnt_and_sp_on_srq_and_data(fsdir):
     assert seen == want
 
 
+# Each command waits out the status delays (simwd STATUS_VALID) before its first read.
 SECTOR = asm(
     0x300,
     "lda $4000",
@@ -306,6 +307,10 @@ SECTOR = asm(
     "sta $4000",
     "lda #$09",
     "sta $6000",
+    f"ldx #{simwd.STATUS_VALID // 5}",
+    "d1:",
+    "dex",
+    "bne d1",
     "busy:",
     "lda $6000",
     "lsr a",
@@ -314,6 +319,10 @@ SECTOR = asm(
     "sta $6003",
     "lda #$19",
     "sta $6000",
+    f"ldx #{simwd.STATUS_VALID // 5}",
+    "d2:",
+    "dex",
+    "bne d2",
     "seek:",
     "lda $6000",
     "lsr a",
@@ -327,6 +336,10 @@ SECTOR = asm(
     "ldy #$00",
     "lda #$88",
     "sta $6000",
+    f"ldx #{simwd.STATUS_VALID // 5}",
+    "d3:",
+    "dex",
+    "bne d3",
     "poll:",
     "lda $6000",
     "lsr a",

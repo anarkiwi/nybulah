@@ -93,11 +93,15 @@ def execute(args, cbm):
     """Probe and print the report as JSON."""
     model = identify_model(cbm, args.dev)
     if model == "1581":
-        with r1581.session(cbm, args.dev, args.transport) as drive:
-            report = disk1581.dry(drive, args.headers)
-            if args.step:
-                disk1581.home(drive, report, args.max_steps)
-        print(json.dumps(report))
+        report = {}
+        try:
+            with r1581.session(cbm, args.dev, args.transport) as drive:
+                report = disk1581.dry(drive, args.headers)
+                if args.step:
+                    disk1581.home(drive, report, args.max_steps)
+        finally:
+            if report:
+                print(json.dumps(report))
         return report
     if model != "1571":
         raise ValueError(f"device {args.dev} is a {model}: the probe needs a 1571/1581")
