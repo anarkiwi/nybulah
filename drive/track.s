@@ -1,13 +1,15 @@
 ; Raw track capture and write for the 1541 and 1571, called through the
 ; monitor's J command. Assembled per model (-D MODEL=1541 or 1571), which
-; fixes the expansion RAM buffer (BUFPG, NPAGES pages) and the sync table
-; page (TABPG); linked at the base given to ld65 -S. The host fills the
-; parameter block, calls an entry point and reads results back from the
-; block. Every entry returns the status byte in A.
+; fixes the expansion RAM buffer (BUFPG, NPAGES pages); CODE is linked at
+; the base given to ld65 -S and padded to $200 bytes, followed in the same
+; file by the PASS segment for the expansion RAM page after the buffer.
+; The host fills the parameter block, calls an entry point
+; and reads results back from the block. Every entry returns the status byte
+; in A.
 ;
 ;   base+0  prep   motor/LED/density bits, 1571 side, step, settle
-;   base+3  read   capture npages pages into the buffer
-;   base+6  write  write npages pages from the buffer, then read mode
+;   base+3  read   one capture pass of npages pages into the buffer
+;   PASS    write  write npages pages from the buffer, then read mode
 ;
 ; Parameters and state live in zero page at ZP (the host saves and restores
 ; that range around a session). The host also saves PCR (and on the 1571
@@ -21,38 +23,56 @@
 ; since BIT overwrites V.
 ;
 ; VIA1 timer 2 counts down in one-shot mode (ACR bit 5 clear, set up by the
-; host) and keeps counting after it expires; timestamps are T2 values,
-; 16-bit ones read low byte then high byte 4 cycles later. VIA1 timer 1 is the monitor's watchdog and is not touched.
+; host) and keeps counting after it expires. VIA1 timer 1 is the monitor's
+; watchdog and is not touched.
 ; 1571: VIA1 PA2 side, PA5 2 MHz; WD1770 status at $2000, bit 1 index once
 ; Force Interrupt $D0 has been written to the command register.
 ;
-; Sync table at TABPG, TAB_N entries per array, arrays TAB_STRIDE apart:
-;   TSL       T2 low byte when SYNC was seen asserted
-; Column TAB_N is a spare written once the table is full (lost counts the
-; syncs it absorbed); CNT of entry TAB_N-1 is then unreliable.
-;   PL, PH    bytes stored before the sync: low byte, pages left
-;   TEL       T2 low byte when SYNC was seen released
-;   CNT       Y after the release wait; (CNT - PL) mod 256 counts
-;             SYNC_LOOP-cycle iterations
+; Read passes (kind):
+;   0 BITS  the byte stored per byte ready
+;   1 TB    T2 low byte stored per byte ready
+;   2 TS    per SYNC: TC, TH = bytes counted before it, TD = X after the
+;           release wait; a wait that wraps X stores an entry with TD = 0
+;           and the same count, so a sync spans its run of entries
+; Start modes: 0 now, 1 from within a sync (the pass's first byte follows
+; it), 2 at the second of two index edges (1571), 3 after alen bytes equal
+; to anchor (TB and TS). The anchor matcher resets
+; to its first byte on a mismatch without re-testing the mismatched byte;
+; the host chooses anchors that this finds.
 ;
-; Read loop, cycles at 1 MHz:
-;   poll  bvs byte     2 / 3      byte  clv          2
-;         lda VIA2PB   4                lda VIA2PA   4   latch read
-;         bmi poll     3 / 2      st    sta abs,y    5
-;                                       iny          2
-;                                       bne poll     3 / 2
-;                                       inc st+2     6   page change
-;                                       dex          2
-;                                       bne poll     3
-; Poll period 9. Byte k ready just after a bvs: its latch is read 18 cycles
-; later, poll resumes after 27 (37 with a page change) and byte k+1 is read
-; by 46. Zone 3 at 300 rpm leaves 26 cycles per byte, 52 for two.
+; Every wait is bounded: an inner counter in X (or Y) and the outer tmo,
+; 256 x 256 iterations of at least 9 cycles (over 3 revolutions) of
+; cumulative waiting per call, then a timeout status.
 ;
-; Sync handler, from the PB7 read that saw SYNC: T2 read 11 cycles later.
-; The release wait reads PB7 at gaps of 6 and 11 cycles. From the PB7 read
-; that saw the release, T2 is read 7 cycles later and the byte loop's latch
-; read follows within 30 cycles of that PB7 read when the first byte after
-; the sync is already waiting.
+; Cycle tables (1 MHz). s is the cycle a branch samples V; a byte latched at
+; L is seen by the first sample at or after L.
+;
+; Byte-ready waits (BITS, write, anchor): VWAIT, samples 4 and 5 cycles
+; apart, 7 once per 256 iterations. BITS from a sample that sees V: data
+; read at s+8, next wait at s+19, s+32 after a page change. A byte detected
+; u cycles late leaves u' <= max(7, 7 + 32 - T) for the next, so nothing is
+; lost while 7 + 32 + 8 < 2T: T > 23.5, 8 cells at zone 3 above 331 rpm.
+; Anchor matcher: next wait at s+23 (match or mismatch), < T. From the
+; sample that sees the last anchor byte, TB's wait starts after 41 cycles
+; and TS's poll after 41, inside the two byte periods that would merge V.
+;
+; TB: TB_CHAIN samples 2 apart, then ldx #0 and a loop sampling at 0, 4, 8
+; (bvc) of every 11 cycles; X reaching 0 takes the out path, sampling at 9
+; and 16 and resuming the loop at 21. T2 is read 5 cycles after a bvs
+; sample, 4 after the bvc one. The next wait starts 14 cycles after the T2
+; read (27 after a page change). A byte detected in the chain is followed
+; by a wait that starts before the next byte while T > 21. The host rebuilds
+; each byte's sample window from these numbers (nybulah.passes).
+;
+; TS: poll V and PB7 every 13 cycles (an iteration that counts a byte skips
+; the PB7 read). SYNC seen low: the release wait reads PB7 every 11 cycles
+; from 7 cycles after the handler starts; after the release is seen the poll
+; resumes within 32 cycles. A short SYNC was still low at the read that saw
+; it, so the release follows that read and the two bytes after it are
+; counted separately while 11 + 32 + 3 < 16 cells. PB7 reads in the poll
+; are at most 46 cycles apart (a page of counted bytes after the rare
+; timeout check); release-wait reads come 11 + 11i + 34 * (i / 256) cycles
+; after the read that saw SYNC.
 
         .setcpu "6502"
 
@@ -64,7 +84,10 @@ BUFPG    = $60
         .error "MODEL must be 1541 or 1571"
 .endif
 NPAGES   = 31
-TABPG    = BUFPG + NPAGES
+PASSPG   = BUFPG + NPAGES       ; the PASS segment: one page after the buffer
+TC       = BUFPG * 256
+TH       = TC + 256
+TD       = TC + 512
 
 T2CL     = $1808
 T2CH     = $1809
@@ -87,23 +110,18 @@ PCR_WRITE_SOE = $CE             ; CB2 low (write), CA2 high (SOE)
 WD_FORCE_INT = $D0
 WD_INDEX = $02
 
-ST_NOSYNC = $01                 ; no matching sync before the start timeout
-ST_NOINDEX = $02                ; no index pulse, or a 1541
-ST_KILLER = $04                 ; a sync outlasted the release timeout
-ST_WPROT  = $08                 ; write protected, nothing written
+ST_NOSYNC   = $01               ; no matching sync before the start timeout
+ST_NOINDEX  = $02               ; no index pulse, or a 1541
+ST_KILLER   = $04               ; a sync outlasted the wait budget, or held
+ST_WPROT    = $08               ; write protected, nothing written
+ST_TIMEOUT  = $10               ; byte ready stopped
+ST_NOANCHOR = $20               ; the anchor never passed
+ST_FULL     = $40               ; TS table full
 
-TAB_N = 50
-TAB_STRIDE = 51
-TSL = TABPG * 256
-PL  = TSL + TAB_STRIDE
-PH  = PL + TAB_STRIDE
-TEL = PH + TAB_STRIDE
-CNT = TEL + TAB_STRIDE
-.assert 5 * TAB_STRIDE <= 256, error, "sync table exceeds a page"
-
-SYNC_LOOP = 17                  ; cycles per release-wait iteration
-SYNC_TMO  = 64                  ; x 256 x SYNC_LOOP cycles: over 1 rev
-WAIT_TMO  = 160                 ; x 256 x 11 cycles: 2 rev
+TB_CHAIN  = 12
+MATCH_TMO = 80
+WEND_TMO = 8                    ; x 7 cycles: over a byte period at zone 0                  ; x 256 mismatched bytes and waits: over 2 rev
+ANCHOR_MAX = 8
 INDEX_TMO = 120                 ; x 256 x 16 cycles: over 2 rev, per edge
 WD_SETTLE = 8                   ; x 5 cycles before trusting WD1770 status
 
@@ -113,77 +131,89 @@ side    = ZP + 1                ; VIA1 PA2 value (1571)
 steps   = ZP + 2                ; signed halftracks to step
 stepms  = ZP + 3
 settle  = ZP + 4
-mode    = ZP + 5                ; 0 now, 1 after a sync, 2 at index (1571)
+mode    = ZP + 5
 npages  = ZP + 6
-marker  = ZP + 7                ; mode 1: first byte after the sync,
-mmask   = ZP + 8                ; compared under this mask
-status  = ZP + 9
-nsync   = ZP + 10
-lost    = ZP + 11               ; syncs not recorded, table full
-endpg   = ZP + 12               ; pages left when a read ended
-endy    = ZP + 13
-tfirst  = ZP + 14               ; T2 lo, hi when read was entered
-tlast   = ZP + 16               ; T2 lo, hi at the end of a read
-idx1    = ZP + 18               ; T2 lo, hi at two index edges (mode 2)
-idx2    = ZP + 20
-zpage   = ZP + 22
-zidx    = ZP + 23
-zc      = ZP + 24
-ztmo    = ZP + 25
-tmp     = ZP + 26
-ZP_SIZE = 27
+kind    = ZP + 7
+alen    = ZP + 8
+anchor  = ZP + 9                ; ANCHOR_MAX bytes
+status  = ZP + 17
+endpg   = ZP + 18               ; pages left when a pass ended
+endy    = ZP + 19               ; Y then: bytes into the page, or TS entries
+tfirst  = ZP + 20               ; T2 lo, hi when read was entered
+tlast   = ZP + 22               ; T2 lo, hi at the end of a pass
+idx1    = ZP + 24               ; T2 lo, hi at two index edges (mode 2)
+idx2    = ZP + 26
+cntl    = ZP + 28               ; TS byte count
+cnth    = ZP + 29
+npg     = ZP + 30
+tmo     = ZP + 31
+tmp     = ZP + 32
+ZP_SIZE = 33
+.assert anchor + ANCHOR_MAX = status, error, "anchor overlaps results"
+
+; A branch whose cycle count is part of a timing table: no page crossing.
+.macro BR op, target
+        op target
+        .assert >* = >(target), error, "timed branch crosses a page"
+.endmacro
+
+; Wait for byte ready (V) with the bounded counter in reg (x or y).
+.macro VWAIT ok, fail, reg
+        .local w
+w:      BR bvs, ok
+.if .xmatch(reg, x)
+        dex
+.else
+        dey
+.endif
+        BR bvs, ok
+        BR bne, w
+        BR bvs, ok
+        dec tmo
+        BR bvs, ok
+        BR bne, w
+        jmp fail
+.endmacro
 
         .segment "CODE"
 
         jmp prep
         jmp read
 
-write:  lda #ST_WPROT
-        sta status
-        lda VIA2PB
-        and #PB_WE
-        beq wret
-        lda #BUFPG
-        sta ld + 2
-        lda #ST_NOINDEX
-        sta status
+; Start mode 3: wait for the anchor, abandoning the pass if it never comes.
+anchor3:
         lda mode
-        cmp #2
-        bne wgo
-.if MODEL = 1571
-        jsr index
-        bcc wgo
-.endif
-wret:   lda status
+        cmp #3
+        bne mdone
+        lda #MATCH_TMO
+        sta tmo
+        jsr match
+        bcc mdone
+        pla
+        pla
+        jmp noanchor
+
+; Consume bytes until the last alen of them equal anchor; C set on timeout.
+; X and Y clobbered.
+match:  ldx #0
+mw:     VWAIT mg, mfail, y
+mg:     clv
+        lda VIA2PA
+        cmp anchor,x
+        BR bne, mx
+        inx
+        cpx alen
+        BR bne, mw
+        clc
+mdone:  rts
+mx:     ldx #0
+        dey
+        BR bne, mw
+        dec tmo
+        BR bne, mw
+mfail:  sec
         rts
-wgo:    lda #0
-        sta status
-        ldx npages
-        ldy #0
-        lda PCR2
-        and #PCR_WRITE_MASK
-        ora #PCR_WRITE_SOE
-        sta PCR2
-        lda #$FF
-        sta VIA2DDRA
-        clv
-wl:     bvc wl
-        clv
-ld:     lda $FF00,y
-        sta VIA2PA
-        iny
-        bne wl
-        inc ld + 2
-        dex
-        bne wl
-:       bvc :-                  ; last byte loaded into the shift register
-        clv
-:       bvc :-                  ; last byte shifted out
-        lda PCR2
-        ora #PCR_READ_SOE
-        sta PCR2
-        lda #0
-        sta VIA2DDRA
+
 soeoff: lda PCR2
         and #PCR_SOE_MASK
         ora #PCR_SOE_OFF
@@ -231,17 +261,29 @@ stp:    txa
 :       lda status
         rts
 
-; Wait A milliseconds, 1000 cycles each at 1 MHz.
-delay:  tay
-        beq dd
-d1:     ldx #198
-d2:     dex
-        bne d2
-        nop
-        nop
-        dey
-        bne d1
-dd:     rts
+; Wait until SYNC (PB7) equals bit 7 of A; C set on timeout.
+pb7:    sta tmp
+:       lda VIA2PB
+        eor tmp
+        bpl vok
+        dex
+        bne :-
+        dec tmo
+        bne :-
+        sec
+        rts
+
+; Wait for byte ready, as VWAIT; C set on timeout.
+vwait:  bvs vok
+        dex
+        bvs vok
+        bne vwait
+        dec tmo
+        bne vwait
+        sec
+        rts
+vok:    clc
+        rts
 
 .if MODEL = 1571
 ; Leading edge of the index pulse; C set on timeout. Preserves X.
@@ -253,14 +295,14 @@ index:  lda #WD_FORCE_INT
         tya
 ip:     sta tmp
         lda #INDEX_TMO
-        sta ztmo
+        sta tmo
 iw:     lda WD
         and #WD_INDEX
         cmp tmp
         beq ig
         dey
         bne iw
-        dec ztmo
+        dec tmo
         bne iw
         sec
         rts
@@ -270,13 +312,36 @@ ig:     eor #WD_INDEX
         rts
 .endif
 
+noanchor:
+        lda #ST_NOANCHOR
+        bne fail
+timeout:
+        lda #ST_KILLER          ; byte ready stopped: SYNC held, or not
+        bit VIA2PB
+        bpl fail
+        lda #ST_TIMEOUT
+fail:   ora status
+        sta status
+finish: sty endy
+        lda npg
+        sta endpg
+        lda T2CL
+        ldx T2CH
+        sta tlast
+        stx tlast + 1
+        jmp soeoff
+
 read:   lda #0
         sta status
-        sta lost
-        sta zidx
-        sta zc
+        sta cntl
+        sta cnth
+        sta tmo
+        tay
         lda #BUFPG
-        sta st + 2
+        sta bst + 2
+        sta tst + 2
+        lda npages
+        sta npg
         lda PCR2
         ora #PCR_READ_SOE
         sta PCR2
@@ -285,32 +350,18 @@ read:   lda #0
         sta tfirst
         stx tfirst + 1
         lda mode
-        beq go0
-        cmp #1
-        bne idxm
-        lda #WAIT_TMO
-        sta ztmo
-ws:     lda VIA2PB
-        bpl wsend
-        dey
-        bne ws
-        dec ztmo
-        bne ws
+        bne :+
+        clv                     ; V only from bytes after this, all read
+        beq go
+:       cmp #2
+        beq idxm
+        bcs go
+ws:     lda #0
+        jsr pb7
         lda #ST_NOSYNC
-        bne rdst
-wsend:  lda VIA2PB
-        bpl wsend
+        bcs fail
         clv
-:       bvc :-
-        clv
-        lda VIA2PA
-        sta BUFPG * 256
-        eor marker
-        and mmask
-        bne ws
-        ldy #1
-        ldx npages
-        bne poll
+        bcc go
 idxm:
 .if MODEL = 1571
         ldx #0
@@ -324,76 +375,177 @@ idxm:
         inx
         cpx #4
         bne :-
-        beq go0
-noidx:
+        ldy #0
+        clv
+        beq go
+noidx:  ldy #0
 .endif
         lda #ST_NOINDEX
-rdst:   sta status
-go0:    clv
-        ldy #0
-        ldx npages
-
-poll:   bvs byte
-        lda VIA2PB
-        bmi poll
-sync:   bvs byte
-        stx zpage
-        lda T2CL
-        ldx zidx
-        cpx #TAB_N
-        bcc :+
-        inc lost                ; full: record into the spare column
-        dec zidx
-:       sta TSL,x
-        lda zc
-        sta CNT - 1,x
-        tya
-        sta PL,x
-        lda zpage
-        sta PH,x
-        inc zidx
-        lda #SYNC_TMO
-        sta ztmo
-sw:     lda VIA2PB
-        bmi send
-        lda VIA2PB
-        bmi send
-        iny
-        bne sw
-        dec ztmo
-        bne sw
-        lda T2CL
-        sta TEL,x
-        sty zc
-        ldy PL,x
-        ldx zpage
-        lda #ST_KILLER
-        ora status
         sta status
-        bne finish
-send:   lda T2CL
-        sta TEL,x
-        sty zc
-        ldy PL,x
-        ldx zpage
-wF:     bvc wF
-byte:   clv
-        lda VIA2PA
-st:     sta $FF00,y
-        iny
-        bne poll
-        inc st + 2
-        dex
-        bne poll
+go:     lda kind
+        bne :+
+        jmp bw
+:       lsr
+        bcc :+
+        jmp tb
+:       jmp ts
 
-finish: stx endpg
-        sty endy
-        lda T2CL
-        ldx T2CH
-        sta tlast
-        stx tlast + 1
-        ldx zidx
-        stx nsync
-        lda zc
-        sta CNT - 1,x
+; TS last in CODE so its timed branches stay in one page.
+ts:     jsr anchor3
+        ldy #0
+tspoll:    BR bvs, tsbyte
+        lda VIA2PB
+        BR bpl, tsync
+        dex
+        BR bne, tspoll
+        dec tmo
+        BR bne, tspoll
+        jmp timeout
+tsbyte:    clv
+        inc cntl
+        BR bne, tspoll
+        inc cnth
+        lda cnth
+        cmp npages
+        BR bne, tspoll
+        jmp finish
+tsync:    BR bvs, tsbyte
+        ldx #0
+tswait:    lda VIA2PB
+        BR bmi, tsrel
+        dex
+        BR bne, tswait
+        lda cntl
+        sta TC,y
+        lda cnth
+        sta TH,y
+        txa
+        sta TD,y
+        iny
+        beq full
+        dec tmo
+        bne tswait
+        lda #ST_KILLER
+        jmp fail
+tsrel:  txa
+        sta TD,y
+        lda cntl
+        sta TC,y
+        lda cnth
+        sta TH,y
+        iny
+        BR bne, tspoll
+full:   lda #ST_FULL
+        jmp fail
+
+        .segment "PASS"
+write:  lda #ST_WPROT
+        sta status
+        lda VIA2PB
+        and #PB_WE
+        beq wret
+        lda #BUFPG
+        sta ld + 2
+        lda npages
+        sta npg
+        lda #ST_NOINDEX
+        sta status
+        lda mode
+        cmp #2
+        bne wgo
+.if MODEL = 1571
+        jsr index
+        bcc wgo
+.endif
+wret:   lda status
+        rts
+wgo:    lda #0
+        sta status
+        sta tmo
+        tay
+        lda PCR2
+        and #PCR_WRITE_MASK
+        ora #PCR_WRITE_SOE
+        sta PCR2
+        lda #$FF
+        sta VIA2DDRA
+        clv
+wl:     VWAIT wg, wto, x
+wg:     clv
+ld:     lda $FF00,y
+        sta VIA2PA
+        iny
+        BR bne, wl
+        inc ld + 2
+        dec npg
+        BR bne, wl
+        ldy #2                  ; last byte loaded, then shifted out
+wfin:   ldx #WEND_TMO
+:       BR bvs, wnext
+        dex
+        BR bne, :-
+        beq wto
+wnext:  dey
+        BR beq, wend
+        clv
+        BR bne, wfin
+wto:    lda #ST_TIMEOUT
+        sta status
+wend:   lda PCR2
+        ora #PCR_READ_SOE
+        sta PCR2
+        lda #0
+        sta VIA2DDRA
         jmp soeoff
+
+; Wait A milliseconds, 1000 cycles each at 1 MHz.
+delay:  tay
+        beq dd
+d1:     ldx #198
+d2:     dex
+        bne d2
+        nop
+        nop
+        dey
+        bne d1
+dd:     rts
+
+
+bw:     VWAIT bg, timeout, x
+bg:     clv
+        lda VIA2PA
+bst:    sta $FF00,y
+        iny
+        BR bne, bw
+        inc bst + 2
+        dec npg
+        BR bne, bw
+        jmp finish
+
+tb:     jsr anchor3
+        ldy #0
+tw:
+.repeat TB_CHAIN
+        BR bvs, tg
+.endrepeat
+        ldx #0
+tl:     BR bvs, tg
+        dex
+        BR bvs, tg
+        BR beq, tov
+        BR bvc, tl
+tg:     clv
+        lda T2CL
+tst:    sta $FF00,y
+        iny
+        BR bne, tw
+        inc tst + 2
+        dec npg
+        BR bne, tw
+        jmp finish
+tov:    BR bvs, tg
+        dec tmo
+        BR bvs, tg
+        BR bne, tl
+        jmp timeout
+

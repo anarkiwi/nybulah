@@ -10,7 +10,7 @@ import math
 import numpy as np
 
 from .analysis.gcr import NOMINAL_RPM, bit_rate, bits_per_revolution, speed_zone
-from .analysis.gcr import to_bits
+from .analysis.gcr import encode_bits, to_bits
 from .sim import IO_ACCESS_CYCLE, Drive1541, Drive1571
 
 CPU_HZ = 1_000_000
@@ -19,6 +19,8 @@ PHASE_OFFSET = 2
 DOS_TRACK = 0x22
 SYNC_ONES = 10
 INDEX_FRACTION = 0.02
+WANDER_NEWTON = 4
+CELL_EPS = 1e-6
 V_FLAG = 0x40
 PB_PHASE, PB_MOTOR, PB_WE, PB_SYNC = 0x03, 0x04, 0x10, 0x80
 PB_INPUTS = PB_WE | PB_SYNC
@@ -32,12 +34,31 @@ class Media:
     """Disk surface: circular 0/1 cell arrays keyed by (side, halftrack).
 
     Halftracks never written read as fixed random noise, one revolution long.
+    The spindle turns at ``rpm`` plus ``wander`` = (amplitude rpm, period s)
+    of sinusoidal speed variation.
     """
 
-    def __init__(self, tracks=None, rpm=NOMINAL_RPM, seed=0):
+    def __init__(self, tracks=None, rpm=NOMINAL_RPM, seed=0, wander=(0.0, 1.0)):
         self.tracks = {k: np.asarray(v, np.uint8) for k, v in (tracks or {}).items()}
         self.rpm = rpm
+        self.wander = wander
         self.rng = np.random.default_rng(seed)
+
+    def turns(self, now):
+        """Revolutions since cycle 0."""
+        amp, period = self.wander
+        w = 2 * math.pi / (period * CPU_HZ)
+        return (self.rpm * now + amp * (1 - math.cos(w * now)) / w) / (60.0 * CPU_HZ)
+
+    def time_at(self, turns):
+        """Cycle at which the spindle has made ``turns`` revolutions."""
+        amp, period = self.wander
+        w = 2 * math.pi / (period * CPU_HZ)
+        t = turns * 60.0 * CPU_HZ / self.rpm
+        for _ in range(WANDER_NEWTON if amp else 0):
+            rate = (self.rpm + amp * math.sin(w * t)) / (60.0 * CPU_HZ)
+            t -= (self.turns(t) - turns) / rate
+        return t
 
     @classmethod
     def from_g64(cls, image, side=0, **kw):
@@ -84,7 +105,7 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         self.latch = 0
         self.due = 0
         self._key = self._cells = self._k = self._sync_start = None
-        self._cpc = 1.0
+        self._n = 1
         self._ones = self._count = self._shreg = self._pending = 0
         self._ca1 = self._written = self._armed = False
 
@@ -115,13 +136,19 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
 
     def angle(self, now):
         """Revolutions since cycle 0."""
-        return now * self.media.rpm / (60.0 * CPU_HZ)
+        return self.media.turns(now)
+
+    def _cell(self, now):
+        return math.floor(self.media.turns(now) * self._n + CELL_EPS)
+
+    def _time(self, cell):
+        return self.media.time_at(cell / self._n)
 
     def _retrack(self, now):
         self._key = (self.side, self.halftrack)
         self._cells = self.media.cells(*self._key)
-        self._cpc = 60.0 * CPU_HZ / (self.media.rpm * len(self._cells))
-        self._k = int(now // self._cpc)
+        self._n = len(self._cells)
+        self._k = self._cell(now)
 
     def _resample(self, now):
         """Rescale the current track to the write density's cell count."""
@@ -139,19 +166,20 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
             return
         if self._k is None or self._key != (self.side, self.halftrack):
             self._retrack(now)
-        end = int(now // self._cpc)
+        end = self._cell(now)
         cell = self._write_cell if self.writing else self._read_cell
         for j in range(self._k, end):
             cell(j)
         self._k = max(end, self._k)
-        self.due = math.ceil((self._k + 8 - self._count) * self._cpc)
+        due = self._time(self._k + 8 - self._count)
+        self.due = math.ceil(due) if math.isfinite(due) else math.inf
 
     def _event(self, j):
         self._ca1 = True
         if self.pcr & PCR_SOE == PCR_SOE:
             self.drive.mpu.p |= V_FLAG
         if self.log is not None:
-            self.log.append(("byte", (j + 1) * self._cpc, self.latch))
+            self.log.append(("byte", self._time(j + 1), self.latch))
 
     def _read_cell(self, j):
         b = int(self._cells[j % len(self._cells)])
@@ -161,11 +189,11 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
             if self._ones >= SYNC_ONES:
                 self._count = 0
                 if self._sync_start is None:
-                    self._sync_start = (j + 1) * self._cpc
+                    self._sync_start = self._time(j + 1)
                 return
         else:
             if self._sync_start is not None and self.log is not None:
-                end = (j + 1) * self._cpc
+                end = self._time(j + 1)
                 self.log.append(("sync", self._sync_start, end, self._ones))
             self._sync_start = None
             self._ones = 0
@@ -256,6 +284,48 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
             self.halftrack = ht
 
 
+def log_bytes(log):
+    """``(bytes, times)`` of the byte-ready events in a mechanism log."""
+    events = [e for e in log if e[0] == "byte"]
+    return bytes(e[2] for e in events), np.array([e[1] for e in events])
+
+
+def true_syncs(log, data):
+    """``(positions, runs)`` of the logged syncs inside a capture of ``data``.
+
+    The capture must be one contiguous run of the logged bytes.
+    """
+    stream, times = log_bytes(log)
+    first = stream.find(bytes(data))
+    if first < 0:
+        raise ValueError("capture is not a contiguous run of latched bytes")
+    syncs = [e for e in log if e[0] == "sync"]
+    pos = np.searchsorted(times, [e[2] for e in syncs]) - first
+    runs = np.array([e[3] for e in syncs], np.int64)
+    keep = (pos > 0) & (pos < len(data))
+    return pos[keep], runs[keep]
+
+
+def sync_track(runs, cells, seed=0, gaps=(1, 40)):
+    """A track of GCR data with syncs of the given run lengths, ``cells`` long.
+
+    Each sync sits between zero bits; ``gaps`` bounds the data bytes after one.
+    """
+    rng = np.random.default_rng(seed)
+    parts = []
+    for run in runs:
+        data = rng.integers(0, 256, int(rng.integers(*gaps)), dtype=np.uint8)
+        parts += [np.zeros(1, np.uint8), np.ones(run, np.uint8), np.zeros(1, np.uint8)]
+        parts.append(encode_bits(data))
+    bits = np.concatenate(parts)
+    if len(bits) > cells:
+        raise ValueError(f"{len(bits)} bits do not fit {cells} cells")
+    fill = encode_bits(
+        rng.integers(0, 256, (cells - len(bits)) // 10 + 1, dtype=np.uint8)
+    )
+    return np.concatenate((bits, fill))[:cells]
+
+
 def disk_drive(model, media, device=8, **kw):
     """A simulated 1541 or 1571 with expansion RAM and a mechanism holding media.
 
@@ -268,10 +338,14 @@ def disk_drive(model, media, device=8, **kw):
 
 
 class SimMonitor:
-    """Monitor stand-in that runs drive code directly, without a bus transport."""
+    """Monitor stand-in that runs drive code directly, without a bus transport.
+
+    ``calls`` records ``(address, first cycle, last cycle)`` of every jsr.
+    """
 
     def __init__(self, drive, budget=50_000_000):
         self.drive, self.budget = drive, budget
+        self.calls = []
 
     def read(self, addr, size):
         """Read drive memory."""
@@ -290,4 +364,5 @@ class SimMonitor:
             d.step()
             if d.cycles - start > self.budget:
                 raise TimeoutError(f"jsr ${addr:04x} ran past {self.budget} cycles")
+        self.calls.append((addr, start, d.cycles))
         return d.mpu.a, d.mpu.x, d.mpu.y

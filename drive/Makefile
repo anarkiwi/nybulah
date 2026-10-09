@@ -2,6 +2,8 @@ OUT ?= ../nybulah/drivecode
 PROTOS := 1 2 $(if $(wildcard proto_x.inc),3)
 TRACK_MODELS := 1541 1571
 TRACK_BASE := 0300
+PASSPG_1541 := 9F
+PASSPG_1571 := 7F
 BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin)
 
@@ -19,7 +21,7 @@ $(OUT)/monitor_xb.bin: monitor.s drive.cfg $(wildcard proto_*.inc)
 
 $(OUT)/track_%.bin: track.s track.cfg
 	ca65 -t none -D MODEL=$* -o $(OUT)/track_$*.o $<
-	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -o $@ $(OUT)/track_$*.o
+	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -D PASSPG='$$$(PASSPG_$*)' -o $@ $(OUT)/track_$*.o
 	rm -f $(OUT)/track_$*.o
 
 clean:
