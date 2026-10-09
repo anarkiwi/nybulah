@@ -174,7 +174,7 @@ def add_arguments(ap):
     ap.add_argument(
         "--recover-timeout",
         type=float,
-        help="readiness deadline after RESET (default: the DOS diagnostic)",
+        help="outer limit after RESET (default: the longest derived boot)",
     )
     ap.add_argument(
         "--disk", action="store_true", help="read one track per zone (no writes)"

@@ -9,6 +9,7 @@ from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
 from .sim import PA_FSDIR, Bus, Drive1541, HostGone, SimTimeout
 from .simfast import NEVER, eligible, run_drive, run_transfer
 
+INF = float("inf")
 IDENTITY = {
     "1541": (0, "1541", "CBM DOS V2.6 1541"),
     "1571": (2, "1571", "CBM DOS V3.0 1571"),
@@ -304,25 +305,26 @@ class SimMonitor:
 class DOSDrive:
     """A drive at DOS level for bus scripts, on DOSBus's clock.
 
-    After RESET DOS is busy for boot_s, holding CLK and DATA for the first
-    held_s (the diagnostic); command_s(cmd) is how long a command keeps it busy
-    (inf: never done) and reply(cmd) the status it leaves.
+    After RESET DOS is busy for boot_s and holds CLK and DATA over each
+    (start, end) of holds (default the whole boot); command_s(cmd) is how long
+    a command keeps it busy (inf: never) and reply(cmd) the status it leaves.
     """
 
     def __init__(  # pylint: disable=too-many-arguments
         self, dev, model="1541", boot_s=0.0, command_s=None, reply=None, files=()
     ):
         self.dev, self.model, self.boot_s = dev, model, boot_s
-        self.held_s = boot_s
+        self.holds = ((0.0, boot_s),)
         self.command_s = command_s or (lambda cmd: 0.0)
         self.reply = reply or (lambda cmd: "00, OK,00,00")
         self.files = files
-        self.booting = self.busy = 0.0
+        self.held, self.busy = [], 0.0
         self.status = f"73,{IDENTITY[model][2]},00,00"
 
     def restart(self, now):
         """RESET or UJ: rerun the diagnostic, then the power-on message."""
-        self.booting, self.busy = now + self.held_s, now + self.boot_s
+        self.held = [(now + a, now + b) for a, b in self.holds]
+        self.busy = max([now + self.boot_s] + [b for _, b in self.held])
         self.status = f"73,{IDENTITY[self.model][2]},00,00"
 
     def directory(self):
@@ -337,9 +339,9 @@ class DOSDrive:
 class DOSBus:  # pylint: disable=too-many-instance-attributes
     """OpenCBM stand-in over DOSDrives on a virtual clock (clock(), sleep()).
 
-    An ATN sequence waits until every drive's DOS is idle (a busy DOS holds the
-    hardware ATN acknowledge), bounded by the I/O timeout; ``log`` records each
-    one as (time, kind, dev, busy devices) and ``violations`` the misuse.
+    ATN waits for every DOS to idle up to the I/O timeout. ``log``: ATN
+    sequences; ``writes``: everything sent; ``aborts``: sequences given up on a
+    busy DOS; ``violations``: misuse, including ATN before every hold has ended.
     """
 
     NO_ACK_S = 0.002
@@ -349,7 +351,8 @@ class DOSBus:  # pylint: disable=too-many-instance-attributes
         self.now, self.timeout = 0.0, float("inf")
         self.host_lines = 0
         self.addressed = None
-        self.log, self.violations = [], []
+        self.log, self.violations, self.aborts, self.resets = [], [], [], 0
+        self.writes = []
         self.hook, self.closed = None, False
         self._stream, self._eoi = b"", False
 
@@ -371,19 +374,41 @@ class DOSBus:  # pylint: disable=too-many-instance-attributes
         return True
 
     def reset(self):
-        """RESET: the adapter releases its lines and every drive restarts."""
+        """RESET: the adapter releases its lines and every drive restarts; a
+        reset while a DOS is busy is a violation."""
+        busy = sorted(d.dev for d in self.drives.values() if d.busy > self.now)
+        if busy:
+            self.violations.append((self.now, "reset", None, busy, self.addressed))
+        self.resets += 1
+        self.writes.append((self.now, "reset"))
         self.host_lines, self.addressed = 0, None
         self.now += 0.1
         for d in self.drives.values():
             d.restart(self.now)
 
+    def _lines(self, t):
+        held = any(a <= t < b for d in self.drives.values() for a, b in d.held)
+        return self.host_lines | (IEC_CLOCK | IEC_DATA if held else 0)
+
     def iec_poll(self):
-        """Host lines plus CLK and DATA from any drive in its diagnostic."""
-        booting = any(d.booting > self.now for d in self.drives.values())
-        return self.host_lines | (IEC_CLOCK | IEC_DATA if booting else 0)
+        """Host lines plus CLK and DATA from any drive holding them."""
+        return self._lines(self.now)
+
+    def iec_wait(self, line, state):
+        """Until line is asserted (state 1) or released, up to the I/O timeout."""
+        edges = {x for d in self.drives.values() for iv in d.held for x in iv}
+        for t in sorted({self.now} | {x for x in edges if self.now < x < INF}):
+            if t - self.now > self.timeout:
+                break
+            if bool(self._lines(t) & line) == bool(state):
+                self.now = t
+                return self._lines(t)
+        self.now += self.timeout
+        raise OpenCBMError("iec_wait timeout")
 
     def iec_release(self, lines):
         """Release host lines."""
+        self.writes.append((self.now, "release"))
         self.host_lines &= ~lines
 
     def _atn(self, kind, dev):
@@ -392,13 +417,16 @@ class DOSBus:  # pylint: disable=too-many-instance-attributes
             self.hook(kind, dev)
         busy = sorted(d.dev for d in self.drives.values() if d.busy > self.now)
         self.log.append((self.now, kind, dev, busy))
-        if self.addressed or (busy and kind == "listen") or self.iec_poll():
+        self.writes.append((self.now, kind))
+        settling = any(b > self.now for d in self.drives.values() for _, b in d.held)
+        if self.addressed or (busy and kind == "listen") or settling:
             self.violations.append((self.now, kind, dev, busy, self.addressed))
         if not self.drives:
             self.now += self.NO_ACK_S
             raise OpenCBMError("no device acknowledged ATN")
         ready = max(d.busy for d in self.drives.values())
         if ready - self.now > self.timeout:
+            self.aborts.append((self.now + self.timeout, kind, dev, busy))
             self.now += self.timeout
             self.host_lines = 0
             raise OpenCBMError("adapter I/O timeout")

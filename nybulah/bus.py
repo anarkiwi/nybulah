@@ -77,14 +77,15 @@ def boot_file_search_s(rev=0.2, step=0.012, settle=0.018, tick=20000 / 2e6):
 
 
 BOOT_FILE_S = {"1581": boot_file_search_s()}
+OUTER_S = RESET_HOLD_S + BOOT_S + max(BOOT_FILE_S.values())
 
 
 class DeviceHung(BusError):
-    """A drive did not answer its error channel by the deadline."""
+    """A drive did not answer its error channel by the limit."""
 
 
 class BusHeld(BusError):
-    """A device still holds CLK or DATA at the deadline."""
+    """A device still holds CLK or DATA at the outer limit."""
 
 
 class DriveUnresponsive(IOError):
@@ -153,40 +154,55 @@ def listing(data):
 
 
 class Bus:  # pylint: disable=too-many-instance-attributes
-    """One adapter session: readiness waits and DOS transactions.
+    """One adapter session: settle detection, readiness and DOS transactions.
 
-    Waits release the host's lines, then poll until no drive holds CLK or DATA
-    and the drive's error channel answers, backing off from T_AT to a deadline;
-    each transaction arms the adapter's I/O timeout with the time left.
+    Waits assert nothing: they watch CLK and DATA until no drive holds them,
+    then a drive is ready once its error channel answers. Limits only stop new
+    transactions; a running one may take the longest its kind can legitimately need.
     """
 
-    def __init__(self, cbm, boot_s=None, io_s=IO_TIMEOUT_MS / 1000, models=None):
-        self.cbm, self.boot_s, self.io_s = cbm, boot_s, io_s
-        self.models = dict(models or {})
+    def __init__(self, cbm, outer_s=OUTER_S, io_s=IO_TIMEOUT_MS / 1000):
+        self.cbm, self.outer_s, self.io_s = cbm, outer_s, io_s
         self.stop = threading.Event()
         self.clock = getattr(cbm, "clock", time.monotonic)
         self.sleep = getattr(cbm, "sleep", self.stop.wait)
         self.set_timeout = getattr(cbm, "set_timeout", None)
-        self.known, self.low = set(), {}
+        self.known, self.low, self.models, self.timelines = set(), {}, {}, []
         self.started, self.reset_at, self.first_sample = self.clock(), None, None
         self.atn_at = self.addressed = self.stopped = None
+        self.hands_off, self.last, self.quiet, self.free_since = False, None, 0.0, None
+        self._timeline("run start")
 
-    def boot_span(self, dev=None):
-        """The override, else the diagnostic plus a 1581's boot file search."""
-        if self.boot_s is not None:
-            return self.boot_s
-        return BOOT_S + BOOT_FILE_S.get(self.models.get(dev), 0.0)
+    def _timeline(self, origin):
+        self.timeline = {"from": origin, "transitions": [], "released": {}}
+        self.timeline |= {"answered": {}, "t0": self.clock()}
+        self.timelines.append(self.timeline)
+        self.last, self.quiet, self.free_since = None, 0.0, None
 
-    def boot_deadline(self, dev=None):
-        """boot_span after the last reset, or after the session start."""
-        base = self.started if self.reset_at is None else self.reset_at + RESET_HOLD_S
-        return base + self.boot_span(dev)
+    def rel(self):
+        """Seconds since the current timeline began."""
+        return round(self.clock() - self.timeline["t0"], 4)
+
+    def base(self):
+        """When the drives last started: the reset, else the session start."""
+        return self.started if self.reset_at is None else self.reset_at + RESET_HOLD_S
 
     def sample(self):
-        """Poll the lines, noting when each was first seen low."""
+        """Poll the lines; note when each was first seen low and every change."""
         lines, now = self.cbm.iec_poll(), self.clock()
         if self.first_sample is None:
             self.first_sample = now
+        both = IEC_CLOCK | IEC_DATA
+        if lines & both and self.free_since is not None and self.last is not None:
+            self.quiet = max(self.quiet, now - self.free_since)
+        self.free_since = None if lines & both else self.free_since or now
+        if lines != self.last:
+            t, tl = self.rel(), self.timeline
+            tl["transitions"].append([t, [n for n, b in LINES.items() if lines & b]])
+            for n, b in LINES.items():
+                if self.last is not None and self.last & b and not lines & b:
+                    tl["released"][n] = t
+            self.last = lines
         for name, bit in LINES.items():
             if lines & bit:
                 self.low.setdefault(name, now)
@@ -200,35 +216,34 @@ class Bus:  # pylint: disable=too-many-instance-attributes
             self.sample()
         except OpenCBMError as e:
             return {"error": f"iec_poll: {e}"}
-        now = self.clock()
-        reset = self.reset_at
+        now, reset = self.clock(), self.reset_at
 
         def ago(t):
             return None if t is None else round(now - t, 3)
 
-        held = {
-            n: ago(reset if reset is not None and t == self.first_sample else t)
+        since = {
+            n: "seen" if t != self.first_sample else "reset" if reset else "unknown"
             for n, t in self.low.items()
         }
-        text = [
-            f"{n} low for {h:.2f} s"
-            + (" since reset" if reset is not None and h == ago(reset) else "")
-            for n, h in held.items()
-        ] or ["no line low"]
+        held = {
+            n: ago(reset if since[n] == "reset" else t) for n, t in self.low.items()
+        }
+        words = {"seen": "", "reset": " since reset"}
+        words["unknown"] = " at least (low when this run started)"
+        text = [f"{n} low for {held[n]:.2f} s{words[since[n]]}" for n in held]
+        text = text or ["no line low"]
         if "ATN" not in held:
             text.append("ATN not asserted")
         text.append("no reset" if reset is None else f"reset {ago(reset):.2f} s ago")
-        text.append(
-            "no ATN yet"
-            if self.atn_at is None
-            else f"last ATN {ago(self.atn_at):.2f} s ago"
-        )
+        atn = self.atn_at
+        text.append("no ATN yet" if atn is None else f"last ATN {ago(atn):.2f} s ago")
         text.append(self.addressed or "no drive addressed")
         return {
             "low": list(held),
             "held_s": held,
+            "held_since": since,
             "since_reset_s": ago(reset),
-            "since_atn_s": ago(self.atn_at),
+            "since_atn_s": ago(atn),
             "addressed": self.addressed,
             "text": "; ".join(text),
         }
@@ -239,26 +254,31 @@ class Bus:  # pylint: disable=too-many-instance-attributes
         self.stop.set()
 
     def idle(self):
-        """Release every host line."""
-        self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)
+        """Release every host line, unless the bus is being left alone."""
+        if not self.hands_off:
+            self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)
 
-    def arm(self, deadline):
-        """Bound the next transaction to deadline (at least one adapter tick)."""
-        self.atn_at = self.clock()
+    def timeout(self, seconds):
+        """The adapter's I/O timeout for the next call."""
         if self.set_timeout:
-            self.set_timeout(max(1, math.ceil((deadline - self.atn_at) * 1000)))
+            self.set_timeout(max(1, math.ceil(seconds * 1000)))
+
+    def arm(self, span):
+        """An ATN transaction starts that may legitimately take span seconds."""
+        self.atn_at = self.clock()
+        self.timeout(span)
 
     def restore(self):
         """Give the adapter back its default I/O timeout."""
         if self.set_timeout:
             self.set_timeout(IO_TIMEOUT_MS)
 
-    def attempts(self, deadline):
-        """Yield for each try: now, then after T_AT, doubling, the last at deadline."""
+    def attempts(self, limit):
+        """Yield for each try: now, then after T_AT, doubling, the last at limit."""
         delay = T_AT
         while True:
             yield
-            left = deadline - self.clock()
+            left = limit - self.clock()
             if left <= 0:
                 return
             if self.stopped:
@@ -266,70 +286,103 @@ class Bus:  # pylint: disable=too-many-instance-attributes
             self.sleep(min(delay, left))
             delay *= 2
 
-    def settle(self, deadline):
-        """Release the host's lines and wait until no device holds CLK or DATA."""
+    def settle(self, limit):
+        """Watch, asserting nothing, until CLK and DATA have stayed released for
+        the quiet window (the longest release a drive was seen to take back).
+        At limit held lines are left exactly as they are and BusHeld reports."""
         self.idle()
-        held = 0
-        for _ in self.attempts(deadline):
+        delay = T_AT
+        while True:
             held = self.sample() & (IEC_CLOCK | IEC_DATA)
-            if not held:
+            free_for = 0.0 if held else self.clock() - self.free_since
+            left = limit - self.clock()
+            if not held and (free_for >= self.quiet or left <= 0):
+                self.timeline.setdefault("settled", self.rel())
                 return
-        raise BusHeld(f"bus lines 0x{held:02x} held at the deadline")
+            if left <= 0:
+                self.hands_off = True
+                raise BusHeld(self.held_report(held))
+            if self.stopped:
+                raise Interrupted(self.stopped)
+            wait = left if held else min(left, self.quiet - free_for)
+            line = IEC_DATA if held & IEC_DATA or not held else IEC_CLOCK
+            t0 = self.clock()
+            self.timeout(wait)
+            with contextlib.suppress(OpenCBMError):
+                self.cbm.iec_wait(line, 0 if held else 1)
+            if self.clock() - t0 < min(delay, wait):
+                self.sleep(min(delay, wait))
+                delay *= 2
 
-    def ready(self, dev, deadline):
-        """dev's error channel once the bus is free and its DOS answers."""
-        self.settle(deadline)
+    def held_report(self, held):
+        """Plain words for lines still held at the outer limit."""
+        names = " and ".join(n for n, b in LINES.items() if held & b)
+        start = "the reset" if self.reset_at is not None else "this run started"
+        tl = self.timeline
+        released = tl["released"] or "never"
+        seen = f"{len(tl['transitions'])} line states seen, released at {released}"
+        return (
+            f"{names} still held {self.clock() - self.base():.2f} s after {start}, past "
+            f"every derived boot bound ({self.outer_s:.2f} s); {seen}; a drive is "
+            "holding the bus and needs a power cycle; nothing was sent"
+        )
+
+    def ready(self, dev, limit, span):
+        """dev's error channel once the bus has settled; a probe may take span."""
         status = ""
-        for _ in self.attempts(deadline):
-            self.sample()
-            self.arm(deadline)
+        for _ in self.attempts(limit):
+            self.settle(limit)
+            self.arm(span)
             status = self.cbm.status(dev)
             if answers(status):
                 self.known.add(dev)
+                self.timeline["answered"].setdefault(str(dev), self.rel())
                 return status
-        raise DeviceHung(f"device {dev}: no DOS status by the deadline: {status!r}")
+        raise DeviceHung(f"device {dev}: no DOS status by the limit: {status!r}")
 
-    def deadline(self, dev):
-        """A drive not yet heard from may still be booting."""
-        return (
-            self.boot_deadline(dev)
-            if dev not in self.known
-            else self.clock() + self.io_s
-        )
+    def boot_limit(self):
+        """No new transaction for an unheard drive after this: the outer limit."""
+        return self.base() + self.outer_s
 
     def ensure(self, dev):
         """Wait for dev's DOS unless it has answered since the last reset."""
         if dev not in self.known:
-            self.ready(dev, self.boot_deadline(dev))
+            self.ready(dev, self.boot_limit(), self.outer_s)
 
     def reset(self, _dev=None, _arg=None):
-        """Pulse RESET; every drive reruns its diagnostic."""
+        """Pulse RESET; watch the lines until every drive has released them."""
         self.idle()
         self.cbm.reset()
         self.known.clear()
         self.low, self.reset_at, self.first_sample = {}, self.clock(), None
-        self.settle(self.boot_deadline())
-        return {}
+        self._timeline("reset")
+        self.settle(self.boot_limit())
+        return {"settled_s": self.rel(), "timeline": self.timeline}
 
     def status(self, dev, _arg=None):
         """The error channel, waiting for the drive first."""
-        return {"status": self.ready(dev, self.deadline(dev))}
+        if dev in self.known:
+            return {"status": self.ready(dev, self.clock() + self.io_s, self.io_s)}
+        status = self.ready(dev, self.boot_limit(), self.outer_s)
+        return {"status": status, "answered_s": self.timeline["answered"][str(dev)]}
 
     wait = status
 
     def command(self, dev, cmd):
         """Send cmd to the command channel; done when the status reads back."""
         self.ensure(dev)
-        self.arm(self.clock() + self.io_s)
+        self.arm(self.io_s)
         self.cbm.command(dev, cmd)
-        span = self.boot_span(dev) if restarts(cmd) else self.io_s
-        return {"status": self.ready(dev, self.clock() + span)}
+        if restarts(cmd):
+            self._timeline(f"{cmd.decode('latin-1')} {dev}")
+        span = self.outer_s if restarts(cmd) else self.io_s
+        return {"status": self.ready(dev, self.clock() + span, span)}
 
     def dir(self, dev, _arg=None):
         """Directory listing over OPEN "$", TALK, UNTALK and CLOSE."""
         self.ensure(dev)
         data, eoi = b"", False
-        self.arm(self.clock() + self.io_s)
+        self.arm(self.io_s)
         self.cbm.open_file(dev, 0, b"$")
         try:
             self.cbm.talk(dev, 0)
@@ -340,27 +393,28 @@ class Bus:  # pylint: disable=too-many-instance-attributes
                     data += chunk
                     eoi = len(chunk) < 256 or self.cbm.get_eoi()
             finally:
-                self.arm(self.clock())
+                self.arm(self.io_s)
                 self.cbm.untalk()
                 self.addressed = None
         finally:
-            self.arm(self.clock())
+            self.arm(self.io_s)
             self.cbm.close_file(dev, 0)
-        return {"files": listing(data), "status": self.ready(dev, self.deadline(dev))}
+        status = self.ready(dev, self.clock() + self.io_s, self.io_s)
+        return {"files": listing(data), "status": status}
 
     def identify(self, dev, _arg=None):
         """The drive model from cbm_identify (ramprobe.identify_model)."""
         self.ensure(dev)
-        self.arm(self.clock() + self.io_s)
+        self.arm(self.io_s)
         self.models[dev] = model_of(self.cbm, dev)
         return {"model": self.models[dev]}
 
     def detect(self, _dev=None, _arg=None):
         """Model of every drive on 8-30 answering cbm_identify."""
-        self.settle(self.boot_deadline())
+        self.settle(self.boot_limit())
         found = {}
         for dev in DETECT:
-            self.arm(self.clock() + self.io_s)
+            self.arm(self.io_s)
             try:
                 found[dev] = self.models[dev] = model_of(self.cbm, dev)
             except OpenCBMError:
@@ -374,16 +428,18 @@ class Bus:  # pylint: disable=too-many-instance-attributes
 def recover(cbm, dev, resets=2, timeout=None):
     """Release the host's lines, reset the bus and wait until dev answers.
 
-    Returns the drive's status string; a second reset covers drives that do
-    not come back from the first. Raises DriveUnresponsive otherwise.
+    Returns the drive's status string. A second reset covers a drive that let
+    the lines go but did not answer; held lines end it untouched (BusHeld).
     """
-    bus = Bus(cbm, timeout)
+    bus = Bus(cbm, OUTER_S if timeout is None else timeout)
     error = None
     try:
         for _ in range(resets):
             try:
                 bus.reset()
-                return bus.ready(dev, bus.boot_deadline(dev))
+                return bus.ready(dev, bus.boot_limit(), bus.outer_s)
+            except BusHeld as e:
+                raise DriveUnresponsive(f"device {dev}: {e}") from e
             except (BusError, OpenCBMError) as e:
                 error = e
     finally:
@@ -439,10 +495,12 @@ class Script:
     def __init__(self, bus, keep_going=False, emit=_print):
         self.bus, self.keep_going, self.emit = bus, keep_going, emit
         self.failed, self.touched, self.final, self.lines = set(), {}, {}, {}
+        self.held = None
 
     def do(self, op, dev, arg):
-        """Run one action and emit its record; True when it succeeded."""
-        bus, t0 = self.bus, self.bus.clock()
+        """Run one action and emit its record; True when it succeeded, else
+        what failed: dev, or None for the bus (held lines name no drive)."""
+        bus, t0, culprit = self.bus, self.bus.clock(), dev
         rec = {"step": op, "dev": dev}
         if arg is not None:
             rec["arg"] = arg.decode("latin-1")
@@ -453,15 +511,17 @@ class Script:
             rec["result"] = "interrupted"
         except (BusError, OpenCBMError, ValueError) as e:
             rec |= {"result": "error", "error": f"{type(e).__name__}: {e}"}
+            if isinstance(e, BusHeld):
+                self.held, culprit = str(e), None
         if rec["result"] != "ok":
-            rec["bus"] = self.lines[dev] = bus.snapshot()
+            rec["bus"] = self.lines[culprit] = bus.snapshot()
             bus.idle()
         rec["seconds"] = round(bus.clock() - t0, 6)
         if dev is not None:
             self.touched[dev] = None
             self.final[dev] = rec.get("status", self.final.get(dev))
         self.emit(rec)
-        return rec["result"] == "ok"
+        return True if rec["result"] == "ok" else culprit
 
     def run(self, actions, end_check=True):
         """Execute actions, then the end check; return the summary record."""
@@ -472,15 +532,15 @@ class Script:
                     break
                 if dev in self.failed:
                     self.emit({"step": op, "dev": dev, "result": "skipped"})
-                elif not self.do(op, dev, arg):
-                    self.failed.add(dev)
-                    if dev is None or not self.keep_going:
+                elif (culprit := self.do(op, dev, arg)) is not True:
+                    self.failed.add(culprit)
+                    if culprit is None or not self.keep_going:
                         break
         failing = self.failed and (None in self.failed or not self.keep_going)
         if end_check and not self.bus.stopped and not failing:
             for dev in [d for d in self.touched if d not in self.failed]:
-                if not self.do("status", dev, None):
-                    self.failed.add(dev)
+                if (culprit := self.do("status", dev, None)) is not True:
+                    self.failed.add(culprit)
         lines = self.bus.snapshot()
         self.bus.idle()
         devs = sorted(set(self.touched) | set(self.bus.models))
@@ -496,7 +556,9 @@ class Script:
             },
             "ok": not self.failed and not self.bus.stopped,
             "interrupted": self.bus.stopped,
+            "held": self.held,
             "bus": lines,
+            "timelines": self.bus.timelines,
             "seconds": round(self.bus.clock() - t0, 6),
         }
         self.emit(out)
@@ -515,14 +577,6 @@ def steps(args):
         if op == "command" and (why := bump_risk(arg)) and not args.allow_dos_bump
     ]
     return actions, refused
-
-
-def model_arg(text):
-    """DEV=MODEL as (dev, model)."""
-    dev, _, model = text.partition("=")
-    if model not in DIAGNOSTIC:
-        raise argparse.ArgumentTypeError(f"model is one of {sorted(DIAGNOSTIC)}")
-    return int(dev), model
 
 
 def add_arguments(ap):
@@ -547,22 +601,15 @@ def add_arguments(ap):
     ap.add_argument(
         "--boot-seconds",
         type=float,
-        help="readiness deadline after RESET (default: the DOS diagnostic, plus "
-        "the boot file search for a 1581)",
-    )
-    ap.add_argument(
-        "--model",
-        action="append",
-        default=[],
-        type=model_arg,
-        metavar="DEV=MODEL",
-        help="declare a drive's model before it answers, e.g. 9=1581",
+        default=OUTER_S,
+        help="outer limit after RESET, past which held lines are only reported "
+        "(default: the longest derived boot, a stock 1581's boot file search)",
     )
     ap.add_argument(
         "--command-seconds",
         type=float,
         default=IO_TIMEOUT_MS / 1000,
-        help="deadline for a DOS command (default: the adapter I/O timeout)",
+        help="time a DOS command may take (default: the adapter I/O timeout)",
     )
 
 
@@ -573,7 +620,7 @@ def execute(args, cbm):
         for rec in refused:
             _print(rec | {"result": "refused"})
         return {"summary": {}, "ok": False, "interrupted": None, "refused": refused}
-    bus = Bus(cbm, args.boot_seconds, args.command_seconds, dict(args.model))
+    bus = Bus(cbm, args.boot_seconds, args.command_seconds)
     with _signals(bus.interrupt):
         try:
             return Script(bus, args.keep_going).run(actions, args.end_check)

@@ -42,11 +42,12 @@ def random_rig(seed):
         return lambda cmd: times.setdefault(cmd, rng.uniform(0, 5))
 
     drives = []
-    for dev, model in {8: "1571", 9: "1541", 10: "1541"}.items():
+    for dev, model in {8: "1571", 9: "1541", 10: "1581"}.items():
+        hold = rng.uniform(0, bus.BOOT_S)
         drive = DOSDrive(
-            dev, model, rng.uniform(0, bus.BOOT_S), busy(), files=[("A", 3)]
+            dev, model, hold + rng.uniform(0, 10), busy(), files=[("A", 3)]
         )
-        drive.held_s = rng.uniform(0, drive.boot_s)
+        drive.holds = ((0.0, hold),)
         drives.append(drive)
     return DOSBus(drives)
 
@@ -59,11 +60,19 @@ def assert_idle(cbm):
 def test_random_boot_and_command_times_never_meet_a_busy_drive(seed, capsys):
     cbm = random_rig(seed)
     out, recs = run(cbm, *SCRIPT, capsys=capsys)
-    assert not cbm.violations and out["ok"], recs
+    assert not cbm.violations and not cbm.aborts and out["ok"], recs
     assert_idle(cbm)
     by = {(r["step"], r["dev"], r.get("arg")): r for r in recs[:-1]}
-    boot = max(d.held_s for d in cbm.drives.values())
-    assert by[("reset", None, None)]["seconds"] >= boot
+    reset = by[("reset", None, None)]
+    hold = max(d.holds[0][1] for d in cbm.drives.values())
+    assert reset["settled_s"] == pytest.approx(hold, abs=1e-3)
+    timeline = out["timelines"][1]
+    assert timeline["released"] == {
+        "CLK": reset["settled_s"],
+        "DATA": reset["settled_s"],
+    }
+    boot = max(d.boot_s for d in cbm.drives.values())
+    assert max(timeline["answered"].values()) >= boot - 0.1 - 1e-3
     for dev, cmd in ((8, b"U0>M1"), (8, b"I0"), (10, b"I0")):
         rec = by[("command", dev, cmd.decode())]
         assert rec["seconds"] >= cbm.drives[dev].command_s(cmd) - 1e-6
@@ -76,7 +85,7 @@ def test_random_boot_and_command_times_never_meet_a_busy_drive(seed, capsys):
     assert by[("detect", None, None)]["devices"] == {
         "8": "1571",
         "9": "1541",
-        "10": "1541",
+        "10": "1581",
     }
     assert out["summary"]["8"] == {
         "status": "00, OK,00,00",
@@ -118,13 +127,23 @@ def test_hung_command_fails_fast_and_leaves_bus_idle(capsys):
     assert not cbm.violations
 
 
-def test_hung_boot_is_bus_held_without_atn(capsys):
-    cbm = DOSBus([DOSDrive(8, boot_s=INF)])
-    out, recs = run(cbm, "reset", "status 8", capsys=capsys)
+def held_forever(*devs, since=0.0):
+    drives = [DOSDrive(d) for d in devs]
+    drives[0].holds = ((since, INF),)
+    drives[0].held = [(since, INF)]
+    return DOSBus(drives)
+
+
+def test_outer_limit_reports_and_leaves_the_bus_untouched(capsys):
+    cbm = held_forever(8, 9)
+    out, recs = run(cbm, "reset", "wait 8 9", "status 9", "--keep-going", capsys=capsys)
+    limit = cbm.writes[0][0] + 0.1 + bus.OUTER_S
     assert recs[0]["result"] == "error" and "BusHeld" in recs[0]["error"]
-    assert recs[0]["seconds"] == pytest.approx(bus.RESET_HOLD_S + bus.BOOT_S, abs=0.11)
-    assert len(recs) == 2 and not out["ok"] and not cbm.log
-    assert_idle(cbm)
+    assert recs[0]["seconds"] == pytest.approx(0.1 + bus.OUTER_S, abs=0.2)
+    assert [w for w in cbm.writes if w[0] >= limit - 0.2] == []
+    assert cbm.resets == 1 and not cbm.log and len(recs) == 2 and not out["ok"]
+    assert "needs a power cycle; nothing was sent" in out["held"]
+    assert cbm.host_lines == 0 and cbm.closed
 
 
 def test_keep_going_skips_only_the_absent_drive(capsys):
@@ -141,7 +160,7 @@ def test_keep_going_skips_only_the_absent_drive(capsys):
         ("command", 8, "ok"),
         ("status", 8, "ok"),
     ]
-    assert recs[1]["seconds"] <= bus.BOOT_S + 0.11
+    assert recs[1]["seconds"] == pytest.approx(bus.OUTER_S, abs=0.11)
     assert out["summary"]["9"]["failed"] and not out["summary"]["8"]["failed"]
     assert not cbm.violations
 
@@ -153,7 +172,7 @@ def test_dos_error_stops_the_script(capsys):
     assert out["summary"]["8"]["status"].startswith("74,")
 
 
-@pytest.mark.parametrize("where", ["transaction", "backoff"])
+@pytest.mark.parametrize("where", ["transaction", "settle"])
 def test_signal_mid_script_releases_bus(where, capsys):
     cbm = DOSBus([DOSDrive(8, boot_s=0.5), DOSDrive(9)])
     if where == "transaction":
@@ -161,8 +180,7 @@ def test_signal_mid_script_releases_bus(where, capsys):
             os.getpid(), signal.SIGINT
         )
     else:
-        sleep = cbm.sleep
-        cbm.sleep = lambda s: (os.kill(os.getpid(), signal.SIGTERM), sleep(s))
+        cbm.iec_wait = lambda *a: os.kill(os.getpid(), signal.SIGTERM)
     out, recs = run(cbm, "reset", "wait 8", 'command 8 "I0"', "status 9", capsys=capsys)
     assert out["interrupted"] == ("SIGINT" if where == "transaction" else "SIGTERM")
     ran = [(r["step"], r["result"]) for r in recs[:-1]]
@@ -258,9 +276,13 @@ def test_boot_deadline_matches_opencbm_reset_wait():
 def test_recover_waits_for_boot_then_gives_up_on_silence():
     cbm = DOSBus([DOSDrive(8, boot_s=0.7)])
     assert bus.recover(cbm, 8).startswith("73,")
-    assert cbm.now >= 0.8 and not cbm.violations
+    assert cbm.now >= 0.8 - 1e-9 and not cbm.violations
     with pytest.raises(bus.DriveUnresponsive, match="device 9 silent after 2"):
-        bus.recover(cbm, 9, timeout=0.2)
+        bus.recover(cbm, 9)
+    held = held_forever(8)
+    with pytest.raises(bus.DriveUnresponsive, match="nothing was sent"):
+        bus.recover(held, 8, timeout=0.2)
+    assert held.resets == 1 and not held.log
 
 
 def test_console_exit_status(monkeypatch):
@@ -279,15 +301,16 @@ def test_bus_line_masks():
 
 
 def test_bus_held_snapshot_reads_like_a_diagnosis(capsys):
-    cbm = DOSBus([DOSDrive(8, boot_s=INF)])
-    out, recs = run(cbm, "reset", capsys=capsys)
-    snap, span = recs[0]["bus"], f"{bus.BOOT_S + bus.RESET_HOLD_S:.2f}"
+    cbm = held_forever(8)
+    out, recs = run(cbm, "reset", "--boot-seconds", "2", capsys=capsys)
+    snap = recs[0]["bus"]
     assert snap["text"] == (
-        f"CLK low for {span} s since reset; DATA low for {span} s since reset; "
-        f"ATN not asserted; reset {span} s ago; no ATN yet; no drive addressed"
+        "CLK low for 2.10 s since reset; DATA low for 2.10 s since reset; "
+        "ATN not asserted; reset 2.10 s ago; no ATN yet; no drive addressed"
     )
     assert snap["low"] == ["CLK", "DATA"] and snap["since_atn_s"] is None
     assert out["bus"]["low"] == ["CLK", "DATA"]
+    assert out["timelines"][1]["transitions"] == [[0.0, ["CLK", "DATA"]]]
 
 
 def test_hung_command_snapshot_times_the_last_atn(capsys):
@@ -306,7 +329,7 @@ def test_lines_held_since_mid_wait_are_timed_from_first_sight():
     cbm = DOSBus([DOSDrive(8)])
     b = bus.Bus(cbm)
     b.sample()
-    cbm.drives[8].booting = 2.0
+    cbm.drives[8].held = [(0.0, 2.0)]
     cbm.sleep(0.5)
     b.sample()
     cbm.sleep(0.25)
@@ -336,33 +359,56 @@ def test_interrupt_summary_carries_the_bus_state(capsys):
 
 
 def mf1581(boot_s):
-    """A 1581 sets up its ports before the diagnostic, so it holds no line."""
+    """The stock 1581 ROM sets its ports before the diagnostic: it holds no line
+    while it searches for its boot file."""
     drive = DOSDrive(9, "1581", boot_s=boot_s)
-    drive.held_s = 0.0
+    drive.holds = ()
     return DOSBus([DOSDrive(8), drive])
 
 
-@pytest.mark.parametrize(
-    "argv, ok",
-    [
-        (["--model", "9=1581", "reset", "wait 9"], True),
-        (["identify 9", "reset", "wait 9"], True),
-        (["reset", "wait 9"], False),
-        (["--model", "9=1581", "--boot-seconds", "2", "reset", "wait 9"], False),
-    ],
-)
-def test_1581_wait_covers_its_boot_file_search(argv, ok, capsys):
-    cbm = mf1581(bus.BOOT_FILE_S["1581"])
-    out, recs = run(cbm, *argv, capsys=capsys)
-    wait = [r for r in recs if r.get("step") == "wait"][0]
-    assert out["ok"] is ok and (wait["result"] == "ok") is ok
-    assert not cbm.violations
-    if ok:
-        assert out["summary"]["9"]["model"] == "1581"
-
-
-def test_model_arg_and_1581_identify():
-    assert bus.model_arg("9=1581") == (9, "1581")
-    with pytest.raises(Exception):
-        bus.model_arg("9=1551")
+def test_first_atn_after_reset_waits_out_a_busy_1581(capsys):
+    """Lines free but the 1581 still searching: drive 8's probe holds ATN until
+    the 1581 serves it, and the adapter is never made to give up on it."""
+    cbm = mf1581(8.0)
+    out, recs = run(cbm, "reset", "wait 8 9", "identify 9", capsys=capsys)
+    assert out["ok"] and not cbm.aborts and not cbm.violations
+    assert recs[1]["answered_s"] == pytest.approx(8.0, abs=1e-3)
+    assert out["summary"]["9"]["model"] == "1581"
     assert bus.model_of(mf1581(0), 9) == "1581"
+
+
+def test_bus_held_before_the_run_blames_no_drive(capsys):
+    cbm = held_forever(9, 8, 10, since=-60.0)
+    out, recs = run(cbm, "status 8 9 10", capsys=capsys)
+    assert recs[0]["seconds"] == pytest.approx(bus.OUTER_S, abs=0.11)
+    assert out["held"].startswith(
+        f"CLK and DATA still held {recs[0]['seconds']:.2f} s after this run started, "
+        "past every derived boot bound"
+    )
+    snap = recs[0]["bus"]
+    assert snap["held_since"] == {"CLK": "unknown", "DATA": "unknown"}
+    assert "at least (low when this run started)" in snap["text"]
+    assert out["summary"]["8"] == {"status": None, "model": None, "failed": False}
+    assert not out["ok"] and len(recs) == 2 and not cbm.log
+
+
+def test_reset_mid_boot_is_a_violation():
+    cbm = DOSBus([DOSDrive(8, boot_s=1.0)])
+    cbm.reset()
+    cbm.sleep(0.5)
+    cbm.reset()
+    assert cbm.violations and cbm.violations[0][1] == "reset"
+
+
+def test_settle_needs_the_quiet_window_a_drive_was_seen_to_break():
+    cbm = DOSBus([DOSDrive(8, boot_s=3.0)])
+    cbm.drives[8].holds = ((0.0, 1.0), (1.3, 2.0))
+    cbm.reset()
+    b = bus.Bus(cbm)
+    b.settle(100)
+    assert cbm.now == pytest.approx(1.1) and b.quiet == 0
+    cbm.sleep(0.5)
+    b.settle(100)
+    assert b.quiet == pytest.approx(0.5) and cbm.now == pytest.approx(2.6)
+    times = [t for t, _ in b.timeline["transitions"]]
+    assert times == pytest.approx([0.0, 1.0, 1.5, 2.0])

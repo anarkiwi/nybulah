@@ -24,7 +24,7 @@ a killed container leaves the adapter mid-transaction.
 
 | step | does |
 |---|---|
-| `reset` | pulse RESET, wait until no drive holds CLK or DATA |
+| `reset` | pulse RESET, watch until no drive holds CLK or DATA |
 | `wait DEV...` | wait until each drive's DOS answers its error channel |
 | `status DEV...` | read the error channel |
 | `command DEV "CMD"` | send a DOS command; done when its status reads back |
@@ -49,45 +49,67 @@ nybulah bus --reset-first "wait 8 9 10" "identify 8 9 10"
 nybulah bus 'command 8 "U0>M1"' "dir 8"
 # reset and wait on all drives
 nybulah bus reset "wait 8 9 10"
-# the same with a 1581 (JiffyDOS or not) on 9 and a disk in it
-nybulah bus --model 9=1581 reset "wait 8 9 10"
 ```
 
-### Readiness
+### Settle detection
 
-- **Bus free.** During RESET and the power-on diagnostic, VIA1 port B is an
-  input and the drive's 7406 inverters assert CLK and DATA (the OpenCBM
-  xum1541 firmware, `xum1541/iec.c` `iec_reset`, sees a 1541 grab DATA 25 ms
-  after RESET). Before addressing anyone the host releases its lines and polls
-  until no device holds CLK or DATA; it never asserts ATN while one does.
-- **DOS ready.** A drive is ready once its error channel answers. A busy DOS
-  acknowledges ATN in hardware (ATNA) but serves it only from its idle loop:
-  `atnirq` only sets `atnpnd` and `idle` calls `atnsrv`, while `watjob` does
-  not (1541 `seratn.src`, `idlesf.src`, `jobssf.src`). So a status read after
-  a command returns when the command is done, and while any drive is busy
-  every ATN sequence waits for it. If the adapter gives up, ATN is gone when
-  the drive gets to `atnsrv`, which then returns to idle unaddressed
-  (`atns15`).
-- **Unknown drives.** A drive not heard from since the session began or the
-  last reset is waited for before any step addresses it.
+The tool watches the bus settle instead of guessing how long a boot takes.
+
+- **Lines.** During RESET and the power-on diagnostic, a 1541's or 1571's
+  VIA1 port B is an input and its 7406 inverters assert CLK and DATA (the
+  OpenCBM xum1541 firmware, `xum1541/iec.c` `iec_reset`, sees a 1541 grab DATA
+  25 ms after RESET). After a reset the host releases its lines and waits,
+  asserting nothing, until no device holds CLK or DATA. It waits on the adapter
+  (`cbm_iec_wait`, bounded by the adapter's I/O timeout) rather than polling,
+  and samples the lines after each wait; every change of line state goes into
+  the reset's timeline.
+- **Quiet window.** The stock ROMs release the lines once and do not take
+  them back before idle: the 1541 and 1571 release them when `dskint` sets up
+  the serial port after the diagnostic (`pb` 0, `ddrb1`), and the 1581 sets
+  its port before its diagnostic with CLK and DATA released (`init_prt_pb`
+  `%11010101`, `iodef.src`). So the derived quiet window is zero: the first
+  sample with both lines released means the bus has settled. JiffyDOS's source
+  is not published, so its boot cannot be checked. Instead the tool times
+  every release a drive takes back (released, then held again) and from then
+  on calls the bus settled only after the lines have stayed released for the
+  longest such gap. A drive that takes the lines back for the first time after
+  the tool has started a transaction cannot be foreseen; the timeline shows it.
+- **Readiness proof.** Each drive is then confirmed by its error channel. A
+  busy DOS acknowledges ATN in hardware (ATNA) but serves it only from its
+  idle loop: `atnirq` only sets `atnpnd` and `idle` calls `atnsrv`, while
+  `watjob` does not (1541 `seratn.src`, `idlesf.src`, `jobssf.src`); the 1581's
+  IRQ likewise only flags ATN (`irq.src`). The adapter waits on that
+  transaction, and its return is the proof. The lines are sampled again
+  before every transaction; none starts while one is held.
+- **Never abandon a transaction.** Limits only stop the tool from starting a
+  new transaction. Each transaction gets the adapter I/O timeout its kind can
+  legitimately need: a readiness probe the outer limit (below); a DOS command
+  and its status `--command-seconds` (the adapter default,
+  `XUM1541_IO_TIMEOUT_MS`, 30 s; validating a full disk can take longer); the
+  status after `UJ` or `U:` the outer limit. Only a drive past those bounds is
+  given up on.
 - **Pairing.** Status reads (`cbm_device_status`: TALK 15, read, UNTALK) and
   commands (`cbm_exec_command`: LISTEN 15, write, UNLISTEN) are paired inside
   libopencbm; `dir` pairs OPEN with CLOSE and TALK with UNTALK in `finally`
-  blocks. A failed step releases ATN, CLK and DATA before the next one.
-- **Retries.** A wait tries at once, then after T_AT (1 ms, the IEC ATN
-  response time), doubling, with a last try at the deadline. Each transaction
-  arms the adapter's I/O timeout (firmware v9, 100 ms ticks) with the time
-  left, so a busy or absent drive cannot block past the deadline; on expiry
-  the firmware releases the lines.
+  blocks.
 
-### Deadlines
+### Outer limit
 
-After `reset`: the adapter's RESET hold (100 ms, `iec_reset`) plus the DOS
-power-on diagnostic, the slowest of the three models. The diagnostic is the
-same code in each ROM (1541 `dskintsf.src` in `DOS_1541_05`, 1571
-`dskintsf.src`, 1581 `dskint.src`): a zero page count test (730 880 cycles), a
-ROM checksum (2 569 cycles a page) and a RAM pattern test (15 378 cycles a
-page), counted from each loop's instruction cycles (`bus.diagnostic_cycles`):
+The outer limit only triggers a report. It is the longest boot derived from
+the ROMs: the adapter's RESET hold (100 ms, `iec_reset`), the slowest DOS
+power-on diagnostic, and a stock 1581's boot file search, 28.64 s in all
+(`bus.OUTER_S`; `--boot-seconds` replaces it). If CLK or DATA is still held
+then, the tool does nothing more to the bus: no ATN, no reset, no release. It
+reports the line history (the transitions seen, which lines are held and for
+how long) and that a drive is holding the bus and needs a power cycle, and
+ends the run. A host that gives up mid-boot and then acts on the bus can hang
+a drive, so giving up never means going on.
+
+The diagnostic is the same code in each ROM (1541 `dskintsf.src` in
+`DOS_1541_05`, 1571 `dskintsf.src`, 1581 `dskint.src`): a zero page count test
+(730 880 cycles), a ROM checksum (2 569 cycles a page) and a RAM pattern test
+(15 378 cycles a page), counted from each loop's instruction cycles
+(`bus.diagnostic_cycles`):
 
 | model | ROM pages | RAM pages | clock | diagnostic |
 |---|---|---|---|---|
@@ -97,18 +119,16 @@ page), counted from each loop's instruction cycles (`bus.diagnostic_cycles`):
 
 The 1571 switches to 1 MHz after its diagnostic (`ptch29`), so 1 MHz bounds
 it. The 1541 figure fits the "about 1.2 seconds" after RESET that OpenCBM's
-`iec_reset` notes for a 1541. A 1581 adds its boot file search
-([below](#1581-boot-file-search)) when its model is known: from an earlier
-`identify` or `detect`, or declared with `--model 9=1581`. `--boot-seconds`
-replaces the whole bound for every drive.
+`iec_reset` notes for a 1541.
 
 #### 1581 boot file search
 
 After its diagnostic a 1581 resets its controller and restores the head, then
 looks for a `COPYRIGHT CBM 86` file (`dskint.src` sets `dejavu` bit 7, then
 `cbmboot` and `utlodr.src` run `autoi` and `lookup`). It serves ATN only
-afterwards. The bound (`bus.boot_file_search_s`, 27.38 s) is built from these
-terms, all from the `DOS_1581` source and the WD177x data sheet:
+afterwards, with the lines released throughout. The bound
+(`bus.boot_file_search_s`, 27.38 s) is built from these terms, all from the
+`DOS_1581` source and the WD177x data sheet:
 
 | term | value | source |
 |---|---|---|
@@ -137,43 +157,63 @@ sectors 20-39:
 
 A readable disk takes a small part of this: the mechanics and about a
 revolution per job. The bound covers the search only; a boot file that is
-found then runs, for as long as it likes.
+found then runs, for as long as it likes. JiffyDOS replaces the ROM and its
+source is not published, so whether it keeps, changes or drops the search
+cannot be sourced; the bound is the stock ROM's. A JiffyDOS 1581 may also fail
+`cbm_identify`, which matches the stock ROM's footprint at `$FF40` (`0x01BA`,
+OpenCBM `detect.c`).
 
-JiffyDOS replaces the ROM, and its source is not published, so whether it
-keeps, changes or drops the boot file search cannot be sourced. The bound is
-the stock ROM's; a JiffyDOS 1581 may also fail `cbm_identify`, which matches the
-stock ROM's footprint at `$FF40` (`0x01BA`, OpenCBM `detect.c`), so declare it
-with `--model 9=1581` and give it `--boot-seconds` if it takes longer.
+#### Measured
 
-After a DOS command: the adapter's I/O idle timeout (`XUM1541_IO_TIMEOUT_MS`,
-30 000 ms by default in the plugin), the longest a drive may go without bus
-progress (`--command-seconds`). After `UJ` or `U:` the drive reruns its
-diagnostic, so the reset deadline applies.
+With a 1571 (JiffyDOS) on 8, a 1581 (JiffyDOS, disk inserted) on 9 and a
+1541-II (JiffyDOS 5.0) on 10, after a reset CLK and DATA stayed low until
+8.33 s, the first `wait` (device 8) returned then, 9 answered 73 (1581) and
+10 answered 73 (JiffyDOS 5.0 1541), and the whole `reset`, `wait 8 9 10`,
+`status 8 9 10` run took 9.8 s. The user's reading is that the 1571 held the
+lines; the run did not isolate it. Each reset's `timeline` records the
+evidence: the time each line was last released and each drive's first answer.
 
-### Failures and signals
+### JSON
+
+Each step prints one record. `reset` returns `settled_s` and its `timeline`:
+`transitions` (`[seconds, [lines low]]` at every change), `released` (the
+last release of each line), `settled` and `answered` (each drive's first
+answer, in seconds after the reset); `wait` and a first `status` give the
+drive's `answered_s`. The summary lists every timeline (the run start, each
+reset, each `UJ`/`U:`).
 
 Every failed, refused-by-DOS or interrupted step carries a `bus` record, and
 the summary carries one for the end of the run and for each failed drive: the
 lines found low (`ATN`, `CLK`, `DATA`, `RESET`, `SRQ`) by `iec_poll`, how
-long each has been low (from the first poll that saw it, or from the reset if
-it was low at the first poll after it), the time since the last reset and the
-last ATN sequence, and the addressed drive. Waits poll the lines at every try,
-so the times come from real samples. `text` says it in a line, for example
-`CLK low for 1.27 s since reset; DATA low for 1.27 s since reset; ATN not
-asserted; reset 1.27 s ago; no ATN yet; no drive addressed`.
+long each has been low, the time since the last reset and the last ATN
+sequence, and the addressed drive. `text` says it in a line, for example
+`CLK low for 2.10 s since reset; DATA low for 2.10 s since reset; ATN not
+asserted; reset 2.10 s ago; no ATN yet; no drive addressed`. `held_since` says
+where each time starts: `seen` (the poll that first saw it low), `reset`, or
+`unknown` (low when the run started, so the time is a lower bound).
 
-A drive that misses its deadline fails its step with a clear error and the
+### Failures and signals
+
+Held lines name no drive, so reaching the outer limit fails the bus, not the
+drive being waited for: the summary's `held` says how long the lines have
+been held since the reset or since the run started, that this is past every
+derived boot bound, what was seen, that a drive is holding the bus and needs a
+power cycle, and that nothing was sent. No drive entry is marked failed for
+it, and `hwcheck`'s recovery does not reset again.
+
+A drive that does not answer once the lines are free fails its step and the
 script stops; `--keep-going` skips only that drive's later steps. A hung DOS
 holds its ATN acknowledge, so it blocks every other drive's transactions too:
 `--keep-going` helps with absent drives and DOS errors, and a hung drive needs
 a power cycle.
 
-SIGINT and SIGTERM stop the session after the transaction in progress returns
-(finished or timed out); the host then releases its lines and closes the
-adapter, so the next session does not find it mid-command. A transaction
-lasts at most its deadline, and the plugin allows 3 s more to unwind an
-aborted one (`XUM1541_RESET_MS`), so `docker stop` must wait longer than the
-command deadline plus 3 s: `docker run --stop-timeout 34` with the defaults.
+SIGINT and SIGTERM stop the session after the transaction or line wait in
+progress returns; the host then releases its lines (unless it is leaving a
+held bus alone) and closes the adapter. A transaction may run for its full
+span, and the plugin allows 3 s more to unwind (`XUM1541_RESET_MS`), so
+`docker stop` must wait longer than the longest span plus 3 s: the outer
+limit, 28.64 s, or `--command-seconds` (30 s) if longer, so
+`docker run --stop-timeout 34` with the defaults.
 
 ### Head safety
 
