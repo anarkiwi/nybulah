@@ -29,6 +29,9 @@ them back.
     the physically possible track lengths;
   - killer and unformatted track classification;
   - index alignment.
+- **Disk map:** every revolution of every track classified against clean-DOS
+  statistics, with stable, weak and capture-fault regions told apart
+  (`nybulah map`, [docs/analysis.md](docs/analysis.md#disk-map)).
 - **Formats:** G64, NIB, NB2, D64 and D71, with conversion between them. Error
   bytes are supported.
 - **Compatibility readers:** NBZ, G64/G71 with SPS EXT, P64, SCP and KryoFlux,
@@ -79,6 +82,16 @@ nybulah hwcheck --devs 8 10        # identify drives, probe RAM, benchmark trans
 nybulah read --dev 10 disk.d64     # 1541: read with error bytes
 nybulah read --dev 8 disk.d71      # 1571: double-sided
 nybulah write --dev 8 disk.d71     # encode, write, verify
+```
+
+![Disk map of a synthetic disk](docs/img/diskmap.apng)
+
+*Disk map of a synthetic disk (`tools/diskmap_example.py`), stepping through
+four revolutions: grey is standard DOS content; hatched regions change between
+revolutions; outlines are capture faults ([static view](docs/img/diskmap.png)).*
+
+```sh
+nybulah map disk.nib -o disk.html  # .png disk, .apng animation, .svg/.html strip with tooltips
 ```
 
 `nybulah <command> --help` lists the options, for example `--transport

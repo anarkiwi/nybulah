@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from nybulah import cli, scenarios, survey
-from nybulah.analysis import gcr
+from nybulah.analysis import gcr, regions
 from nybulah.analysis.cycle import TrackKind
 from nybulah.analysis.sector import (
     GAP_BYTE,
@@ -106,7 +106,8 @@ def rows_fixture(corpus):
     items = survey.list_items(corpus, progress=False)
     nib = next(i for i in items if i[-1] == "disk.nib")
     jobs = dict(survey.pair_jobs(items))
-    meta, rows, lengths, sync_rows = survey.run_job(str(corpus), nib, jobs[nib])
+    meta, rows, cols = survey.run_job(str(corpus), nib, jobs[nib])
+    lengths, sync_rows = cols["sync_len"], cols["sync_row"]
     assert meta["error"] == "" and meta["fmt"] == "nib"
     assert meta["disk_id"] == int.from_bytes(DISK_ID, "big")
     assert meta["cosmetic_id"] == int.from_bytes(BAM_ID, "big")
@@ -166,16 +167,20 @@ def test_protection_tracks(rows):
     assert rows[2]["sim_half"] == 1 and np.isnan(rows[3]["sim_next"])
 
 
-def test_multipass_weak_region():
+def weak_nb2():
+    """NB2 of track 18 read four times with a weak region."""
     track_bits = gcr.to_bits(_gcr(18))
     data = np.zeros((4, 4, NIB_TRACK), np.uint8)
     for k in range(4):
         cap = simulate_capture(track_bits, 8 * NIB_TRACK, weak=(20000, 400), rng=k)
         data[2, k] = gcr.to_bytes(cap)
-    image = loads(write_nib(Nib([NibEntry(36, 2, data)], 2, False, 4)))
-    rows = survey.survey_image(image)[0]
+    return loads(write_nib(Nib([NibEntry(36, 2, data)], 2, False, 4)))
+
+
+def test_multipass_weak_region():
+    rows = survey.survey_image(weak_nb2())[0]
     assert rows["captures"][0] == 4 and 0 < rows["mp_disagree"][0] < 0.01
-    assert 300 <= rows["mp_span"][0] <= 400 + 2 * survey.GROUP_BITS
+    assert 300 <= rows["mp_span"][0] <= 400 + 2 * regions.GROUP_BITS
 
 
 def test_primitives():
@@ -193,7 +198,7 @@ def test_primitives():
     assert lag == 1234 and agree == 1 - 10 / 5000 and z > 60
     assert np.flatnonzero(miss).tolist() == list(range(100, 110))
     assert np.isnan(survey.agreement(ref, ref[:0])[0])
-    assert survey.ROTATION_CLASS[0xAA] == survey.ROTATION_CLASS[0x55] == 0x55
+    assert regions.ROTATION_CLASS[0xAA] == regions.ROTATION_CLASS[0x55] == 0x55
     assert survey.header_period(
         np.zeros(0, np.int64), np.zeros((0, 8), np.uint8), 100
     ) == (

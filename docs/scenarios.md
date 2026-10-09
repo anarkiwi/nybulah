@@ -70,6 +70,15 @@ tracks*. A clean DOS track meets all of these conditions:
 | illegal-GCR span | 1745 bits | 1719 bits |
 | neighbour agreement | 0.99925 | 0.99924 |
 | multi-capture disagreement | none (no multi-capture images) | – |
+| gap after a header | 19 – 90 bits | 19 – 90 bits |
+| gap after a data block | 0 – 2411 bits | 0 – 2356 bits |
+| share of a gap's bytes in its dominant fill class (below) | 0.327 | 0.333 |
+| fill classes dominating at least 0.1% of gaps | 0x25, 0x3D, 0x55 | 0x00, 0x25, 0x3D, 0x55 |
+
+The gap rows come from per-gap columns (`gap_len`, `gap_after`, `gap_top`,
+`gap_hits`, `gap_row`) added in a later run with otherwise identical
+thresholds. Fill classes are bytes up to bit rotation (`regions.ROTATION_CLASS`).
+`nybulah/thresholds.json` ships these bounds for `nybulah map`.
 
 Two cut-offs are definitions rather than quantiles:
 
@@ -363,6 +372,6 @@ Measured speed was 299.7–300.4 rpm, derived from `hdr_period`.
 
 | path | contents |
 |---|---|
-| `artifacts/survey-new/part-*.npz` | Per-track rows (`survey.TRACK_DTYPE`), image columns `image_*`, `sync_len`/`sync_row` |
+| `artifacts/survey-new/part-*.npz` | Per-track rows (`survey.TRACK_DTYPE`), image columns `image_*`, `sync_len`/`sync_row` (and per-gap `gap_*` columns in later runs) |
 | `artifacts/survey-new/summary.json` | Every number above for the new run, including the reference disk |
 | `artifacts/survey/` | The old run |

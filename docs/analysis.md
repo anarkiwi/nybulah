@@ -221,3 +221,71 @@ images, loose or zipped, loaded through `nybulah.formats.loads`. It runs only wh
 `summary.json` with scenario prevalence, thresholds derived from clean DOS
 tracks, and the per-scenario behaviour of `find_cycle`. See
 [scenarios.md](scenarios.md).
+
+## Disk map
+
+`nybulah.analysis.diskmap.disk_map(image, captures=None, bins=2048)` classifies every interval of every
+revolution of every track. `nybulah map IMAGE -o out.{png,svg,apng,html}`
+renders it (`nybulah.viz`); `nybulah info --map` prints one line per track.
+
+**Intervals.** `regions.parse(bits)` splits one circular revolution into syncs,
+the block after each sync (header, data or other, by its first GCR byte), the
+gap after each block's nominal width, and runs of three or more zero cells.
+`nybulah.survey` computes its per-track features from these intervals, so the
+survey and the map share one parse.
+
+**Angle.** Index-aligned captures (SCP, KryoFlux, P64, indexed reads) keep bit
+0 at the index. Other tracks are rotated so the sync before the sector 0 header
+(else the longest sync) is at bit 0; `DiskMap.aligned` is false for them. Each
+track is drawn over its own revolution length; a length outside the clean-DOS
+range is its own kind.
+
+**Thresholds.** Every bound is a clean-DOS quantile from `scenarios.thresholds`
+(see [scenarios.md](scenarios.md#thresholds)), shipped as
+`nybulah/thresholds.json`; `--thresholds summary.json` uses another survey.
+Whole-track kinds are the survey scenarios of the image's own rows.
+
+**Regions.** `DiskMap.regions` has one row per interval: `track` (halftrack
+key), `rev`, `start_bit`/`end_bit` (end may pass the revolution length, which
+wraps), `kind`, `cls`, `detail` and `stability`.
+
+| class | kinds | `detail` |
+|---|---|---|
+| standard | `SYNC`, `HEADER`, `DATA`, `GAP`, `ZERO_SPAN` (illegal-GCR runs within the clean range) | length, sector, sector, length, length |
+| density | `ZONE`, `ZONE_MIXED`, `ZONE_LABEL`, `LONG_TRACK`, `SHORT_TRACK`, `HALF_TRACK`, `FAT_TRACK` (whole track) | – |
+| gap/fill | `GAP_LONG`, `GAP_SHORT` (by the block before), `GAP_FILL` (dominant class not a clean fill class), `GAP_IRREGULAR` (dominant class share below the clean bound) | length or fill class |
+| sync | `SYNC_LONG`, `SYNC_SHORT`, `SYNC_IN_BLOCK` (starts inside the previous block's nominal width), `NO_SYNC`, `KILLER` | length, or bits into the block |
+| header | `HDR_GCR`, `HDR_CHECKSUM`, `HDR_TRACK`, `HDR_SECTOR` (≥ zone sector count), `HDR_DUPLICATE`, `HDR_ID` (≠ track 18 ID), `HDR_MARK` (other mark before a data block) | sector, or mark |
+| data | `DATA_SHORT` (sync before 325 GCR bytes), `DATA_GCR`, `DATA_CHECKSUM`, `DATA_ORPHAN` (no valid header before), `DATA_MARK` (other mark after a header), `BLOCK_OTHER` | sector, checksum delta, bits back to the previous block, or mark |
+| no-flux/weak | `GAP_NOFLUX` (majority fill class with three zero cells), `NOFLUX_SPAN` (illegal-GCR chain above the clean bound), `DISAGREE` (bits differing from revolution 0), `UNFORMATTED` | length or disagreeing bits |
+| capture fault | `CAPTURE_FAULT`: a decode failure after which framing resumes shifted (`faults.stream_faults`) and that explains a transient region; reads only, not one-revolution images | shift |
+
+`EMPTY` marks unused tracks (unformatted beyond 35, half-track crosstalk).
+
+**Revolutions.** Every whole revolution of every capture (index to index, or
+cycle by cycle from `find_cycle`) is parsed and classified. `align(ref, rev)`
+pairs syncs as mutual nearest neighbours after a canonical FFT alignment, maps
+positions by the offset of the last paired sync, and compares each block of
+revolution 0 with the other revolution from its paired sync.
+
+**Stability.**
+
+| value | meaning |
+|---|---|
+| intrinsic | every revolution has a region of the same kind overlapping it, and no unexplained disagreement does |
+| unstable | some revolutions lack it, or a disagreement overlaps it (weak bits) |
+| transient | not in every revolution, not no-flux, and over a framing shift of its own read (an orphan data block: of the block before; a disagreement: of either read) |
+| unconfirmed | one revolution only |
+
+Framing shifts that every revolution repeats are disk content, and shifts that
+explain no region (write splices in gaps) are dropped. Blocks with non-DOS marks
+are never explained by a read.
+
+**Raster.** `DiskMap.grid[row, bin]` is the highest class covering each bin:
+local anomalies over whole-track kinds over standard regions. Transient regions
+draw as standard. `DiskMap.marks` flags unstable bins (1) and capture-fault
+bins (2). `raster(rev=r)` gives one revolution.
+
+`synth.synthetic_disk(revolutions)` builds index-aligned reads with one of
+each injected anomaly and their positions; `tools/diskmap_example.py` renders
+it to `docs/img/diskmap.{png,apng}`.

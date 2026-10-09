@@ -179,6 +179,15 @@ def gcr_faults(bits):
     return _classify(_streams_faults([np.asarray(bits, np.uint8)]))
 
 
+def stream_faults(streams):
+    """Decode failures of sync-framed streams fitted as one capture; ``segment``
+    indexes ``streams`` (see :func:`gcr_faults`)."""
+    streams = [np.asarray(s, np.uint8) for s in streams]
+    if sum(len(s) // PHASES for s in streams) == 0:
+        return np.zeros(0, FAULT_DTYPE)
+    return _classify(_streams_faults(streams))
+
+
 def _resolve(faults, content, period):
     """Exact shifts for lone faults whose segment has a fault-free copy a period away."""
     n = len(content)
