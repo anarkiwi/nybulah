@@ -21,7 +21,7 @@ verified.
 | Nibbler | `nybulah.nibbler` | Talks to `track.s` through any `Monitor` (s1, s2, s3). Returns `Capture` records |
 | Passes | `nybulah.passes` | Host model of the capture passes: sample windows, anchors, merge |
 | Disk | `nybulah.disk` | Track jobs: decodes with `nybulah.analysis`, formats tracks, verifies |
-| Simulator | `nybulah.simdisk` | Media, stepper, VIA2 and WD1770 index for the py65 drive model |
+| Simulator | `nybulah.sim`, `simdisk`, `simfast`, `simhost` | py65 drive model with media, stepper, VIA2 and WD1770 index; its compiled mirror; host stand-ins |
 
 ## Drive routines
 
@@ -101,8 +101,8 @@ windows, at most 2 + 7 cycles, against a cell of 3.25 cycles at zone 3. The
 hidden-one count is the feasible integer nearest the middle (0, or enough to
 make 10 ones with the latched ones), and every sync carries the bounds the
 windows allow (`Capture.sync_bounds`). Since 9 cycles is under 3 cells at
-any supported speed, the estimate is within ±1 bit, and exact when the
-windows are narrow. The byte period comes from runs of bytes with no
+any supported speed, the estimate is within ±1 bit (a few reach ±2 inside
+their bounds, see below), and exact when the windows are narrow. The byte period comes from runs of bytes with no
 uncertain sync between them (`P_SPAN` bytes either side, centred so steady
 motor drift cancels); its error enters the bounds, which grow for very long
 syncs among dense syncs.
@@ -113,6 +113,29 @@ cannot arrive between two polls). After SYNC is seen it times the release in
 A sync too short for TS to see is too short to wrap. TS records 256 syncs; a
 fuller track ends TS (`ST_FULL`) and syncs past it get an unbounded upper
 length.
+
+**Simulated accuracy.** `tools/sync_accuracy.py --seeds 10` captures a
+track holding two of each sync length 10-20, 24, 28, 32, 40, 48, 64, 80,
+100, 128, 200, 255, 256, 300, 400, 500, 640, 800 and 1000 bits with 1-24
+data bytes between syncs, on both models, all four zones, 297/300/303 rpm,
+with and without 3 rpm of wander (2 s period), every start mode: 1200
+captures, 115613 syncs.
+
+| Measure | Result |
+|---|---|
+| Captures losing a byte | 0 |
+| Syncs missed | 0 |
+| Run length error (bits): 0 / ±1 / ±2 | 96424 / 19142 / 29 |
+| True length outside `sync_bounds` | 18 |
+| Syncs invented | 8 |
+| Bound width (bits): 0 / 1 / 2 / 3-14 | 25000 / 61084 / 16713 / 12816 |
+
+Every ±2 error lies inside its bounds. The 18 out-of-bounds runs and the 8
+invented syncs all come from 1571 `index` captures at 297 rpm (mostly zone 2
+with wander): when a long sync's release wait ends on exactly 256 TS
+iterations, the TS byte count of the next long sync a few bytes on is one
+short, its TB timer wraps land on the neighbouring byte, and a 1000-bit
+sync reads as about 60 bits.
 
 **Revolution.** On a 1571 the index period gives the rpm. Otherwise the
 byte period of the BITS pass's own repetition, timed by TB across it, gives
