@@ -29,7 +29,7 @@ SEND_SCHEDULE = (0, 13, 25, 35, 47, 57)
 RECV_SCHEDULE = (0, 6, 12, 21, 34, 43)
 SEND_PAIRS = ((1, 3), (5, 7), (0, 2), (4, 6))
 RECV_PAIRS = ((0, 2), (1, 3), (4, 6), (5, 7))
-GO_TO_SYNC = 16
+GRACE = 32
 AVR_HZ = 16_000_000
 
 
@@ -300,7 +300,7 @@ class SimX(SimCBM):
         self.now = max(self.now, self.drive.cycles * self.drive.cyc)
         self.now += self.pause.pop(self.ordinal, 0.0)
         start = self.now
-        grace = GO_TO_SYNC * 2 * self.timing.cyc
+        grace = GRACE * self.timing.cyc
         while True:
             if not self._go:
                 self._host(IEC_DATA, self.now)

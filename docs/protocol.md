@@ -54,7 +54,7 @@ both mod 256, starting at 0.
 
 ```
 host:  assert DATA (go) ........ (read: release DATA at SYNC+0.125us)
-drive:  poll DATA ---> SYNC: assert CLK at t=0 (<=16 cycles after seeing go)
+drive:  poll DATA ---> SYNC: assert CLK at t=0 (<=18 cycles after reading go)
 drive -> host (read):   P0..P3 written at fixed cycles, then REL (release)
 host  -> drive (write): drive releases CLK at t=6, then reads P0..P3
 ```
@@ -62,8 +62,8 @@ host  -> drive (write): drive releases CLK at t=6, then reads P0..P3
 The adapter asserts go only when it can take (read) or supply (write) a byte
 and has interrupts masked; it then waits for CLK released followed by CLK
 asserted. If no SYNC arrives within a slice (65536 polls, about 24.6 ms) it
-withdraws go and keeps watching CLK for 32 drive cycles (twice the longest
-go-to-SYNC path), so a drive that saw go just before the withdrawal is still
+withdraws go and keeps watching CLK for 32 drive cycles (the longest path from
+the drive's go read to its SYNC write is 18 cycles, via `jsr xgo`), so a drive that saw go just before the withdrawal is still
 served. Otherwise it services USB/TimerWorker and retries; the firmware I/O
 timeout bounds the whole wait.
 
