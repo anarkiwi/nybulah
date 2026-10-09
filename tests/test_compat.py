@@ -322,8 +322,9 @@ def test_nib_flux_and_d64_conversions():
     rows = {r["track"]: r for r in images.info(scp_image)}
     assert rows["1"]["errors"] == 0 and rows["1"]["revolutions"] == 2
     assert rows["3"]["kind"] == "UNFORMATTED" and rows["3"]["errors"] is None
-    g64 = to_g64(scp_image)
-    assert sorted(g64.tracks) == [2, 36]
+    unformatted = []
+    g64 = to_g64(scp_image, unformatted=unformatted)
+    assert sorted(g64.tracks) == [2, 6, 36] and unformatted == [6]
     nib = Nib(
         [
             NibEntry(2, 3, np.full(NIB_TRACK, 0xFF, np.uint8)),
@@ -338,12 +339,22 @@ def test_nib_flux_and_d64_conversions():
     assert images.revolution(short)[1].kind == TrackKind.KILLER
 
 
+def _rng_bytes(n, seed=11):
+    return np.random.default_rng(seed).integers(0, 256, n, np.uint8)
+
+
 def test_cli_convert_and_info(tmp_path, capsys):
     src = tmp_path / "in.d64"
     src.write_bytes(write_d64(_d64(5)))
     for suffix in (".g64", ".g71", ".p64", ".d64"):
         out = cli.main(["convert", str(src), str(tmp_path / f"out{suffix}")])
         assert out["source"] == "d64" and out["tracks"] == 35
+        assert out["unformatted"] == []
+    noisy = Nib([NibEntry(74, 0, _rng_bytes(NIB_TRACK))])
+    (tmp_path / "noise.nib").write_bytes(write_nib(noisy))
+    out = cli.main(["convert", str(tmp_path / "noise.nib"), str(tmp_path / "n.g64")])
+    assert out["unformatted"] == ["37"]
+    assert 74 in read_g64((tmp_path / "n.g64").read_bytes()).tracks
     assert loads((tmp_path / "out.p64").read_bytes()).kind == "p64"
     info = cli.main(["info", str(tmp_path / "out.g64"), "--layout", "cylinders"])
     assert len(info["tracks"]) == 35 and all(r["errors"] == 0 for r in info["tracks"])
