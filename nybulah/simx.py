@@ -517,6 +517,16 @@ class SimX(SimCBM):
             return self.firmware >= 10
         return hasattr(self, f"{protocol}_read")
 
+    def iec_poll(self):
+        """Bus lines; a halted drive's clock catches up with the host's and on
+        until the host's last edges have settled."""
+        d = self.drive
+        if d.halted:
+            t = max(self.bus.clock(), self.now)
+            t = max(t, min(self.bus.settles(t), t + self.bus.rise))
+            d.cycles = max(d.cycles, math.ceil(d.cycle_at(t)))
+        return super().iec_poll()
+
     def _advance(self, t):
         d = self.drive
         while not d.halted and d.next_access() < t:

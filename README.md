@@ -95,8 +95,9 @@ Measured transfer rates, ZoomFloppy, 8 KB blocks, bytes/s read / write
 
 ```sh
 docker build --target runtime -t nybulah .
-alias nybulah='docker run --rm --device=/dev/bus/usb -v "$PWD:/data" nybulah'
+alias nybulah='docker run --rm --stop-timeout 34 --device=/dev/bus/usb -v "$PWD:/data" nybulah'
 
+nybulah bus reset "wait 8 9 10"           # reset; wait until every drive has settled
 nybulah hwcheck --devs 8 10 --proto s3     # identify drives, probe RAM, bench transports
 nybulah read --dev 10 --transport s3 disk.d64   # 1541: read with error bytes
 nybulah read --dev 8 --transport s4 disk.d71    # 1571: both sides, streamed with v12
@@ -129,8 +130,8 @@ stream), `ramprobe` and `bench`. `nybulah <command> --help` lists the options.
 
 ## Documentation
 
-- [docs/hardware.md](docs/hardware.md): hardware check, probes, firmware
-  flashing and measured rates
+- [docs/hardware.md](docs/hardware.md): bus sessions, hardware check, probes,
+  firmware flashing and measured rates
 - [docs/protocol.md](docs/protocol.md): X, burst X, SRQ and streaming wire
   protocols, timing and margins
 - [docs/disk.md](docs/disk.md): drive routines, capture passes, D64/D71

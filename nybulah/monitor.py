@@ -8,6 +8,7 @@ import time
 import warnings
 from importlib import resources
 
+from .bus import DriveUnresponsive, answers, recover
 from .fastx import SrqLink, XBLink, XLink
 from .link import (
     BASE,
@@ -42,10 +43,6 @@ __all__ = [
 
 class BusNotIdle(BusError):
     """Another device holds a line the monitor needs."""
-
-
-class DriveUnresponsive(IOError):
-    """The drive did not answer its status channel after reset."""
 
 
 RECOVERABLE = (BusError, OpenCBMError)
@@ -90,36 +87,6 @@ def supported(cbm, protocol):
         return False
     probe = getattr(cbm, "supports", None)
     return probe(protocol) if probe else hasattr(cbm, f"{protocol}_read")
-
-
-def answers(status):
-    """Whether a status channel string came from a live DOS."""
-    m = re.match(r"\s*(\d+)\s*,", status or "")
-    return bool(m) and int(m.group(1)) != 99
-
-
-def recover(cbm, dev, resets=2, timeout=3.0, poll=0.1):
-    """Release the host's lines, reset the bus and wait until dev answers.
-
-    Returns the drive's status string; a second reset covers drives that
-    do not come back from the first. Raises DriveUnresponsive otherwise.
-    """
-    cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)
-    status = ""
-    for _ in range(resets):
-        cbm.reset()
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                status = cbm.status(dev)
-            except OpenCBMError as e:
-                status = str(e)
-            if answers(status):
-                return status
-            if time.monotonic() > deadline:
-                break
-            time.sleep(poll)
-    raise DriveUnresponsive(f"device {dev} silent after {resets} resets: {status!r}")
 
 
 LINKS = {"s1": S1Link, "s2": S2Link, "s3": XLink, "s4": SrqLink}

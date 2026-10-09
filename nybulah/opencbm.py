@@ -2,12 +2,14 @@
 
 import ctypes
 import ctypes.util
+import os
 
 IEC_DATA = 0x01
 IEC_CLOCK = 0x02
 IEC_ATN = 0x04
 IEC_RESET = 0x08
 IEC_SRQ = 0x10
+IO_TIMEOUT_MS = int(os.environ.get("XUM1541_IO_TIMEOUT_MS", "30000"), 0)
 
 _FD = ctypes.c_ssize_t
 _BUF = ctypes.c_char_p
@@ -37,6 +39,15 @@ _PROTOS = {
             ctypes.POINTER(ctypes.c_char_p),
         ],
     ),
+    "cbm_talk": (ctypes.c_int, [_FD, ctypes.c_ubyte, ctypes.c_ubyte]),
+    "cbm_untalk": (ctypes.c_int, [_FD]),
+    "cbm_open": (
+        ctypes.c_int,
+        [_FD, ctypes.c_ubyte, ctypes.c_ubyte, _BUF, ctypes.c_size_t],
+    ),
+    "cbm_close": (ctypes.c_int, [_FD, ctypes.c_ubyte, ctypes.c_ubyte]),
+    "cbm_raw_read": (ctypes.c_int, [_FD, ctypes.c_void_p, ctypes.c_size_t]),
+    "cbm_get_eoi": (ctypes.c_int, [_FD]),
     "cbm_iec_poll": (ctypes.c_int, [_FD]),
     "cbm_iec_get": (ctypes.c_int, [_FD, ctypes.c_int]),
     "cbm_iec_set": (None, [_FD, ctypes.c_int]),
@@ -148,6 +159,34 @@ class OpenCBM:
         buf = ctypes.create_string_buffer(64)
         self.lib.cbm_device_status(self.fd, dev, buf, len(buf))
         return buf.value.decode(errors="replace").strip()
+
+    def talk(self, dev, sa):
+        """Address dev as talker on secondary address sa."""
+        self._check(self.lib.cbm_talk(self.fd, dev, sa), "cbm_talk", 0)
+
+    def untalk(self):
+        """Release the talker."""
+        self._check(self.lib.cbm_untalk(self.fd), "cbm_untalk", 0)
+
+    def open_file(self, dev, sa, name):
+        """OPEN name on dev's secondary address sa (LISTEN, name, UNLISTEN)."""
+        name = bytes(name)
+        rc = self.lib.cbm_open(self.fd, dev, sa, name, len(name))
+        self._check(rc, "cbm_open", 0)
+
+    def close_file(self, dev, sa):
+        """CLOSE dev's secondary address sa (LISTEN, CLOSE, UNLISTEN)."""
+        self._check(self.lib.cbm_close(self.fd, dev, sa), "cbm_close", 0)
+
+    def raw_read(self, size):
+        """Read up to size bytes from the talker; fewer at EOI."""
+        buf = ctypes.create_string_buffer(size)
+        n = self._check(self.lib.cbm_raw_read(self.fd, buf, size), "cbm_raw_read")
+        return buf.raw[:n]
+
+    def get_eoi(self):
+        """Whether the talker signalled EOI on the last byte."""
+        return bool(self.lib.cbm_get_eoi(self.fd))
 
     def iec_poll(self):
         """Return the current IEC line state bitmask."""

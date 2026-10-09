@@ -2,12 +2,13 @@
 
 import argparse
 
-from . import bench, diskcmd, homeprobe, hwcheck, ramcheck, ramprobe, streamprobe
+from . import bench, bus, diskcmd, homeprobe, hwcheck, ramcheck, ramprobe, streamprobe
 from .imagecmd import Convert, Flux, Info, Map
 from .survey import Survey
 from .tool import run
 
 COMMANDS = {
+    "bus": bus,
     "hwcheck": hwcheck,
     "bench": bench,
     "ramprobe": ramprobe,
@@ -35,9 +36,9 @@ def main(argv=None, cbm=None):
 
 
 def console():
-    """Console-script entry: run a command, exit status 0 unless it raises."""
-    main()
-    return 0
+    """Console-script entry: exit status 1 when a command reports ok false."""
+    out = main()
+    return int(isinstance(out, dict) and out.get("ok") is False)
 
 
 if __name__ == "__main__":
