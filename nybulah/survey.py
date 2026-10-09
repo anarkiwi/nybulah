@@ -14,6 +14,7 @@ import os
 import pathlib
 import time
 import zipfile
+from dataclasses import dataclass
 
 import numpy as np
 from tqdm import tqdm
@@ -21,19 +22,26 @@ from tqdm import tqdm
 from .analysis.capture import segments
 from .analysis.cycle import TrackKind, lag_window
 from .analysis.gcr import (
-    SYNC_MIN_BITS,
     bits_per_revolution,
     decode_bits,
     runs_of_ones,
     sectors_per_track,
     speed_zone,
 )
+from .analysis.regions import (
+    HEADER_BITS,
+    ROTATION_CLASS,
+    Block,
+    agreement,
+    canonical,
+    headers_ok,
+    longest_chain,
+    parse,
+    windows,
+)
 from .analysis.sector import (
-    DATA_CHECKED_BYTES,
-    DATA_GCR_BYTES,
     DATA_ID,
     HEADER_GCR_BYTES,
-    HEADER_ID,
     SectorError,
     decode_track,
 )
@@ -50,9 +58,6 @@ from .formats.nib import write_nib
 SUFFIXES = {".nib", ".nbz", ".nb2", ".g64", ".g71", ".p64", ".scp"}
 NIB_KINDS = {"nib", "nbz", "nb2"}
 GCR_KINDS = {"g64", "g71"}
-GROUP_BITS = 40
-HEADER_BITS = 8 * HEADER_GCR_BYTES
-DATA_BITS = 8 * DATA_GCR_BYTES
 BAM_TRACK = 18
 MAX_TRACK = 42
 BAM_ID = slice(0xA2, 0xA4)
@@ -60,11 +65,6 @@ PART_IMAGES = 256
 THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
 NUMBA_THREADS = "NUMBA_NUM_THREADS"
 ERROR_CODES = 16
-_BYTE = np.arange(256)
-ROTATION_CLASS = np.min(
-    [(_BYTE << r | _BYTE >> (8 - r)) & 0xFF for r in range(8)], axis=0
-)
-
 TRACK_DTYPE = np.dtype(
     [
         ("image", "<i4"),
@@ -127,81 +127,11 @@ TRACK_DTYPE = np.dtype(
         ("pair_len", "<i4"),
     ]
 )
+SPAN_FIELDS = {"sync": ("len",), "gap": ("len", "after", "top", "hits")}
+SPAN_TYPES = {"sync": (np.int32,), "gap": (np.int32, np.uint8, np.int16, np.int16)}
 GAP_FIELDS = ("gap_bytes", "gap_entropy", "gap_top", "gap_top_frac")
 IMAGE_FIELDS = ("key", "fmt", "sha1", "pair", "error")
 IMAGE_INTS = ("disk_id", "cosmetic_id", "tracks")
-
-
-def _ranges(starts, counts, step=1):
-    """Concatenated ``starts[i] + step * arange(counts[i])``."""
-    counts = np.asarray(counts, np.int64)
-    offsets = np.arange(counts.sum()) - np.repeat(np.cumsum(counts) - counts, counts)
-    return np.repeat(np.asarray(starts, np.int64), counts) + step * offsets
-
-
-def canonical(bits):
-    """A circular bit stream with every sync run cut to ``SYNC_MIN_BITS`` ones.
-
-    Captures frame and time syncs differently; this makes them comparable.
-    """
-    bits = np.asarray(bits, np.uint8)
-    starts, lengths = runs_of_ones(bits, circular=True)
-    if len(starts) and lengths[0] >= len(bits):
-        return bits[:SYNC_MIN_BITS]
-    keep = np.ones(len(bits), bool)
-    keep[
-        _ranges(starts + SYNC_MIN_BITS, lengths - SYNC_MIN_BITS) % max(len(bits), 1)
-    ] = 0
-    return bits[keep]
-
-
-def longest_chain(starts, ends, link=GROUP_BITS):
-    """Longest span of sorted intervals joined when at most ``link`` bits apart."""
-    if len(starts) == 0:
-        return 0
-    brk = np.flatnonzero(starts[1:] - ends[:-1] > link) + 1
-    first = np.concatenate(([0], brk))
-    last = np.concatenate((brk - 1, [len(starts) - 1]))
-    return int((ends[last] - starts[first]).max())
-
-
-def agreement(ref, bits):
-    """Best alignment of ``bits`` against the circular ``ref``.
-
-    Returns ``(fraction of agreeing bits, z above chance, lag, mismatch mask)``
-    over the first ``min(len(ref), len(bits))`` bits of ``bits``.
-    """
-    n = min(len(ref), len(bits))
-    if n == 0:
-        return np.nan, np.nan, 0, np.zeros(0, bool)
-    ref = np.asarray(ref, np.uint8)
-    probe = np.asarray(bits[:n], np.uint8)
-    tiled = np.concatenate((ref, ref[:n]))
-    size = 1 << (len(tiled) + n).bit_length()
-    spec = np.fft.rfft(2.0 * tiled - 1, size) * np.conj(
-        np.fft.rfft(2.0 * probe - 1, size)
-    )
-    corr = np.fft.irfft(spec, size)[: len(ref)]
-    lag = int(np.argmax(corr))
-    agree = (n + corr[lag]) / (2 * n)
-    p, q = ref.mean(), probe.mean()
-    chance = p * q + (1 - p) * (1 - q)
-    z = (agree - chance) * np.sqrt(n / max(chance * (1 - chance), 1e-12))
-    return float(agree), float(z), lag, probe != tiled[lag : lag + n]
-
-
-def _blocks(bits, ends):
-    """Decoded first ``HEADER_GCR_BYTES`` GCR bytes after each sync end (circular)."""
-    window = (np.asarray(ends)[:, None] + np.arange(HEADER_BITS)) % len(bits)
-    return decode_bits(bits[window])
-
-
-def _headers_ok(hdr, valid):
-    return (
-        (hdr[:, 0] == HEADER_ID)
-        & valid[:, :6].all(axis=1)
-        & (np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0)
-    )
 
 
 def linear_headers(bits):
@@ -214,8 +144,8 @@ def linear_headers(bits):
     ends = ends[ends + HEADER_BITS <= len(bits)]
     if len(ends) == 0:
         return ends, np.zeros((0, HEADER_GCR_BYTES * 4 // 5), np.uint8)
-    hdr, valid = _blocks(bits, ends)
-    ok = _headers_ok(hdr, valid)
+    hdr, valid = decode_bits(windows(bits, ends, HEADER_BITS))
+    ok = headers_ok(hdr, valid)
     return ends[ok], hdr[ok]
 
 
@@ -243,44 +173,44 @@ def _sectors(good):
     return good[good[:, 3] == mode, 2], mode
 
 
-def _gap_stats(rev, ends, seg_len, skip):
-    """Gap bytes framed from each sync end: count, entropy (bits/byte), and the
-    dominant rotation class and its share (independent of bit framing)."""
-    counts = np.maximum((seg_len - skip) // 8, 0)
-    starts = _ranges(ends + skip, counts, 8)
-    if len(starts) == 0:
+def _gap_stats(rev):
+    """Whole gap bytes: count, entropy (bits/byte), and the dominant rotation
+    class and its share (independent of bit framing)."""
+    gap = rev.gaps.bytes
+    if len(gap) == 0:
         return 0, 0.0, -1, 0.0
-    gap = np.packbits(rev[(starts[:, None] + np.arange(8)) % len(rev)], axis=1)
-    hist = np.bincount(gap.ravel(), minlength=256)
-    p = hist[hist > 0] / len(starts)
-    classes = np.bincount(ROTATION_CLASS[gap.ravel()], minlength=256)
+    hist = np.bincount(gap, minlength=256)
+    p = hist[hist > 0] / len(gap)
+    classes = np.bincount(ROTATION_CLASS[gap], minlength=256)
     top = int(np.argmax(classes))
-    return len(starts), float(-(p * np.log2(p)).sum()), top, classes[top] / len(starts)
+    return len(gap), float(-(p * np.log2(p)).sum()), top, classes[top] / len(gap)
 
 
-def _zone_track(key):
+def zone_track(key):
     """Whole track number whose standard zone and sector count apply."""
     return (key & ~SIDE1) // 2
 
 
-def _physical_track(key):
+def physical_track(key):
+    """Track number carried by the headers of a key's track (side 1 from 36)."""
     half = key & ~SIDE1
     return half // 2 + (SIDE1_TRACK_BASE if key & SIDE1 else 0)
 
 
-def _header_features(row, hdr, valid, key, disk_id):
-    ok = _headers_ok(hdr, valid)
-    is_hdr = (hdr[:, 0] == HEADER_ID) & valid[:, 0]
+def _header_features(row, rev, key, disk_id):
+    hdr, valid = rev.hdr, rev.valid
+    ok = headers_ok(hdr, valid)
+    is_hdr = rev.block_kind == Block.HEADER
     good = hdr[ok]
     row["n_hdr"] = len(good)
     row["n_hdr_bad"] = int((is_hdr & valid[:, :6].all(axis=1) & ~ok).sum())
     if len(good):
         sectors, row["hdr_track"] = _sectors(good)
-        row["hdr_track_frac"] = float((good[:, 3] == _physical_track(key)).mean())
+        row["hdr_track_frac"] = float((good[:, 3] == physical_track(key)).mean())
         unique = np.unique(sectors)
         row["n_sect"], row["n_dupe"] = len(unique), len(sectors) - len(unique)
         row["sect_max"] = int(unique.max())
-        row["n_extra"] = int((unique >= sectors_per_track(_zone_track(key))).sum())
+        row["n_extra"] = int((unique >= sectors_per_track(zone_track(key))).sum())
         ids = good[:, 5].astype(np.int32) << 8 | good[:, 4]
         row["n_id_var"] = len(np.unique(ids))
         row["id_mis"] = int((ids != disk_id).sum()) if disk_id >= 0 else 0
@@ -290,7 +220,6 @@ def _header_features(row, hdr, valid, key, disk_id):
     marks = hdr[nxt[follow], 0]
     row["n_data_nonstd"] = int((marks != DATA_ID).sum())
     row["n_dataid_var"] = len(np.unique(marks))
-    return np.where(is_hdr, HEADER_BITS, np.where(hdr[:, 0] == DATA_ID, DATA_BITS, 0))
 
 
 def _set(row, names, values):
@@ -298,56 +227,47 @@ def _set(row, names, values):
         row[name] = value
 
 
-def _run_features(row, rev, lengths):
+def _run_features(row, rev):
     """Sync and illegal-GCR (three or more zero cells) run statistics."""
-    n = len(rev)
+    n, lengths, zs, zl = rev.n, rev.sync_len, rev.zero_start, rev.zero_len
     row["rev_len"], row["n_sync"] = n, len(lengths)
     row["sync_frac"] = lengths.sum() / max(n, 1)
     row["sync_min"] = lengths.min() if len(lengths) else 0
     row["sync_max"] = lengths.max() if len(lengths) else 0
-    zs, zl = runs_of_ones(1 - rev, min_len=3, circular=True)
     row["zero_runs"], row["zero_frac"] = len(zs), zl.sum() / max(n, 1)
     row["zero_max"] = zl.max() if len(zl) else 0
     row["bad_span"] = longest_chain(zs, zs + zl)
 
 
-def _data_gcr(row, rev, data):
+def _data_gcr(row, rev):
     """Data blocks with invalid GCR in marker, payload or checksum, or only after it."""
-    if len(data):
-        _, bvalid = decode_bits(rev[(data[:, None] + np.arange(DATA_BITS)) % len(rev)])
-        payload = bvalid[:, :DATA_CHECKED_BYTES].all(axis=1)
-        row["n_gcr_payload"] = (~payload).sum()
-        row["n_gcr_tail"] = (payload & ~bvalid.all(axis=1)).sum()
+    marked = rev.valid[rev.data.index, 0]
+    payload, whole = rev.data.payload[marked], rev.data.whole[marked]
+    row["n_gcr_payload"] = (~payload).sum()
+    row["n_gcr_tail"] = (payload & ~whole).sum()
 
 
 def _rev_features(row, rev, key, disk_id):
-    """Sync, illegal-GCR, header, sector and gap features of one revolution."""
-    n = len(rev)
-    starts, lengths = runs_of_ones(rev, circular=True)
-    _run_features(row, rev, lengths)
-    if len(starts) and lengths[0] >= n:
-        return lengths
-    if len(starts) == 0:
-        _set(row, GAP_FIELDS, _gap_stats(rev, np.zeros(1, np.int64), np.array([n]), 0))
-        return lengths
-    ends = (starts + lengths) % n
-    hdr, valid = _blocks(rev, ends)
-    skip = _header_features(row, hdr, valid, key, disk_id)
-    _data_gcr(row, rev, ends[(hdr[:, 0] == DATA_ID) & valid[:, 0]])
-    _set(row, GAP_FIELDS, _gap_stats(rev, ends, (np.roll(starts, -1) - ends) % n, skip))
-    if _decodable(key):
-        decoded = decode_track(rev, *_decode_args(key, disk_id))
+    """Sync, illegal-GCR, header, sector and gap features of a parsed revolution."""
+    _run_features(row, rev)
+    if rev.killer:
+        return
+    if len(rev.sync_len):
+        _header_features(row, rev, key, disk_id)
+        _data_gcr(row, rev)
+    _set(row, GAP_FIELDS, _gap_stats(rev))
+    if len(rev.sync_len) and _decodable(key):
+        decoded = decode_track(rev.bits, *_decode_args(key, disk_id))
         row["errors"] = np.bincount(decoded.errors, minlength=ERROR_CODES)
-    return lengths
 
 
 def _decodable(key):
-    return not key & 1 and _zone_track(key) <= MAX_TRACK
+    return not key & 1 and zone_track(key) <= MAX_TRACK
 
 
 def _decode_args(key, disk_id):
     disk_id = None if disk_id < 0 else bytes([disk_id >> 8, disk_id & 0xFF])
-    return _physical_track(key), disk_id, sectors_per_track(_zone_track(key))
+    return physical_track(key), disk_id, sectors_per_track(zone_track(key))
 
 
 def _capture_features(row, caps, cap, cycle, key, disk_id):
@@ -475,14 +395,59 @@ def _compare(row, key, canon, kinds, pair):
         row["pair_len"] = len(bits)
 
 
-def _track(row, caps, key, best, disk_id):
-    cap, rev, cycle = best
-    lengths = _rev_features(row, rev, key, disk_id)
+def _track(row, caps, key, best, rev, disk_id):
+    cap, _, cycle = best
+    _rev_features(row, rev, key, disk_id)
     _capture_features(row, caps, cap, cycle, key, disk_id)
     others = [c for c in caps if c is not cap]
     if others:
-        _multipass(row, others, canonical(rev))
-    return lengths
+        _multipass(row, others, canonical(rev.bits))
+
+
+def spans(revs):
+    """Per-sync and per-gap columns of parsed revolutions, with each one's row."""
+    syncs = [r.sync_len for r in revs]
+    gaps = [(r.gaps.length, r.gap_after, *r.gap_classes()) for r in revs]
+    out = {}
+    for prefix, cols in (("sync", [(s,) for s in syncs]), ("gap", gaps)):
+        counts = [len(c[0]) for c in cols]
+        out[f"{prefix}_row"] = np.repeat(np.arange(len(cols)), counts).astype(np.int32)
+        for name, dtype, *parts in zip(SPAN_FIELDS[prefix], SPAN_TYPES[prefix], *cols):
+            out[f"{prefix}_{name}"] = np.concatenate(
+                [np.zeros(0, dtype), *parts]
+            ).astype(dtype)
+    return out
+
+
+@dataclass
+class Measured:
+    """Survey of one image: rows, each track's revolution and its parse, disk IDs."""
+
+    rows: np.ndarray
+    best: dict
+    parsed: dict
+    ids: tuple
+
+    def spans(self):
+        """Per-sync and per-gap columns (see :func:`spans`)."""
+        return spans([self.parsed[k] for k in sorted(self.parsed)])
+
+
+def measure_image(image, pair=None, revolution=best_revolution):
+    """:class:`Measured` of a DiskImage (see :func:`survey_image`)."""
+    keys = sorted(image.tracks)
+    revs = {k: revolution(image.tracks[k], k) for k in keys}
+    parsed = {k: parse(r[1]) for k, r in revs.items()}
+    ids = disk_ids(revs)
+    canon = Spectra({k: canonical(r[1]) for k, r in revs.items()})
+    kinds = {k: r[2].kind for k, r in revs.items()}
+    density = _density(image)
+    rows = _empty_rows(len(keys))
+    for i, key in enumerate(keys):
+        rows[i]["density"] = density.get(key, revs[key][0].zone)
+        _track(rows[i], image.tracks[key], key, revs[key], parsed[key], ids[0])
+        _compare(rows[i], key, canon, kinds, pair)
+    return Measured(rows, revs, parsed, ids)
 
 
 def survey_image(image, pair=None, revolution=best_revolution):
@@ -492,21 +457,9 @@ def survey_image(image, pair=None, revolution=best_revolution):
     ``revolution(captures, key)`` returns the ``(capture, bits, cycle)`` under
     test. Returns ``(rows, sync_lengths, sync_rows, (format ID, BAM ID))``.
     """
-    keys = sorted(image.tracks)
-    revs = {k: revolution(image.tracks[k], k) for k in keys}
-    ids = disk_ids(revs)
-    canon = Spectra({k: canonical(r[1]) for k, r in revs.items()})
-    kinds = {k: r[2].kind for k, r in revs.items()}
-    density = _density(image)
-    rows = _empty_rows(len(keys))
-    syncs = []
-    for i, key in enumerate(keys):
-        rows[i]["density"] = density.get(key, revs[key][0].zone)
-        syncs.append(_track(rows[i], image.tracks[key], key, revs[key], ids[0]))
-        _compare(rows[i], key, canon, kinds, pair)
-    sync_rows = np.repeat(np.arange(len(keys)), [len(s) for s in syncs])
-    lengths = np.concatenate(syncs) if syncs else np.zeros(0, np.int64)
-    return rows, lengths.astype(np.int32), sync_rows.astype(np.int32), ids
+    measured = measure_image(image, pair, revolution)
+    cols = measured.spans()
+    return measured.rows, cols["sync_len"], cols["sync_row"], measured.ids
 
 
 def _empty_rows(n):
@@ -597,24 +550,24 @@ def _fingerprint(image, buf):
 
 
 def run_job(root, item, pair=None):
-    """Survey one item: ``(image record, rows, sync lengths, sync rows)``."""
+    """Survey one item: ``(image record, rows, span columns)`` (see :func:`spans`)."""
     start = time.perf_counter()
     meta = dict.fromkeys(IMAGE_FIELDS, "") | dict.fromkeys(IMAGE_INTS, -1)
     meta["key"], meta["pair"] = item_key(item), item_key(pair) if pair else ""
-    rows = np.zeros(0, TRACK_DTYPE)
-    lengths = sync_rows = np.zeros(0, np.int32)
+    rows, cols = np.zeros(0, TRACK_DTYPE), spans([])
     try:
         buf = read_item(root, item)
         image = loads(buf, item[-1])
         meta["fmt"], meta["sha1"] = image.kind, _fingerprint(image, buf)
         other = loads(read_item(root, pair), pair[-1]) if pair else None
-        rows, lengths, sync_rows, ids = survey_image(image, other)
-        meta["disk_id"], meta["cosmetic_id"] = ids
+        measured = measure_image(image, other)
+        rows, cols = measured.rows, measured.spans()
+        meta["disk_id"], meta["cosmetic_id"] = measured.ids
         meta["tracks"] = len(rows)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         meta["error"] = f"{type(exc).__name__}: {exc}"
     meta["seconds"] = time.perf_counter() - start
-    return meta, rows, lengths, sync_rows
+    return meta, rows, cols
 
 
 def _job(args):
@@ -633,12 +586,11 @@ def save_part(path, results):
         for name in IMAGE_FIELDS + IMAGE_INTS + ("seconds",)
     }
     arrays["tracks"] = tracks
-    arrays["sync_len"] = np.concatenate(
-        [np.zeros(0, np.int32)] + [r[2] for r in results]
-    )
-    arrays["sync_row"] = np.concatenate(
-        [np.zeros(0, np.int64)] + [r[3] + o for r, o in zip(results, offsets)]
-    ).astype(np.int32)
+    for name, empty in spans([]).items():
+        shift = offsets if name.endswith("_row") else np.zeros(len(results), np.int64)
+        arrays[name] = np.concatenate(
+            [empty] + [r[2][name] + o for r, o in zip(results, shift)]
+        ).astype(empty.dtype)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "wb") as handle:
         np.savez(handle, **arrays)
@@ -646,23 +598,19 @@ def save_part(path, results):
 
 
 def load_survey(out):
-    """Concatenate every part in ``out``: image columns, tracks and sync lengths."""
+    """Concatenate every part in ``out``: image columns, tracks and span columns."""
     parts = [dict(np.load(p)) for p in sorted(pathlib.Path(out).glob("part-*.npz"))]
     if not parts:
-        return {
-            "tracks": np.zeros(0, TRACK_DTYPE),
-            "sync_len": np.zeros(0, np.int32),
-            "sync_row": np.zeros(0, np.int32),
-        }
+        return {"tracks": np.zeros(0, TRACK_DTYPE)} | spans([])
     images = np.cumsum([0] + [len(p["image_key"]) for p in parts])
     rows = np.cumsum([0] + [len(p["tracks"]) for p in parts])
     out = {
-        k: np.concatenate([p[k] for p in parts]) for k in parts[0] if k != "sync_row"
+        k: np.concatenate(
+            [p[k] + r if k.endswith("_row") else p[k] for p, r in zip(parts, rows)]
+        )
+        for k in parts[0]
     }
     out["tracks"]["image"] += np.repeat(images[:-1], [len(p["tracks"]) for p in parts])
-    out["sync_row"] = np.concatenate(
-        [p["sync_row"] + r for p, r in zip(parts, rows[:-1])]
-    )
     return out
 
 

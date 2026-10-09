@@ -1,0 +1,41 @@
+{
+ "linear": {
+  "sync_short": 11.0,
+  "sync_long": 678.0,
+  "ratio_short": 0.9661400283048837,
+  "ratio_long": 1.0291400301505869,
+  "bad_span": 1745.0,
+  "similar": 0.9992460608482361,
+  "multipass": Infinity,
+  "gap_share": 0.32727272727272727,
+  "header_gap_short": 19.0,
+  "header_gap_long": 90.0,
+  "data_gap_short": 0.0,
+  "data_gap_long": 2411.0,
+  "fill_classes": [
+   37,
+   61,
+   85
+  ]
+ },
+ "circular": {
+  "sync_short": 12.0,
+  "sync_long": 657.0,
+  "ratio_short": 0.9661033483038091,
+  "ratio_long": 1.0140000099023438,
+  "bad_span": 1719.261999999988,
+  "similar": 0.9992437362670898,
+  "multipass": Infinity,
+  "gap_share": 0.3333333333333333,
+  "header_gap_short": 19.0,
+  "header_gap_long": 90.0,
+  "data_gap_short": 0.0,
+  "data_gap_long": 2356.0,
+  "fill_classes": [
+   0,
+   37,
+   61,
+   85
+  ]
+ }
+}

@@ -9,11 +9,13 @@ import numpy as np
 
 from .analysis.cycle import TrackKind, lag_window
 from .analysis.gcr import SECTORS_PER_ZONE, bits_per_revolution
+from .analysis.regions import Block
 from .analysis.sector import GAP_BYTE, SectorError
 from .formats.image import SIDE1_TRACK_BASE
 from .formats.nib import BM_FF_TRACK, BM_MATCH, BM_NO_CYCLE, BM_NO_SYNC
 
 OUTLIER = 1e-3
+MAJORITY = 0.5
 QUANTILES = (OUTLIER, 0.01, 0.5, 0.99, 1 - OUTLIER)
 LINEAR_KINDS = ("nib", "nbz", "nb2")
 DOS_TRACKS = 35
@@ -115,13 +117,15 @@ def neighbour(tracks, offset, column):
     return np.where(found, tracks[column][order][pos].astype(float), np.nan)
 
 
-def thresholds(tracks, d, sync_len, sync_row):
-    """Outlier bounds of each feature on clean DOS tracks, per capture family."""
+def thresholds(tracks, d, spans):
+    """Outlier bounds of each feature on clean DOS tracks, per capture family.
+
+    ``spans`` holds the survey's per-sync and (optionally) per-gap columns.
+    """
     out = {}
-    clean_sync = d["clean"][sync_row]
     for family, sel in (("linear", d["linear"]), ("circular", ~d["linear"])):
         ref = d["clean"] & sel
-        lengths = sync_len[clean_sync & sel[sync_row]]
+        lengths = spans["sync_len"][ref[spans["sync_row"]]]
         out[family] = {
             "sync_short": _lo(lengths),
             "sync_long": _hi(lengths),
@@ -131,7 +135,23 @@ def thresholds(tracks, d, sync_len, sync_row):
             "similar": _hi(tracks["sim_next"][ref & neighbour_clean(tracks, d)]),
             "multipass": _hi(tracks["mp_disagree"][ref]),
         }
+        if "gap_row" in spans:
+            out[family] |= gap_thresholds(spans, ref[spans["gap_row"]])
     return out
+
+
+def gap_thresholds(spans, clean):
+    """Gap length bounds after headers and data blocks, the least share of a gap
+    in its dominant fill class, and the fill classes that dominate clean gaps."""
+    after, length = spans["gap_after"][clean], spans["gap_len"][clean]
+    count = length // BYTE_BITS
+    top, hits = spans["gap_top"][clean][count > 0], spans["gap_hits"][clean][count > 0]
+    freq = np.bincount(top, minlength=256) / max(len(top), 1)
+    out = {"gap_share": _lo(hits / count[count > 0])}
+    for name, block in (("header", Block.HEADER), ("data", Block.DATA)):
+        out[f"{name}_gap_short"] = _lo(length[after == block])
+        out[f"{name}_gap_long"] = _hi(length[after == block])
+    return out | {"fill_classes": np.flatnonzero(freq >= OUTLIER).tolist()}
 
 
 def neighbour_clean(tracks, d):
@@ -204,14 +224,15 @@ def scenarios(tracks, d, thr):
     t = tracks
     fam = {
         k: np.where(d["linear"], thr["linear"][k], thr["circular"][k])
-        for k in thr["linear"]
+        for k, v in thr["linear"].items()
+        if np.isscalar(v)
     }
     whole, formatted, dos = d["whole"], d["formatted"], d["dos"]
     upper = (t["halftrack"] // 2 > DOS_TRACKS) & (t["side"] == 0)
     crosstalk = np.fmax(neighbour(t, -1, "sim_half"), t["sim_half"]) > fam["similar"]
     present = t["kind"] != TrackKind.UNFORMATTED
     noise = (t["kind"] == TrackKind.UNFORMATTED) & (t["n_hdr"] == 0)
-    fill = present & ILLEGAL_FILL[t["gap_top"]] & (t["gap_top_frac"] > 0.5)
+    fill = present & ILLEGAL_FILL[t["gap_top"]] & (t["gap_top_frac"] > MAJORITY)
     lower = upper & (t["n_hdr"] > 0) & (t["hdr_track"] < d["track"])
     own = formatted & ~fill
     return {
@@ -305,16 +326,21 @@ def _counts(values):
 
 
 def _restrict(survey, keep):
-    """Tracks of kept images, and their sync lengths with re-indexed rows."""
+    """Tracks of kept images, and their span columns with re-indexed rows."""
     tracks = survey["tracks"]
     kept = keep[tracks["image"]]
-    sync_keep = kept[survey["sync_row"]]
     row_map = np.cumsum(kept) - 1
-    return (
-        tracks[kept],
-        survey["sync_len"][sync_keep],
-        row_map[survey["sync_row"][sync_keep]],
-    )
+    spans = {}
+    for prefix in ("sync", "gap"):
+        if f"{prefix}_row" not in survey:
+            continue
+        rows = survey[f"{prefix}_row"]
+        sel = kept[rows]
+        for name in survey:
+            if name.startswith(f"{prefix}_"):
+                spans[name] = survey[name][sel]
+        spans[f"{prefix}_row"] = row_map[rows[sel]]
+    return tracks[kept], spans
 
 
 def _by_family(d, fn):
@@ -340,10 +366,11 @@ def summarise(survey, reference=None):
     if "image_key" not in survey:
         return {"images": 0}
     keep = distinct_images(survey)
-    tracks, sync_len, sync_row = _restrict(survey, keep)
+    tracks, spans = _restrict(survey, keep)
+    sync_len, sync_row = spans["sync_len"], spans["sync_row"]
     fmt = survey["image_fmt"][tracks["image"]]
     d = derive(tracks, fmt)
-    thr = thresholds(tracks, d, sync_len, sync_row)
+    thr = thresholds(tracks, d, spans)
     clean = d["clean"]
     out = {
         "images": _images(survey, keep) | {"tracks": int(len(tracks))},
