@@ -11,7 +11,13 @@ Each `Capture` holds:
 - `index`: bit offsets of index pulses, so multi-revolution captures keep
   their revolution boundaries;
 - for flux sources, `flux` and `flux_index`: transition and index times in
-  16 MHz clocks, with one revolution normalised to 300 rpm.
+  16 MHz clocks, with one revolution normalised to 300 rpm;
+- for NIB, NB2 and NBZ, `framed`: the byte-ready capture from
+  `analysis.capture.framed_capture`. In this case `bits` is its restored
+  stream.
+
+Cycles are found per segment for NIB-family captures and from the continuous
+bit stream for flux, P64 and G64 sources (see [analysis](analysis.md)).
 
 The other functions work on a `DiskImage`:
 

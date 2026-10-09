@@ -98,7 +98,9 @@ Both paths start the same way:
    the error bound from the median are dropped; these come from syncs missed
    in one pass.
 6. `sigma` propagates a uniform ±`error` error per sync over the syncs that
-   the pairs span. `segments` is the period in segments.
+   the pairs span. `segments` is the period in segments. A length outside the
+   window by more than the one-sided `alpha` quantile of `sigma` is
+   `UNFORMATTED`.
 7. The start is the sync before a valid sector-0 header in any pass, otherwise
    the longest measured sync.
 
@@ -121,9 +123,10 @@ When `index_aligned=True`, the start is bit 0 of the capture.
 - For a bit stream, it takes `cycle.length` bits from the start.
 
 `index_align({key: (bits, cycle)})` gives every track a start at its index
-pulse. `header_period(x, zone)` measures the revolution in a way that does not
-depend on content scoring: it is the shortest in-window distance between two
-identical valid headers, with its worst-case error.
+pulse. `header_period(x, zone)` measures the revolution from headers alone,
+without content scoring. It is the shortest in-window segment shift where some
+pair of valid headers is identical and none differ. It returns the length and
+its worst-case error.
 
 Detection needs captures longer than one revolution, and the overlap is what it
 measures. A capture whose overlap holds no header cannot rule out the
@@ -185,7 +188,7 @@ captures. It also tests whether faults cluster at 256-byte buffer pages
 Conversions (`nybulah.formats.convert`), with tqdm progress:
 
 - `nib_to_g64(image, period=None, index_aligned=False)` trims each track to one
-  revolution. For NB2 it keeps the pass with the fewest sector errors, then the
+  revolution, found per segment of its `framed_capture`. For NB2 it keeps the pass with the fewest sector errors, then the
   strongest match.
 - `g64_to_d64(image)` decodes sectors and writes error bytes.
 - `d64_to_g64(image)` writes standard formatting.
@@ -196,6 +199,6 @@ a stream into the `ByteCapture` that byte ready would latch, with sync lengths
 measured to within ±3 bits. Both are for tests and tools.
 
 `tests/data/hw` holds captures of a freshly formatted disk read on a 1571.
-`tests/test_corpus.py` checks periods against `header_period` on NIB images,
-loose or zipped. It runs only when `NYBULAH_CORPUS` names a directory, and
+`tests/test_corpus.py` checks periods against `header_period` on NIB and NBZ
+images, loose or zipped, loaded through `nybulah.formats.loads`. It runs only when `NYBULAH_CORPUS` names a directory, and
 `NYBULAH_CORPUS_SAMPLE` sets how many images it reads.

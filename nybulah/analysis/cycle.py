@@ -218,6 +218,8 @@ def _segment_cycle(seg, lo, hi, alpha, nominal, index_aligned):
     if not z >= _threshold(alpha, tests):
         return replace(unformatted, match=match, z=max(z, 0.0))
     length, sigma, period = _revolution(seg, pairs, sel, alpha)
+    if max(lo - length, length - hi) > _threshold(alpha, 1) * sigma:
+        return replace(unformatted, match=match, z=z)
     start = 0 if index_aligned else _segment_anchor(seg, valid & (sector == 0), period)
     return Cycle(
         TrackKind.FORMATTED, start, int(round(length)), match, z, sigma, period
@@ -225,10 +227,11 @@ def _segment_cycle(seg, lo, hi, alpha, nominal, index_aligned):
 
 
 def header_period(capture, zone=None, period=None, tolerance=None):
-    """Revolution length from the nearest repeat of a sector header, independent of content.
+    """Revolution length from repeated sector headers alone, independent of content.
 
-    Returns ``(bits, bound)`` for the shortest distance in the physical window
-    between two identical valid headers, ``bound`` its worst-case error; else None.
+    The shortest in-window segment shift where some pair of valid headers is
+    identical and none differ. Returns ``(bits, bound)`` with the worst-case
+    error, or None.
     """
     seg = segments(capture)
     zone = getattr(capture, "density", None) if zone is None else zone
@@ -236,10 +239,15 @@ def header_period(capture, zone=None, period=None, tolerance=None):
         return None
     i, j, dist = _pairs(seg, *lag_window(zone, period, tolerance))
     valid, key, _ = _segment_headers(seg)
-    same = valid[i] & valid[j] & (key[i] == key[j])
-    if not same.any():
+    both = valid[i] & valid[j]
+    shifts, inv = np.unique(j - i, return_inverse=True)
+    same = np.bincount(inv, both & (key[i] == key[j]), len(shifts)) > 0
+    differ = np.bincount(inv, both & (key[i] != key[j]), len(shifts)) > 0
+    good = np.flatnonzero(same & ~differ)
+    if not good.size:
         return None
-    k = np.flatnonzero(same)[np.argmin(dist[same])]
+    pick = (inv == good[0]) & both & (key[i] == key[j])
+    k = np.flatnonzero(pick)[0]
     return int(dist[k]), int(seg.error * (j[k] - i[k]))
 
 
@@ -316,7 +324,8 @@ def _segment_revolution(seg, cycle):
     if not k.size:
         return None
     inside = (seg.run[k] <= cycle.start) & (cycle.start < seg.run[k + cycle.segments])
-    k = int(k[np.argmax(inside)])
+    off = np.abs(seg.run[k + cycle.segments] - seg.run[k] - cycle.length)
+    k = int(k[np.lexsort((off, ~inside))[0]])
     rev = seg.bits[seg.run[k] : seg.run[k + cycle.segments]]
     return np.roll(rev, -((cycle.start - seg.run[k]) % len(rev)))
 
