@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -10,10 +12,14 @@ from nybulah.analysis.capture import (
 )
 from nybulah.analysis.cycle import (
     TrackKind,
+    _clashes,
+    _overlaps,
+    _Pairs,
     extract_revolution,
     find_cycle,
     header_period,
     lag_window,
+    revolution_spans,
 )
 from nybulah.analysis.sector import (
     SYNC_BYTES,
@@ -195,3 +201,41 @@ def test_no_sync_pair_spans_a_revolution():
     )
     cycle = find_cycle(unmeasured, 3)
     assert cycle.kind == TrackKind.FORMATTED and cycle.length == len(bits)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_overlapping_distance_bounds(seed):
+    rng = np.random.default_rng(seed)
+    n = 80
+    i = rng.integers(0, 30, n)
+    j = i + rng.integers(1, 6, n)
+    zeros = np.zeros(n, np.int64)
+    pairs = _Pairs(i, j, rng.integers(1000, 1300, n), zeros, zeros, 0.3)
+    mask, other = rng.random(n) < 0.5, rng.random(n) < 0.2
+    lo, hi = pairs.dist - 3 * (j - i), pairs.dist + 3 * (j - i)
+    brute = ((lo[:, None] <= hi[other]) & (hi[:, None] >= lo[other])).any(axis=1)
+    assert (_overlaps(pairs, 3, mask, other) == (mask & brute)).all()
+    assert not _overlaps(pairs, 3, mask, np.zeros(n, bool)).any()
+
+
+def test_header_clash_needs_other_segments():
+    """A differing header pair at a revolution's distance rules it out unless
+    it reuses a segment the revolution already pairs (a misaligned neighbour)."""
+    i, j = np.array([0, 1, 2]), np.array([40, 41, 41])
+    zeros = np.zeros(3, np.int64)
+    pairs = _Pairs(i, j, np.array([58000, 58100, 58050]), zeros, zeros, 0.3)
+    lead = np.array([True, False, False])
+    assert _clashes(pairs, 3, lead, np.array([False, True, False]))
+    pairs = _Pairs(i, np.array([40, 40, 41]), pairs.dist, zeros, zeros, 0.3)
+    assert not _clashes(pairs, 3, lead, np.array([False, True, False]))
+    assert not _clashes(pairs, 3, lead, np.zeros(3, bool))
+
+
+def test_revolution_spans_chain_whole_revolutions():
+    bits = _track(18, seed=4)
+    cap = _capture(bits, 4, nbytes=3 * len(bits) // 8)
+    cycle = find_cycle(cap, gcr.speed_zone(18))
+    spans = np.array(revolution_spans(cap, cycle))
+    assert len(spans) >= 2 and (spans[1:, 0] == spans[:-1, 1]).all()
+    assert (np.abs(np.diff(spans) - len(bits)) <= 3 * cycle.segments).all()
+    assert not revolution_spans(cap, dataclasses.replace(cycle, length=10))

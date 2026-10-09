@@ -7,6 +7,7 @@ from .cycle import (
     find_cycle,
     header_period,
     index_align,
+    revolution_spans,
 )
 from .faults import FaultKind, capture_faults, gcr_faults
 from .gcr import (
@@ -51,6 +52,7 @@ __all__ = [
     "framed_capture",
     "gcr_faults",
     "header_period",
+    "revolution_spans",
     "segments",
     "SectorError",
     "TrackDecode",

@@ -225,26 +225,26 @@ These figures cover linear captures (NIB/NBZ) only:
 
 | scenario | tracks | period % | FORMATTED % | UNFORMATTED % | in window % | exact % | short % | other % |
 |---|---|---|---|---|---|---|---|---|
-| all linear | 249,571 | 81.6 | 87.1 | 11.8 | 99.3 | 99.8 | 0.0 | 0.1 |
-| standard DOS | 185,198 | 99.9 | 100.0 | 0.0 | 100.0 | 100.0 | 0.0 | 0.1 |
-| DOS with errors | 21,151 | 74.9 | 98.0 | 1.7 | 99.6 | 99.2 | 0.2 | 0.6 |
+| all linear | 249,571 | 81.6 | 87.1 | 11.9 | 99.3 | 99.8 | 0.0 | 0.1 |
+| standard DOS | 185,199 | 99.9 | 100.0 | 0.0 | 100.0 | 100.0 | 0.0 | 0.1 |
+| DOS with errors | 21,151 | 74.9 | 97.9 | 1.8 | 99.6 | 99.2 | 0.2 | 0.6 |
 | extended, own content | 2,448 | 14.7 | 100.0 | 0.0 | 99.2 | 97.2 | 0.0 | 2.5 |
-| extended, lower-track copy | 1,660 | 96.6 | 96.9 | 2.8 | 15.2 | 94.4 | 0.0 | 5.5 |
+| extended, lower-track copy | 1,660 | 96.6 | 96.9 | 2.8 | 15.2 | 96.8 | 0.0 | 3.1 |
 | fat track | 281 | 85.0 | 100.0 | 0.0 | 100.0 | 100.0 | 0.0 | 0.0 |
 | killer | 2,668 | 1.4 | KILLER | – | – | – | – | – |
 | no-flux fill | 3,428 | 2.5 | 93.3 | 0.0 | 96.4 | 96.4 | 0.0 | 3.6 |
 | no-sync custom | 1,093 | 0.0 | 100.0 | 0.0 | – | – | – | – |
-| long sync | 12,454 | 71.5 | 79.6 | 0.0 | 99.7 | 99.5 | 0.1 | 0.4 |
-| 10-bit sync | 6,246 | 67.5 | 90.2 | 0.0 | 98.1 | 99.6 | 0.0 | 0.4 |
+| long sync | 12,452 | 71.5 | 79.6 | 0.0 | 99.7 | 99.5 | 0.1 | 0.4 |
+| 10-bit sync | 6,246 | 67.5 | 90.2 | 0.0 | 98.1 | 99.8 | 0.0 | 0.2 |
 | extra sectors | 1,548 | 48.8 | 95.4 | 0.8 | 99.9 | 92.2 | 0.0 | 7.8 |
-| non-standard density | 6,093 | 42.7 | 100.0 | 0.0 | 47.6 | 95.3 | 0.0 | 4.7 |
-| density label ≠ content | 1,709 | 100.0 | 98.7 | 0.6 | 16.3 | 91.9 | 0.1 | 7.8 |
+| non-standard density | 6,093 | 42.7 | 100.0 | 0.0 | 47.6 | 96.8 | 0.0 | 3.2 |
+| density label ≠ content | 1,709 | 100.0 | 98.6 | 0.7 | 16.3 | 94.2 | 0.1 | 5.5 |
 | long track | 678 | 100.0 | 100.0 | 0.0 | 97.4 | 97.9 | 0.7 | 1.3 |
-| short track | 1,590 | 100.0 | 100.0 | 0.0 | 11.6 | 91.6 | 0.0 | 7.9 |
+| short track | 1,589 | 100.0 | 100.0 | 0.0 | 11.6 | 94.1 | 0.0 | 5.4 |
 | illegal-GCR region | 1,081 | 45.0 | 100.0 | 0.0 | 99.2 | 99.2 | 0.2 | 0.6 |
-| duplicate headers | 995 | 37.6 | 91.1 | 7.9 | 60.7 | 43.6 | 0.3 | 53.5 |
+| duplicate headers | 958 | 35.2 | 89.9 | 9.1 | 67.7 | 48.9 | 0.3 | 47.9 |
 | ID mismatch | 542 | 67.7 | 94.5 | 5.5 | 94.8 | 94.8 | 0.0 | 4.1 |
-| header track ≠ physical | 331 | 75.2 | 97.0 | 3.0 | 96.8 | 98.0 | 0.0 | 0.8 |
+| header track ≠ physical | 331 | 75.2 | 96.4 | 3.6 | 96.8 | 98.0 | 0.0 | 0.8 |
 | non-standard data mark | 6,994 | 42.2 | 97.9 | 2.0 | 99.6 | 99.6 | 0.1 | 0.3 |
 
 - **One sector short.** A zone 3 capture of 8 KB overlaps itself by only
@@ -252,6 +252,16 @@ These figures cover linear captures (NIB/NBZ) only:
   next, so content scoring alone can rate it as high as the true period. The
   segment detector rejects any shift that pairs two valid headers with
   different sector, track or ID.
+- **A sync missed by the capture** leaves two blocks in one segment, so the
+  pairs of one revolution, and of a sector alias, fall under two segment
+  shifts; the header pair that rules out the alias may sit under the other
+  one. A shift is also rejected when two different valid headers, in
+  segments its length-measuring pairs do not use, lie at a distance one of
+  those pairs could span. Against `artifacts/survey-v5/`, this table
+  (`artifacts/survey-v6/`) has no track that lost an exact period and 41
+  that gained one; 17 FORMATTED tracks became UNFORMATTED, 16 of them with
+  no `hdr_period` and a valid header of another sector one period from a
+  header.
 - **Period outside the labelled window** (density label ≠ content,
   lower-track copies): `find_cycle` searches every zone's window when headers
   repeat.
