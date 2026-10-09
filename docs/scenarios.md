@@ -179,7 +179,7 @@ Values in "presentation" are medians unless stated.
 | half-track crosstalk | Identical to a neighbour | Kept | Uses space; looks like data | HT; neighbour comparison |
 | fat track | Agreement with N+1 ≥ 0.99925; headers of N repeated on N+1 | Not detected; G64 keeps both | Write-back needs aligned writes | HT + IDX/REL |
 | killer | Sync covers nearly the whole track | `find_cycle` returns KILLER; `revolution_bytes` writes 0xFF | Length is nominal | TS (SYNC held) with a timeout |
-| unformatted | `bad_span` ≈ whole track | UNFORMATTED; `to_g64` omits the track | An omitted track keeps whatever the target disk holds on write-back | MC to prove randomness |
+| unformatted | `bad_span` ≈ whole track | UNFORMATTED. Conversions write the capture cut to the nominal length and list it under `unformatted` | Written as read noise, not as no flux | MC to prove randomness |
 | no-flux fill | Constant fill: `0x00` in G64, a 4-cell pattern in NIB | FORMATTED (96%) | A periodic fill makes every multiple of its period a valid lag | MC; write as no flux |
 | no-sync custom | No sync | `find_cycle` works without syncs | No `hdr_period` to check against | BITS free-running |
 | long sync | Longest stored run: 1,933 bits | Kept in the bit stream | Length not preserved (caveats) | TS |
@@ -187,7 +187,7 @@ Values in "presentation" are medians unless stated.
 | extra sectors | 1 header with sector number ≥ count | `decode_track` ignores sectors ≥ `sectors` | Dropped from D64 | BITS |
 | custom sectors | 18 syncs; no DOS header | Bits kept; D64 reports 20 | Not decoded | BITS |
 | non-standard density | Own content at another zone | Zone from the NIB density byte or the G64 speed | `lag_window` trusts the label | DEN |
-| density label ≠ content | Length / nominal 0.874 (zone 0 content labelled zone 2) | Window comes from the label: 76% UNFORMATTED (new) | Wrong window; `to_g64` drops these tracks | DEN, TB |
+| density label ≠ content | Length / nominal 0.874 (zone 0 content labelled zone 2) | When headers repeat, all zones' windows are searched: 98.7% FORMATTED | The label still sets the zone written to G64 | DEN, TB |
 | long track | Length / nominal 1.029 (99%: 1.25) | Window ±5% | More than 5% long cannot be found | TB/IDX for RPM; slower write |
 | illegal-GCR region | Span 3,776 bits | Kept as bits | One read is one random draw | MC; write as no flux |
 | duplicate headers | Up to 22 headers on 21-sector tracks | `_best_per_sector` keeps one | Duplicates are lost in D64 | BITS; keep every header |
@@ -260,18 +260,39 @@ Findings:
     itself by only ~4,000 bits. A lag one sector short aligns every sector
     with the next one, so it can score as high as the true period.
   - The segment-based detector rejects that lag on header IDs.
-- **Flag: tracks whose true period is outside the labelled window are now
-  UNFORMATTED.**
-  - This affects the density-label case (76%), lower-track copies (79%) and
-    duplicate-header tracks (83%). The old path called most of them
-    FORMATTED with a wrong length.
-  - `to_g64` omits UNFORMATTED tracks, so these tracks now drop out of the
-    converted image. In the density-label case the content repeats exactly
-    at another zone's period.
-  - A window from the zone implied by `hdr_period`, or a DEN sweep on
-    capture, would keep these tracks.
-- **Periodic fills** have no header period to check against. They remain
-  FORMATTED with an arbitrary length.
+- **The first segment-based version classed some tracks UNFORMATTED** when
+  their true period lay outside the labelled zone's window: the density-label
+  case (76%), lower-track copies (79%) and duplicate-header tracks (83%).
+  `to_g64` used to omit them. Three changes followed, measured in the table
+  below (`artifacts/survey-v4/`):
+  - `find_cycle` searches every zone's window when headers repeat.
+  - It falls back to bit-level scoring, tested on 8-bit words, when no
+    measured sync pair spans a revolution.
+  - Conversions write every track.
+- **Periodic fills** have no header period. They are now UNFORMATTED, and the
+  8-bit word test rejects them; they are still written.
+
+| scenario (linear) | tracks | FORMATTED % | UNFORMATTED % | exact % |
+|---|---|---|---|---|
+| all linear | 249,571 | 87.1 | 11.8 | 99.8 |
+| standard DOS | 185,198 | 100.0 | 0.0 | 100.0 |
+| DOS with errors | 21,151 | 98.0 | 1.7 | 99.2 |
+| extended, lower-track copy | 1,660 | 96.9 | 2.8 | 94.4 |
+| density label ≠ content | 1,709 | 98.7 | 0.6 | 91.9 |
+| duplicate headers | 995 | 91.1 | 7.9 | 43.6 |
+| extra sectors | 1,548 | 95.4 | 0.8 | 92.2 |
+| header track ≠ physical | 331 | 97.0 | 3.0 | 98.0 |
+| short track | 1,590 | 100.0 | 0.0 | 91.6 |
+| non-standard density | 6,093 | 100.0 | 0.0 | 95.3 |
+
+The duplicate-header tracks that remain hold one sector written several times
+around the track. Their `hdr_period` is the median gap between identical
+headers within ±50% of nominal. With several copies per revolution that gap
+is not the revolution, so "exact" understates them there.
+
+Conversions now emit all 476,227 tracks. Before, `to_g64` dropped the 29,586
+linear tracks classed UNFORMATTED and emitted 446,641. Those 29,586 are now
+written at nominal length and reported.
 - **Captures that start just after a sync** hide their first header from a
   sync-only scan. At zone 3 that header is the only one that repeats, so
   `survey.linear_headers` counts bit 0 as a sync end.
