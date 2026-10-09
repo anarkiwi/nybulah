@@ -5,7 +5,7 @@ TRACK_BASE := 0300
 PASSPG_1541 := 9F
 PASSPG_1571 := 7F
 BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
-	$(OUT)/sense_1571.bin \
+	$(OUT)/sense_1571.bin $(OUT)/seek_1571.bin $(OUT)/stream_1571.bin \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
 	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin $(OUT)/ciaprobe.bin)
 
@@ -36,12 +36,22 @@ $(OUT)/track_%.bin: track.s track.cfg
 	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -D PASSPG='$$$(PASSPG_$*)' -o $@ $(OUT)/track_$*.o
 	rm -f $(OUT)/track_$*.o
 
+$(OUT)/seek_1571.bin: track.s track.cfg
+	ca65 -t none -D MODEL=1571 -D SEEK=1 -o $(OUT)/seek_1571.o $<
+	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -D PASSPG='$$$(PASSPG_1571)' -o $@ $(OUT)/seek_1571.o
+	rm -f $(OUT)/seek_1571.o
+
+$(OUT)/stream_1571.bin: stream.s stream.cfg
+	ca65 -t none -o $(OUT)/stream_1571.o $<
+	ld65 -C stream.cfg -S '$$$(TRACK_BASE)' -o $@ $(OUT)/stream_1571.o
+	rm -f $(OUT)/stream_1571.o
+
 $(OUT)/sense_1571.bin: sense.s sense.cfg
 	ca65 -t none -o $(OUT)/sense_1571.o $<
 	ld65 -C sense.cfg -S '$$6000' -o $@ $(OUT)/sense_1571.o
 	rm -f $(OUT)/sense_1571.o
 
 clean:
-	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/ciaprobe.bin
+	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe.bin
 
 .PHONY: all clean

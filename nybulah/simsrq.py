@@ -9,7 +9,8 @@ import argparse
 import dataclasses
 from functools import cached_property
 
-from .opencbm import IEC_CLOCK, IEC_DATA, IEC_SRQ
+from . import stream as fmt
+from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ
 from .sim import IdleDOSDrive
 from .simx import AVR_FOUND, AVR_HZ, AVR_POLL, AVR_RISE, AVR_SYNC
 from .simx import SimX, TimedBus, TimedDrive1571, XError
@@ -23,6 +24,15 @@ SRQ_RLOOP = 39  # drive receive loop: cycles between ICR polls once behind
 SRQ_POLL = 5  # adapter clocks per in-burst SRQ poll
 SRQ_ENCODE = 3  # adapter clocks to build a bit's port value
 FIRMWARE = 11
+STREAM_FIRMWARE = 12
+SR_PERIOD = SRQ_SEND  # drive/stream.s: cycles between SDR writes
+USB_BANK = 32
+# A 32-byte full-speed bulk IN transaction: token, data (SYNC PID data CRC16 EOP)
+# and handshake packets plus two turnarounds of 7.5 bit times, at 12 Mbit/s.
+USB_PACKET_US = (35 + (8 + 8 + 8 * USB_BANK + 16 + 3) + 19 + 15) / 12
+STREAM_TIMEOUT_US = 20_000.0  # no SRQ fall: drive gone (metadata every <256 cycles)
+STREAM_QUIET_US = 1_000.0  # SRQ idle this long after ATN: the drive has stopped
+STREAM_ATN_US = 50_000.0  # longest ATN hold
 
 
 @dataclasses.dataclass(frozen=True)
@@ -46,6 +56,13 @@ class SrqTiming:
     def sample(self):
         """Read: sample clocks of bits 7..0 from the detecting poll."""
         return tuple(self._sample(2 * j * SRQ_U, (2 * j + 2) * SRQ_U) for j in range(8))
+
+    @property
+    def frame(self):
+        """Stream: earliest and latest clock of the poll that must see SRQ high, after
+        the last rise settles and before the next byte's earliest fall."""
+        last = SRQ_LAST * self.f + self.rise
+        return last, (SR_PERIOD - 1) * self.f - SRQ_POLL - 1
 
     @property
     def start(self):
@@ -147,7 +164,10 @@ class SimSRQ(SimX):
         return out
 
     def supports(self, protocol):
-        """Whether this adapter speaks protocol ("srq"/"s4" need firmware 11)."""
+        """Whether this adapter speaks protocol ("srq"/"s4" need firmware 11,
+        "stream" 12)."""
+        if protocol == "stream":
+            return self.firmware >= STREAM_FIRMWARE
         if protocol in ("srq", "s4"):
             return self.firmware >= FIRMWARE
         return super().supports(protocol)
@@ -194,6 +214,68 @@ class SimSRQ(SimX):
             ),
         )
 
+    def srq2_stream(self, size, packet_us=USB_PACKET_US, frame=None):
+        """Firmware v12 streaming receive (2 MHz): adapter output, at most size bytes.
+
+        The host drains one 32-byte packet per packet_us; frame is the clock of the
+        poll after each byte that must see SRQ high (default: the latest allowed).
+        """
+        if self.firmware < STREAM_FIRMWARE:
+            raise XError("firmware lacks streaming")
+        st = self._srq_timing(8)
+        frame = st.frame[1] if frame is None else frame
+        usb = UsbIn(size, packet_us)
+        try:
+            t = self._sync(1, IEC_CLOCK, IEC_SRQ)
+        except XError as e:
+            raise self._fail(e, b"")
+        self._host(0, t + (AVR_FOUND + 2) / 16)
+        self._go = False
+        self.count["bursts"] += 1
+        while True:
+            b, meta = 0, False
+            for j, off in enumerate(st.sample):
+                at = self._clock(t, off) - st.sync / 16
+                self._advance(at)
+                level = self.bus.level(at)
+                b |= (0 if level & IEC_DATA else 1) << 7 - j
+                meta |= j == 0 and bool(level & IEC_CLOCK)
+            code = usb.put(t, b, meta)
+            if code is None and meta and b in fmt.DRIVE_END:
+                code = fmt.A_DONE
+            at = self._clock(t, frame)
+            self._advance(at)
+            if code is None and self.bus.level(at) & IEC_SRQ:
+                code = fmt.A_FRAMING
+            if code is None:
+                t = self._poll_until(
+                    IEC_SRQ, True, at, at + STREAM_TIMEOUT_US, SRQ_POLL / 16, 0.0
+                )
+                code = fmt.A_TIMEOUT if t is None else None
+                t = at + STREAM_TIMEOUT_US if t is None else t
+            if code is not None:
+                break
+        self.now = at
+        if code != fmt.A_DONE:
+            self._stop_drive()
+        return usb.close(code)
+
+    def _stop_drive(self):
+        """Hold ATN until SRQ stays released STREAM_QUIET_US (bounded), then release."""
+        t0 = self.now
+        self._host(IEC_ATN, t0)
+        last = t0
+        while self.now - last < STREAM_QUIET_US and self.now - t0 < STREAM_ATN_US:
+            nxt = self._poll_until(
+                IEC_SRQ, True, self.now, last + STREAM_QUIET_US, SRQ_POLL / 16, 0.0
+            )
+            if nxt is None:
+                self.now = last + STREAM_QUIET_US
+                break
+            last = self.now = nxt + 1.0
+        self._host(0, self.now)
+        self.count["atn_stops"] += 1
+
     def srq2_read(self, size):
         """SRQ read timed for a 1571 at 2 MHz."""
         return self.srq_read(size, 8)
@@ -203,6 +285,53 @@ class SimSRQ(SimX):
         self.srq_write(data, 8)
 
     s4_read, s4_write = srq_read, srq_write
+
+
+class UsbIn:
+    """The adapter's double-banked IN endpoint with a host draining one packet per
+    packet_us after hand-off; a bank still waiting when needed is an overrun."""
+
+    def __init__(self, size, packet_us):
+        self.size, self.packet_us = size, packet_us
+        self.out = bytearray()
+        self.flight = []
+        self.stopped = None
+
+    def _byte(self, t, b):
+        if len(self.out) % USB_BANK == 0:
+            self.flight = [d for d in self.flight if d > t]
+            if len(self.flight) >= 2:
+                return fmt.A_OVERRUN
+        self.out.append(b)
+        if len(self.out) % USB_BANK == 0:
+            last = self.flight[-1] if self.flight else t
+            self.flight.append(max(t, last) + self.packet_us)
+        return None
+
+    def put(self, t, b, meta):
+        """Store a received byte (escaped) at time t; an adapter code stops it."""
+        pair = meta or b == fmt.ESC
+        if len(self.out) + 2 + pair > self.size - 2:
+            return fmt.A_TRUNCATED
+        for x in ((fmt.ESC, b) if pair else (b,)):
+            code = self._byte(t, x)
+            if code is not None:
+                return code
+        return None
+
+    def close(self, code):
+        """Output with the trailer; a dangling ESC takes the code as its second byte."""
+        if len(self.out) % USB_BANK and self.out[-1] == fmt.ESC and self._open_esc():
+            self.out.append(code)
+        else:
+            self.out += bytes((fmt.ESC, code))
+        return bytes(self.out)
+
+    def _open_esc(self):
+        i = len(self.out)
+        while i and self.out[i - 1] == fmt.ESC:
+            i -= 1
+        return (len(self.out) - i) % 2 == 1
 
 
 def make(cyc=1.0, rise=0.5, peers=0, dev=8, delay=0, **kw):

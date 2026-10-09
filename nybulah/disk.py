@@ -77,11 +77,7 @@ class Archive:
 def _read_job(nib, job, disk_id, retries, archive, kind="read"):
     best = None
     for _ in range(retries + 1):
-        cap = archive(
-            kind,
-            job,
-            nib.capture(job.halftrack, start="sync", side=job.side, timing="syncs"),
-        )
+        cap = archive(kind, job, nib.scan(job.halftrack, side=job.side))
         dec = decode_track(cap.bits(), job.header, disk_id, job.sectors)
         best = dec if best is None else merge_decodes(best, dec)
         if (best.errors == SectorError.OK).all():
@@ -92,9 +88,7 @@ def _read_job(nib, job, disk_id, retries, archive, kind="read"):
 def calibrate(nib, archive):
     """Relabel the head position from the headers found where track 18 should be."""
     job = TrackJob(0, BAM_TRACK, BAM_TRACK)
-    cap = archive(
-        "locate", job, nib.capture(job.halftrack, start="sync", timing="syncs")
-    )
+    cap = archive("locate", job, nib.scan(job.halftrack))
     found = header_tracks(cap.bits())
     if len(found):
         nib.halftrack = 2 * int(np.bincount(found).argmax())

@@ -1,12 +1,16 @@
-"""Raw track capture and write through any monitor transport (drive/track.s host side)."""
+"""Raw track capture and write through any monitor transport (drive/track.s host side),
+and streaming capture on a 1571 with xum1541 firmware v12 (drive/stream.s)."""
 
 import dataclasses
 import json
+import math
+import struct
 import time
 
 import numpy as np
 
 from . import passes
+from . import stream as fmt
 from .analysis.capture import capture_bits, trailing_ones
 from .analysis.gcr import SYNC_MIN_BITS, bit_rate, bits_per_revolution, speed_zone
 from .analysis.gcr import to_bits
@@ -32,10 +36,18 @@ USER_STARTS = ("now", "sync", "index")
 BITS, TB, TS = 0, 1, 2
 TIMING = {"full": (TB, TS), "syncs": (TS,), "none": ()}
 CAPTURE_VERSION = 2
+STREAM_VERSION = 3
 
 VIA1PA, T2CL, ACR1 = 0x1801, 0x1808, 0x180B
 DOS_TRACK = 0x22
 SENSE_CODE, SN_TRK00 = "sense_1571", 0x04
+SEEK_CODE, STREAM_CODE = "seek_1571", "stream_1571"
+STREAM_ZP, ZP_STREAM_SIZE = 0x84, 0x100 - ZP  # stream.s ZPCODE; ZP saved through $FF
+SENSE_STREAM = CODE_BASE + 0x100  # inside the seek code's padding (no expansion RAM)
+STREAM_HZ = 2_000_000
+T1_PERIOD = 62_500  # monitor.s WD_PERIOD: VIA1 T1 cycles per tick
+RPM_MIN = passes.RPM_MIN
+SR_PERIOD = 40  # drive/stream.s: cycles between shift register writes
 VIA2PB, PCR2 = 0x1C00, 0x1C0C
 PA_SIDE, PA_2MHZ, ACR_T2_PULSE = 0x04, 0x20, 0x20
 PCR_SOE_MASK, PCR_SOE_OFF = 0xF1, 0x0C
@@ -99,9 +111,9 @@ def _u8(value):
 class Capture:  # pylint: disable=too-many-instance-attributes
     """One capture: BITS bytes, the TB and TS passes, their result blocks, context.
 
-    Records hold raw drive output, so save/load is lossless and everything
-    else is derived. ``base`` is the BITS index of TB/TS byte 0 (-1: found
-    by search); ``table`` is a version 1 record's sync table.
+    Records hold raw drive output, so save/load is lossless and everything else is
+    derived. ``base``: BITS index of TB/TS byte 0 (-1: by search); ``table``: a version
+    1 sync table; ``stream``: a version 3 record's adapter output (``data`` decoded).
     """
 
     data: np.ndarray
@@ -119,13 +131,27 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     ts_result: np.ndarray | None = None
     base: int = -1
     version: int = CAPTURE_VERSION
+    stream: np.ndarray | None = None
 
     ARRAYS = ("data", "table", "result", "tb", "tb_result", "ts", "ts_result")
+    ARRAYS += ("stream",)
 
     def __post_init__(self):
         for name in self.ARRAYS:
             setattr(self, name, _u8(getattr(self, name)))
         self._syncs = None
+        self.parsed = None if self.stream is None else fmt.Stream.parse(self.stream)
+
+    @property
+    def index(self):
+        """Stream: data positions of the rising index edges, else None."""
+        return None if self.parsed is None else self.parsed.index
+
+    @property
+    def stream_status(self):
+        """Stream: how the adapter and the drive ended it ("done" both when whole)."""
+        p = self.parsed
+        return None if p is None else {"adapter": p.adapter, "drive": p.drive_end}
 
     def _r(self, key, result=None):
         offsets = RESULT if self.version >= 2 else RESULT_V1
@@ -133,7 +159,11 @@ class Capture:  # pylint: disable=too-many-instance-attributes
 
     @property
     def status(self):
-        """Drive status bits (ST_*) of every pass."""
+        """Drive status bits (ST_*) of every pass; a stream maps its end onto them."""
+        if self.parsed is not None:
+            if self.parsed.complete:
+                return 0
+            return ST_NOINDEX if self.parsed.drive_end == "noindex" else ST_TIMEOUT
         blocks = [
             r for r in (self.result, self.tb_result, self.ts_result) if r is not None
         ]
@@ -161,6 +191,9 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         return int(self.ts_result[off]) | int(self.ts_result[off + 1]) << 8
 
     def _derive(self):
+        if self.parsed is not None:
+            cell = STREAM_HZ / CPU_HZ * self.cell_cycles
+            return passes.stream_syncs(self.data, self.parsed.syncs(cell), cell)
         if self.version < 2:
             return v1_syncs(self)
         anchored, base = self.base >= 0, max(self.base, 0)
@@ -177,7 +210,11 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         return passes.Syncs(none, none, none, none, none, len(self.data))
 
     def revolution_bytes(self):
-        """Bytes per revolution from the BITS bytes' own repetition, or None."""
+        """Bytes per revolution: a stream's index spacing, else the BITS bytes' own
+        repetition, or None."""
+        if self.parsed is not None:
+            idx = self.parsed.index
+            return int(np.median(np.diff(idx))) if len(idx) > 1 else None
         return passes.byte_period(self.data, bits_per_revolution(self.density))
 
     @property
@@ -234,6 +271,8 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     @property
     def revolution_cycles(self):
         """Revolution time in CPU cycles: 1571 index period, else TB across the repeat."""
+        if self.parsed is not None:
+            return None
         if self.start == "index" and not self.status & ST_NOINDEX:
             return unwrap(self.t2("idx1"), self.t2("idx2"), 60.0 * CPU_HZ / 300.0)
         rev = self.revolution_bytes() if self.tb is not None else None
@@ -262,6 +301,8 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     @property
     def byte_cycles(self):
         """Mean CPU cycles per latched byte: TB's local periods, else BITS end times."""
+        if self.parsed is not None:
+            return None
         if self.version >= 2 and self.syncs.byte_cycles:
             return self.syncs.byte_cycles
         if self.start == "sync" or not self.data.size:
@@ -352,13 +393,23 @@ def _v1_byte_cycles(cap, sync_cycles):
     return (unwrap(t0, t1, expected) - syncs) / len(cap.data)
 
 
+STREAM_REVS = 2
+
+
+def stream_size(revolutions):
+    """Adapter output bound for a stream: every byte escaped, writes SR_PERIOD apart,
+    the slowest motor, the revolutions plus the partial ones at either end."""
+    per_rev = 60 / RPM_MIN * STREAM_HZ / SR_PERIOD
+    return 64 * math.ceil(2 * per_rev * (revolutions + 2) / 64)
+
+
 class Nibbler:
     """Track-level access to one drive through a started monitor.
 
-    The head position is tracked on the host and found by ``locate()`` the
-    first time it is needed. Only a 1541 is ever bumped against the stop, when
-    ``allow_bump`` is set and nothing else places it. ``sleep`` waits for the
-    spindle after the motor starts.
+    The head position is tracked on the host and found by ``locate()`` the first time
+    it is needed. Only a 1541 is ever bumped against the stop, when ``allow_bump`` is
+    set and nothing else places it. ``stream`` (default: when the drive, link and
+    adapter allow it) captures by streaming instead of the expansion RAM passes.
     """
 
     def __init__(
@@ -370,6 +421,7 @@ class Nibbler:
         spinup_s=SPINUP_S,
         sleep=time.sleep,
         allow_bump=False,
+        stream=None,
     ):
         if model not in BUFPG:
             raise ValueError(f"unsupported model {model}")
@@ -381,6 +433,10 @@ class Nibbler:
             sleep,
         )
         self.allow_bump = allow_bump
+        streaming = self._can_stream() if stream is None else bool(stream)
+        if streaming and not self._can_stream():
+            raise ValueError("streaming needs a 1571, s4 and xum1541 firmware v12")
+        self._overlay = "" if streaming else None
         self.halftrack = None
         self.motor = self._sensing = False
         self._saved = None
@@ -390,13 +446,41 @@ class Nibbler:
         """Address of the capture/write buffer."""
         return BUFPG[self.model] << 8
 
+    @property
+    def streaming(self):
+        """Captures stream (drive/stream.s) instead of using expansion RAM."""
+        return self._overlay is not None
+
+    def _can_stream(self):
+        supports = getattr(getattr(self.mon, "cbm", None), "supports", None)
+        return (
+            self.model == "1571"
+            and getattr(self.mon, "protocol", None) == "s4"
+            and bool(supports and supports("stream"))
+        )
+
+    def _load(self, overlay):
+        """Stream mode: put the seek (prep) or stream code at CODE_BASE."""
+        if self._overlay != overlay:
+            code = drivecode(overlay)
+            self.mon.write(CODE_BASE, code[:CODE_SIZE])
+            if code[CODE_SIZE:]:
+                self.mon.write(STREAM_ZP, code[CODE_SIZE:])
+            self._overlay, self._sensing = overlay, False
+
     def open(self):
         """Load the routines and set up VIA state; saves everything close restores."""
         mon = self.mon
-        code = drivecode(f"track_{self.model}")
-        mon.write(CODE_BASE, code[:CODE_SIZE])
-        mon.write(self.buffer + NPAGES * 256, code[CODE_SIZE:])
-        self._saved = [(ZP, mon.read(ZP, ZP_SIZE)), (PCR2, mon.read(PCR2, 1))]
+        if self.streaming:
+            self._overlay = ""
+            self._load(SEEK_CODE)
+            self._saved = [(ZP, mon.read(ZP, ZP_STREAM_SIZE))]
+        else:
+            code = drivecode(f"track_{self.model}")
+            mon.write(CODE_BASE, code[:CODE_SIZE])
+            mon.write(self.buffer + NPAGES * 256, code[CODE_SIZE:])
+            self._saved = [(ZP, mon.read(ZP, ZP_SIZE))]
+        self._saved.append((PCR2, mon.read(PCR2, 1)))
         if self.model == "1571":
             pa = mon.read(VIA1PA, 1)
             self._saved.append((VIA1PA, pa))
@@ -440,6 +524,8 @@ class Nibbler:
         return self.mon.jsr(entry)[0]
 
     def _prep(self, pbset, side, steps):
+        if self.streaming:
+            self._load(SEEK_CODE)
         while True:
             chunk = max(-127, min(127, steps))
             self._params(pbset=pbset, side=side, steps=chunk)
@@ -482,10 +568,13 @@ class Nibbler:
         """1571 ``(track 00 sensed, stepper phase)`` by DOS's debounced test, no step."""
         if self.model != "1571":
             raise ValueError("the track 00 sensor needs a 1571")
+        at = SENSE_STREAM if self.streaming else self.buffer
+        if self.streaming:
+            self._load(SEEK_CODE)
         if not self._sensing:
-            self.mon.write(self.buffer, drivecode(SENSE_CODE))
+            self.mon.write(at, drivecode(SENSE_CODE))
             self._sensing = True
-        status = self._call(self.buffer)
+        status = self._call(at)
         return bool(status & SN_TRK00), status & PB_PHASE
 
     def _sense(self, halftrack, trace):
@@ -548,7 +637,11 @@ class Nibbler:
         zones = [speed_zone(track)] if track else []
         for density in zones + [z for z in range(4) if z not in zones]:
             self._prep(self._pbset(density), 0, 0)
-            cap = self._read(density, "sync", 0, "syncs")
+            cap = (
+                self._stream(density, 0, 1)
+                if self.streaming
+                else self._read(density, "sync", 0, "syncs")
+            )
             found = header_tracks(cap.bits())
             if len(found):
                 return int(np.bincount(found).argmax())
@@ -610,6 +703,54 @@ class Nibbler:
             raise ValueError(f"timing must be one of {tuple(TIMING)}")
         density = self.seek(halftrack, density, side)
         return self._read(density, start, side, timing)
+
+    def scan(self, halftrack, side=0, density=None):
+        """A capture that decodes the track: a stream of STREAM_REVS revolutions, or
+        BITS and TS passes from just after a sync."""
+        if self.streaming:
+            return self.stream(halftrack, STREAM_REVS, side, density)
+        return self.capture(halftrack, density, "sync", side, "syncs")
+
+    def stream(self, halftrack, revolutions=STREAM_REVS, side=0, density=None):
+        """Stream the track from now until ``revolutions`` whole index-to-index
+        revolutions have passed (drive/stream.s, 1571 at 2 MHz, firmware v12).
+
+        Returns a version 3 :class:`Capture`; ``stream_status`` reports how the
+        adapter (overrun, framing, timeout) and the drive ended it.
+        """
+        if not self.streaming:
+            raise TrackError("streaming needs a 1571, s4 and xum1541 firmware v12")
+        density = self.seek(halftrack, density, side)
+        return self._stream(density, side, revolutions)
+
+    def _stream(self, density, side, revolutions):
+        self._load(STREAM_CODE)
+        ticks = math.ceil(2 * 60 / RPM_MIN * STREAM_HZ / T1_PERIOD) + 1
+        self._params(mode=ticks, npages=revolutions + 1)
+        size = stream_size(revolutions)
+        mon = self.mon
+        mon.set_fast(True)
+        try:
+            mon.transact(b"J" + struct.pack("<H", CODE_BASE))
+            raw = mon.cbm.srq2_stream(size)
+            reply = mon.link.response(3)
+            mon.touch()
+        finally:
+            mon.set_fast(False)
+        parsed = fmt.Stream.parse(raw)
+        return Capture(
+            parsed.data,
+            b"",
+            reply,
+            self.model,
+            self.halftrack,
+            side,
+            density,
+            "now",
+            0,
+            version=STREAM_VERSION,
+            stream=raw,
+        )
 
     def _pass(self, kind, mode, anchor=b""):
         self._sensing = False

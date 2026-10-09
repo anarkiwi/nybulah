@@ -620,6 +620,20 @@ def merge_tb(  # pylint: disable=too-many-arguments
     return _syncs(rows, latched, (first, valid), byte_cycles, unmatched + missed)
 
 
+def _low_rows(positions, est, plo, phi, cell, n):
+    """``(position, run, lo, hi)`` rows from SYNC low cycles: estimate and bounds
+    (phi < 0: unbounded), for positions inside n bytes."""
+    rows = []
+    for p, e, lo_c, hi_c in zip(positions, est, plo, phi):
+        if not 0 < p < n:
+            continue
+        lo = max(PRE_ONES + int(np.ceil(lo_c / cell)), SYNC_MIN_BITS)
+        hi = PRE_ONES + int(np.floor(hi_c / cell)) if hi_c >= 0 else UNBOUNDED
+        run = max(PRE_ONES + int(round(e / cell)), lo)
+        rows.append((int(p), run if hi < 0 else min(run, hi), lo, hi))
+    return rows
+
+
 def merge_ts(data, base, ts, cell, anchored=True):
     """Syncs of a BITS pass from TS alone: exact positions, lengths from SYNC low time."""
     data = np.asarray(data, np.uint8)
@@ -627,13 +641,22 @@ def merge_ts(data, base, ts, cell, anchored=True):
     ok, latched = capable(data)
     offs, matched = _events_offsets(count, base, ok, anchored)
     plo, phi = ts_pulse(iters)
-    rows = []
-    for j in np.flatnonzero(matched):
-        p = base + int(count[j] + offs[j])
-        if not 0 < p < len(data):
-            continue
-        lo = max(PRE_ONES + int(np.ceil(plo[j] / cell)), SYNC_MIN_BITS)
-        hi = PRE_ONES + int(np.floor(phi[j] / cell))
-        mid = PRE_ONES + int(round((plo[j] + phi[j]) / 2 / cell))
-        rows.append((p, min(max(mid, lo), hi), lo, hi))
+    sel = np.flatnonzero(matched)
+    rows = _low_rows(
+        base + count[sel] + offs[sel],
+        (plo[sel] + phi[sel]) / 2,
+        plo[sel],
+        phi[sel],
+        cell,
+        len(data),
+    )
     return _syncs(rows, latched, (0, len(data)), None, int((~matched).sum()))
+
+
+def stream_syncs(data, syncs, cell):
+    """Syncs of a stream: exact positions, ``syncs`` = (positions, estimate, lo, hi)
+    in SYNC low cycles (:meth:`nybulah.stream.Stream.syncs`)."""
+    data = np.asarray(data, np.uint8)
+    _, latched = capable(data)
+    rows = _low_rows(*syncs, cell, len(data))
+    return _syncs(rows, latched, (0, len(data)), None, 0)
