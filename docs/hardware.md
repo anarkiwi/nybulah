@@ -90,7 +90,8 @@ its other subcommands (`nybulah <command> --help`), e.g.
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin: commit
-`07a95bdf` (branch `xum1541-xfast`) for v10, branch `xum1541-srq` for v11
+`07a95bdf` (branch `xum1541-xfast`) for v10, commit `89920a0d`
+(branch `xum1541-srq`) for v11
 (SRQ fast serial; also builds v10's protocols):
 
 ```sh
@@ -128,8 +129,8 @@ version already installed unless given `-f` (`xum1541cfg -f update ...`). Flashi
 | 10     | 1541-II | `$8000-$9FFF`  |
 
 Transfer rates measured on a ZoomFloppy, both drives powered, 8 KB blocks
-(bytes/s). Burst X: 100 blocks each way per column, no data errors and no
-checksum retries:
+(bytes/s). Burst X and s4: 100 blocks each way per column, no data errors and
+no checksum retries; s4 also at 1–4096 bytes across the USB bank boundaries:
 
 | path | firmware | 1541-II | 1571 1 MHz | 1571 2 MHz |
 |------|----------|---------|------------|------------|
@@ -137,7 +138,8 @@ checksum retries:
 | S1 read / write | any | 1634 / 1493 | 1669 / 1498 | |
 | X read / write | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
 | burst X read / write | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
-| s4 read / write, predicted | v11 | | 24600 / 22400 | 49300 / 37700 |
+| s4 read / write | v11 | | 20960 / 22258 | 41460 / 37053 |
+| s4 read / write, simulated | v11 | | 24600 / 22400 | 49300 / 37700 |
 
 `nybulah bench --protocol s3 --fast` (or s4) runs a 1571 at 2 MHz for the
 transfer (VIA1 PA5) and returns it to 1 MHz before handing back to DOS; an s4
