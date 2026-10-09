@@ -19,6 +19,8 @@ RUN pip install --no-cache-dir $(python3 -c 'import tomllib;print(" ".join(tomll
 
 FROM base AS test
 RUN pip install --no-cache-dir $(python3 -c 'import tomllib;print(" ".join(tomllib.load(open("pyproject.toml","rb"))["project"]["optional-dependencies"]["dev"]))')
+COPY --from=drivecode /out/ /opt/nybulah/drivecode/
+ENV NYBULAH_DRIVECODE=/opt/nybulah/drivecode
 COPY . .
 COPY --from=drivecode /out/ nybulah/drivecode/
 RUN pip install --no-cache-dir --no-deps -e .

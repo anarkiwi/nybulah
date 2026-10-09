@@ -51,3 +51,13 @@ def test_usage(capsys):
         cli.main(["--help"])
     help_text = capsys.readouterr().out
     assert all(name in help_text for name in cli.COMMANDS)
+
+
+def test_drivecode_env_fallback(tmp_path, monkeypatch):
+    from nybulah.monitor import drivecode, protocols
+
+    (tmp_path / "monitor_s9.bin").write_bytes(b"\x60")
+    monkeypatch.setenv("NYBULAH_DRIVECODE", str(tmp_path))
+    assert "s9" in protocols() and drivecode("monitor_s9") == b"\x60"
+    with pytest.raises(FileNotFoundError, match="NYBULAH_DRIVECODE"):
+        drivecode("monitor_s8")

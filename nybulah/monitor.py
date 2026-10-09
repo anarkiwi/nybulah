@@ -1,5 +1,7 @@
 """Host side of the drive-resident command loop (drive/monitor.s)."""
 
+import os
+import pathlib
 import re
 import struct
 import time
@@ -33,16 +35,27 @@ class DriveUnresponsive(IOError):
 RECOVERABLE = (BusError, OpenCBMError)
 
 
+def _drivecode_dirs():
+    """The package's drivecode, then $NYBULAH_DRIVECODE (bins built in an image)."""
+    yield resources.files("nybulah.drivecode")
+    if os.environ.get("NYBULAH_DRIVECODE"):
+        yield pathlib.Path(os.environ["NYBULAH_DRIVECODE"])
+
+
 def drivecode(name):
-    """Return an assembled drive program from the package."""
-    return resources.files("nybulah.drivecode").joinpath(f"{name}.bin").read_bytes()
+    """Return an assembled drive program."""
+    for d in _drivecode_dirs():
+        f = d.joinpath(f"{name}.bin")
+        if f.is_file():
+            return f.read_bytes()
+    raise FileNotFoundError(f"{name}.bin: build drive/ or set NYBULAH_DRIVECODE")
 
 
 def protocols():
-    """Protocols with an assembled monitor in the package."""
-    files = resources.files("nybulah.drivecode").iterdir()
+    """Protocols with an assembled monitor available."""
+    names = (f.name for d in _drivecode_dirs() if d.is_dir() for f in d.iterdir())
     return tuple(
-        sorted(m[1] for f in files if (m := re.match(r"monitor_(\w+)\.bin$", f.name)))
+        sorted({m[1] for n in names if (m := re.match(r"monitor_(\w+)\.bin$", n))})
     )
 
 
