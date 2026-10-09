@@ -32,10 +32,45 @@ S2 strobes ATN, so every other drive must be switched off:
 docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 10 --s2
 ```
 
+## S3 (X protocol), both drives powered
+
+S3 needs xum1541 firmware v9 (flashed below) and the plugin this image builds
+by default (`OPENCBM_SOURCE=git`). It uses only CLK/DATA, so other drives can
+stay on; with older firmware or the stock plugin the step is recorded as
+skipped:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 8 10 --proto s3
+```
+
 The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
-its other subcommands (`nybulah <command> --help`). `--proto s3` adds the firmware-assisted protocol once both
-`drive/proto_x.inc` and the adapter plugin provide it; otherwise the step is
-recorded as skipped.
+its other subcommands (`nybulah <command> --help`), e.g.
+`nybulah bench --dev 10 --protocol s3`.
+
+## Flashing the ZoomFloppy firmware
+
+The firmware hex is built from the same OpenCBM commit the image uses:
+
+```sh
+git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
+git checkout 1617823447e3b4d663cb058dd74b0aa17d579703
+docker build -f Dockerfile.nybulah --target firmware-hex -o fw .
+docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v09.hex
+```
+
+`info` must print `model 2 version 9`. Then, with the ZoomFloppy plugged in
+(drives may stay connected), flash it; the adapter re-enumerates as a DFU
+bootloader during the update, so the container gets the whole USB tree:
+
+```sh
+docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v "$PWD/fw:/fw" \
+  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v09.hex
+docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb --entrypoint xum1541cfg nybulah devinfo
+```
+
+`devinfo` should report firmware version 9. If an update is interrupted the
+adapter stays in its bootloader; run `update` again. Flashing the stock
+`xum1541/xum1541-ZOOMFLOPPY-v08.hex` from the same tree the same way reverts it.
 
 ## Expected results
 

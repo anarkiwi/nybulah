@@ -46,6 +46,7 @@ _PROTOS = {
     "cbm_get_plugin_function_address": (ctypes.c_void_p, [ctypes.c_char_p]),
 }
 _XFER = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_void_p, ctypes.c_uint)
+_SET_TIMEOUT = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_uint)
 
 
 class OpenCBMError(IOError):
@@ -149,12 +150,12 @@ class OpenCBM:
         """Block until line reaches state (asserted=1); returns the line mask."""
         return self.lib.cbm_iec_wait(self.fd, line, state)
 
-    def _xfer(self, name):
+    def _xfer(self, name, proto=_XFER):
         if name not in self._plugin:
             addr = self.lib.cbm_get_plugin_function_address(name.encode())
             if not addr:
                 raise OpenCBMError(f"plugin lacks {name}")
-            self._plugin[name] = _XFER(addr)
+            self._plugin[name] = proto(addr)
         return self._plugin[name]
 
     def _read_n(self, proto, size):
@@ -183,3 +184,29 @@ class OpenCBM:
     def s2_write(self, data):
         """Write bytes with the S2 protocol (ATN strobed)."""
         self._write_n("s2", data)
+
+    def s3_read(self, size):
+        """Read size bytes with the X protocol (xum1541 firmware v9+)."""
+        return self._read_n("x", size)
+
+    def s3_write(self, data):
+        """Write bytes with the X protocol (xum1541 firmware v9+)."""
+        self._write_n("x", data)
+
+    def supports(self, protocol):
+        """Whether plugin and firmware speak protocol; s3 is probed with an empty read."""
+        if protocol != "s3":
+            return hasattr(self, f"{protocol}_read")
+        try:
+            self._read_n("x", 0)
+        except OpenCBMError:
+            return False
+        return True
+
+    def set_timeout(self, ms):
+        """Set the adapter's I/O idle timeout where the plugin supports it."""
+        try:
+            fn = self._xfer("opencbm_plugin_xum1541_set_timeout", _SET_TIMEOUT)
+        except OpenCBMError:
+            return False
+        return fn(self.fd, ms) == 0

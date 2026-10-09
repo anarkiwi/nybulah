@@ -11,7 +11,7 @@ import sys
 import time
 
 from . import bench, ramprobe, tool
-from .monitor import protocols, recover
+from .monitor import recover, supported
 
 
 class Session:
@@ -63,7 +63,7 @@ def check_dev(session, dev, protos, size, reps):
     for proto in protos:
         if base is None:
             session.skip(f"bench_{proto}", dev, f"no unaliased RAM run of {size} bytes")
-        elif proto not in protocols() or not hasattr(cbm, f"{proto}_read"):
+        elif not supported(cbm, proto):
             session.skip(f"bench_{proto}", dev, f"{proto} not supported here")
         else:
             pattern = os.urandom(size)

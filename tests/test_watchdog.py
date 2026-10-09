@@ -14,6 +14,7 @@ from nybulah.monitor import (
     recover,
 )
 from nybulah.opencbm import IEC_DATA
+from nybulah.simx import adapter
 from nybulah.sim import (
     Bus,
     Drive1541,
@@ -31,7 +32,7 @@ VIA = (0x01, 0x42, 0x1234)
 
 
 def armed(proto, cls=Drive1541, **kw):
-    cbm = SimCBM(cls(device=10), dev=10)
+    cbm = adapter(proto, cls, device=10)
     d = cbm.drive
     d.load(0x30, ZP)
     d.via1.acr, d.via1.ier, d.via1.latch = VIA
@@ -48,7 +49,7 @@ def assert_returned(d):
     assert not d.via1.ifr() & 0x40
 
 
-@pytest.mark.parametrize("proto", ["s1", "s2"])
+@pytest.mark.parametrize("proto", ["s1", "s2", "s3"])
 @pytest.mark.parametrize(
     "op,after",
     [(lambda m: m.write(0x8000, b"abcd"), 2), (lambda m: m.read(0x8000, 4), 6)],
@@ -65,7 +66,7 @@ def test_host_vanishes_mid_byte(proto, op, after):
     assert_returned(d)
 
 
-@pytest.mark.parametrize("proto", ["s1", "s2"])
+@pytest.mark.parametrize("proto", ["s1", "s2", "s3"])
 def test_progress_slower_than_timeout_survives(proto):
     cbm, mon = armed(proto)
     cbm.gap = int(0.7 * TIMEOUT)
@@ -88,7 +89,7 @@ class Clock:
         return self.t
 
 
-@pytest.mark.parametrize("proto", ["s1", "s2"])
+@pytest.mark.parametrize("proto", ["s1", "s2", "s3"])
 def test_idle_window_between_commands(proto):
     clock = Clock()
     cbm, mon = armed(proto, clock=clock)
@@ -118,17 +119,18 @@ def test_long_pause_restarts_live_monitor():
     assert mon.running and not cbm.drive.halted
 
 
-def test_drive_left_inside_window_recovers():
-    cbm = SimCBM(Drive1571(device=10), dev=10)
+@pytest.mark.parametrize("proto", ["s2", "s3"])
+def test_drive_left_inside_window_recovers(proto):
+    cbm = adapter(proto, Drive1571, device=10)
     with pytest.raises(HandshakeTimeout, match="left the monitor") as e:
-        with Monitor(cbm, 10, "s2") as mon:
+        with Monitor(cbm, 10, proto) as mon:
             cbm.drive.reset()
             mon.read(0x6000, 1)
     assert answers(e.value.recovered) and not mon.running
     assert cbm.bus.lines() == 0
 
 
-@pytest.mark.parametrize("proto", ["s1", "s2"])
+@pytest.mark.parametrize("proto", ["s1", "s2", "s3"])
 def test_stop_after_drive_exit_releases_host(proto):
     cbm, mon = armed(proto)
     cbm.drive.reset()
@@ -174,7 +176,7 @@ def test_answers():
 
 
 def test_protocols_and_unsupported():
-    assert {"s1", "s2"} <= set(protocols())
+    assert {"s1", "s2", "s3"} <= set(protocols())
     with pytest.raises(ValueError):
         Monitor(SimCBM(), 8, "s3")
 
