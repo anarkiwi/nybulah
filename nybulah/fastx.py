@@ -9,6 +9,13 @@ from .opencbm import IEC_CLOCK, IEC_DATA, OpenCBMError
 
 TAG = b"NYBX"
 CHUNK = 0x1000
+VIA1PA = 0x1801
+PA_2MHZ = 0x20
+CLOCK_CODE = {
+    True: bytes([0xA9, PA_2MHZ, 0x0D]) + struct.pack("<H", VIA1PA),
+    False: bytes([0xA9, 0xFF ^ PA_2MHZ, 0x2D]) + struct.pack("<H", VIA1PA),
+}
+CLOCK_TAIL = bytes([0x8D]) + struct.pack("<H", VIA1PA) + b"\x60"
 
 
 def xsum(data):
@@ -40,6 +47,28 @@ class XLink(S1Link):
             raise ValueError("monitor code lacks the NYBX tag")
         self.xparm = BASE + at + len(TAG)
         self.rejects = 0
+        self.fast = False
+
+    def set_fast(self, fast):
+        """Switch a 1571 between 1 and 2 MHz; the reply already uses the new timing.
+
+        The drive's watchdog windows scale with its clock, so idle_s follows.
+        """
+        if fast == self.fast:
+            return
+        code = CLOCK_CODE[fast] + CLOCK_TAIL
+        addr = BASE + len(self.mon.code)
+        if addr + len(code) > 0x0800:
+            raise ValueError("no room for the clock switch after the monitor")
+        self.write(addr, code)
+        self.tx(b"J" + struct.pack("<H", addr))
+        self.fast = fast
+        speed = "x2" if fast else "s3"
+        self.rx = getattr(self.cbm, f"{speed}_read")
+        self.tx = getattr(self.cbm, f"{speed}_write")
+        self.mon.idle_s *= 0.5 if fast else 2.0
+        self.response(3)
+        self.mon.touch()
 
     @property
     def xread(self):

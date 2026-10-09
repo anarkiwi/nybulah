@@ -27,5 +27,11 @@ def main(argv=None, cbm=None):
     return run(COMMANDS[args.command], args, cbm)
 
 
-if __name__ == "__main__":
+def console():
+    """Console-script entry: run a command, exit status 0 unless it raises."""
     main()
+    return 0
+
+
+if __name__ == "__main__":
+    console()

@@ -79,8 +79,9 @@ docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v "$PWD/fw:/fw" \
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb --entrypoint xum1541cfg nybulah devinfo
 ```
 
-`devinfo` should report firmware version 9. If an update is interrupted the
-adapter stays in its bootloader; run `update` again. Flashing the stock
+`devinfo` should report firmware version 9. If `update` reports no devices
+found, the adapter may already have re-enumerated as its DFU bootloader before
+the tool looked for it; run `update` again. Flashing the stock
 `xum1541/xum1541-ZOOMFLOPPY-v08.hex` from the same tree the same way reverts it.
 
 ## Expected results
@@ -89,6 +90,18 @@ adapter stays in its bootloader; run `update` again. Flashing the stock
 |--------|---------|----------------|
 | 8      | 1571    | `$6000-$7FFF`  |
 | 10     | 1541-II | `$8000-$9FFF`  |
+
+Transfer rates measured on a ZoomFloppy with firmware v9, both drives powered,
+8 KB blocks (bytes/s):
+
+| path | 1541-II | 1571 1 MHz | 1571 2 MHz |
+|------|---------|------------|------------|
+| M-R | 463 | 461 | |
+| S1 read / write | 1634 / 1493 | 1669 / 1498 | |
+| X read / write | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
+
+`nybulah bench --protocol s3 --fast` runs a 1571 at 2 MHz for the transfer
+(VIA1 PA5) and returns it to 1 MHz before handing back to DOS.
 
 ## Probe safety
 

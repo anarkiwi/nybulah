@@ -12,11 +12,13 @@ from functools import cached_property
 
 import numpy as np
 
+from .fastx import PA_2MHZ
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
 from .sim import (
     PB_ATN_IN,
     PB_CLK_IN,
     PB_DATA_IN,
+    VIA1,
     Bus,
     Drive1541,
     Drive1571,
@@ -195,8 +197,17 @@ class TimedDrive1541(Drive1541):
         self.rng = np.random.default_rng(seed)
         self.t_access = 0.0
         self._pb = 0
+        self._t0, self._c0 = 0.0, 0
         super().__init__(*args, **kw)
-        self.bus.clock = lambda: self.cycles * self.cyc
+        self.bus.clock = lambda: self.time(self.cycles)
+
+    def time(self, cycles):
+        """Microseconds at a cycle count, across clock-speed changes."""
+        return self._t0 + (cycles - self._c0) * self.cyc
+
+    def set_cyc(self, cyc):
+        """Change the CPU clock period from the current cycle onwards."""
+        self._t0, self._c0, self.cyc = self.time(self.cycles), self.cycles, cyc
 
     @property
     def pb_out(self):
@@ -212,7 +223,7 @@ class TimedDrive1541(Drive1541):
     def next_access(self):
         """Time of the next instruction's port access."""
         op = self.read(self.mpu.pc)
-        return (self.cycles + self.mpu.cycletime[op] - 0.5) * self.cyc
+        return self.time(self.cycles + self.mpu.cycletime[op] - 0.5)
 
     def step(self):
         """Execute one instruction with its access time set."""
@@ -231,9 +242,15 @@ class TimedDrive1541(Drive1541):
 
 
 class TimedDrive1571(TimedDrive1541):
-    """1571 on a TimedBus (cyc=0.5 models 2 MHz mode)."""
+    """1571 on a TimedBus; VIA1 PA5 (or cyc=0.5) selects 2 MHz."""
 
     MODEL, EXPANSION = Drive1571.MODEL, Drive1571.EXPANSION
+
+    def write(self, addr, value):
+        """CPU write; a VIA1 port A write applies PA5 to the clock."""
+        super().write(addr, value)
+        if self._kind[addr] == VIA1 and self._phys[addr] & 0xF in (1, 15):
+            self.set_cyc(0.5 if value & PA_2MHZ else 1.0)
 
 
 class SimX(SimCBM):
@@ -296,7 +313,7 @@ class SimX(SimCBM):
         if self.vanish_at == self.ordinal:
             self.vanish_at = None
             raise HostGone("adapter vanished")
-        self.now = max(self.now, self.drive.cycles * self.drive.cyc)
+        self.now = max(self.now, self.drive.time(self.drive.cycles))
         self.now += self.pause.pop(self.ordinal, 0.0)
         start = self.now
         grace = GRACE * self.timing.cyc

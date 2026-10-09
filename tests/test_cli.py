@@ -133,3 +133,8 @@ def test_disk_command_refusals(monkeypatch, tmp_path):
             ["read", "--dev", "10", "--transport", "s3", str(path)],
             disk_cli(monkeypatch, "1571"),
         )
+
+
+def test_console_exit_status_is_zero(monkeypatch):
+    monkeypatch.setattr(cli, "main", lambda: {"result": "dict"})
+    assert cli.console() == 0
