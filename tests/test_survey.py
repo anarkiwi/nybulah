@@ -277,3 +277,23 @@ def test_summarise_empty():
         scenarios.cycle_stats(np.zeros(0, survey.TRACK_DTYPE), np.zeros(0, bool))
         is None
     )
+
+
+def _smooth(m):
+    for p in (2, 3, 5):
+        while m % p == 0:
+            m //= p
+    return m == 1
+
+
+def test_fast_size_and_cached_alignment():
+    smooth = [m for m in range(1, 2200) if _smooth(m)]
+    for n in range(1, 2000):
+        assert survey.fast_size(n) == next(m for m in smooth if m >= n)
+    rng = np.random.default_rng(1)
+    a = rng.integers(0, 2, 3000, np.uint8)
+    b = np.roll(a, 700)[:2500]
+    spectra = survey.Spectra({0: a, 1: b, 2: a[:0]})
+    agree, z = spectra.agreement(0, 1)
+    assert agree == 1 and z > 40 and spectra.agreement(1, 0) == (agree, z)
+    assert np.isnan(spectra.agreement(0, 2)[0])

@@ -401,10 +401,62 @@ def disk_ids(revs):
     return fmt, int(bam[0]) << 8 | int(bam[1])
 
 
-def _similar(canon, kinds, key, other):
-    if other not in canon or TrackKind.KILLER in (kinds[key], kinds[other]):
+def fast_size(n):
+    """Smallest 5-smooth integer (2^a 3^b 5^c) of at least ``n``: a fast FFT length."""
+    best, p5 = 1 << max(int(n - 1).bit_length(), 0), 1
+    while p5 < best:
+        p35 = p5
+        while p35 < best:
+            p235 = p35 << max(int(-(-n // p35) - 1).bit_length(), 0)
+            best = min(best, p235)
+            p35 *= 3
+        p5 *= 5
+    return best
+
+
+class Spectra:
+    """Best circular alignments between many tracks, each spectrum computed once.
+
+    The longer track of a pair is the circular reference; the shorter one is
+    slid over it whole. One FFT size per set keeps every spectrum reusable.
+    """
+
+    def __init__(self, tracks):
+        self.tracks = {k: np.asarray(v, np.uint8) for k, v in tracks.items()}
+        self.size = fast_size(
+            3 * max((len(v) for v in self.tracks.values()), default=1)
+        )
+        self._ref, self._probe = {}, {}
+
+    def _spectrum(self, cache, key, tiles):
+        if key not in cache:
+            signal = 2.0 * np.tile(self.tracks[key], tiles) - 1
+            spec = np.fft.rfft(signal, self.size)
+            cache[key] = spec if tiles == 2 else np.conj(spec)
+        return cache[key]
+
+    def agreement(self, a, b):
+        """``(fraction of agreeing bits, z above chance)`` at the best alignment."""
+        long, short = (a, b) if len(self.tracks[a]) >= len(self.tracks[b]) else (b, a)
+        ref, probe = self.tracks[long], self.tracks[short]
+        n = len(probe)
+        if n == 0:
+            return np.nan, np.nan
+        spec = self._spectrum(self._ref, long, 2) * self._spectrum(
+            self._probe, short, 1
+        )
+        corr = np.fft.irfft(spec, self.size)[: len(ref)].max()
+        agree = (n + corr) / (2 * n)
+        p, q = ref.mean(), probe.mean()
+        chance = p * q + (1 - p) * (1 - q)
+        z = (agree - chance) * np.sqrt(n / max(chance * (1 - chance), 1e-12))
+        return float(agree), float(z)
+
+
+def _similar(spectra, kinds, key, other):
+    if other not in kinds or TrackKind.KILLER in (kinds[key], kinds[other]):
         return np.nan, np.nan
-    return agreement(canon[key], canon[other])[:2]
+    return spectra.agreement(key, other)
 
 
 def _density(image):
@@ -419,7 +471,7 @@ def _compare(row, key, canon, kinds, pair):
     row["sim_next"], row["sim_next_z"] = _similar(canon, kinds, key, key + 2)
     if pair is not None and key in pair.tracks:
         bits = pair.tracks[key][0].bits
-        row["pair_agree"] = agreement(canonical(bits), canon[key])[0]
+        row["pair_agree"] = agreement(canonical(bits), canon.tracks[key])[0]
         row["pair_len"] = len(bits)
 
 
@@ -443,7 +495,7 @@ def survey_image(image, pair=None, revolution=best_revolution):
     keys = sorted(image.tracks)
     revs = {k: revolution(image.tracks[k], k) for k in keys}
     ids = disk_ids(revs)
-    canon = {k: canonical(r[1]) for k, r in revs.items()}
+    canon = Spectra({k: canonical(r[1]) for k, r in revs.items()})
     kinds = {k: r[2].kind for k, r in revs.items()}
     density = _density(image)
     rows = _empty_rows(len(keys))
