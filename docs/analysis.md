@@ -262,11 +262,24 @@ wraps), `kind`, `cls`, `detail` and `stability`.
 
 `EMPTY` marks unused tracks (unformatted beyond 35, half-track crosstalk).
 
-**Revolutions.** Every whole revolution of every capture (index to index, or
-cycle by cycle from `find_cycle`) is parsed and classified. `align(ref, rev)`
-pairs syncs as mutual nearest neighbours after a canonical FFT alignment, maps
-positions by the offset of the last paired sync, and compares each block of
-revolution 0 with the other revolution from its paired sync.
+**Revolutions.** Every whole revolution of every capture is parsed and
+classified: index to index; for byte-ready captures other than the surveyed
+one, from a sync to its next pass, each segment identified with a block of
+revolution 0 (`_passes`); otherwise cycle by cycle from `find_cycle`.
+`regions.pair_blocks` pairs blocks by canonical position (syncs cut to 10
+ones): the rotation is swept exactly for the least total of bits differing
+between each block and its nearest (compared from both block starts, the
+unmatched part of the wider nominal width counting as differing) plus the
+widths of blocks nearest to none; blocks then pair as mutual nearest walking
+out from the best-placed pair, the offset following each pair, so sync-length
+error accumulated around a revolution does not shift the pairing. `align(ref,
+rev)` maps positions by the offset of the last paired sync and compares each
+pair bit by bit over the narrower nominal block width (header 80 bits, data
+2600, a block of other kind its segment): gaps, write splices and the bits
+framed before a sync are not compared. Revolutions without syncs are compared
+whole after a canonical FFT alignment.
+`tools/diskmap_captures.py FOLDER...` maps saved capture folders of one disk
+together and lists the tracks with non-standard or unstable regions.
 
 **Stability.**
 

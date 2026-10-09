@@ -16,6 +16,7 @@ from nybulah.analysis.diskmap import (
     Kind,
     WIDE,
     Stability,
+    _passes,
     align,
     disk_map,
     load_thresholds,
@@ -90,6 +91,8 @@ def test_stability(synthetic):
     assert sorted(dis["rev"].tolist()) == list(range(1, REVS))
     assert (dis["stability"] == Stability.UNSTABLE).all()
     assert (dis["start_bit"] >= weak[2]).all() and (dis["end_bit"] <= weak[3]).all()
+    assert (dis["start_bit"] - weak[2] < regions.GROUP_BITS).all()
+    assert (weak[3] - dis["end_bit"] < regions.GROUP_BITS).all()
     slip = next(t for t in truth if t[4] is not None)
     for kind in (Kind.CAPTURE_FAULT, Kind.DISAGREE):
         found = _found(dmap, slip[0], kind)
@@ -193,16 +196,95 @@ def test_thresholds_load(tmp_path):
     assert load_thresholds(tmp_path / "summary.json") == thr
 
 
+def _slipped(bits, at):
+    """``bits`` rotated by 1000 with the bit at reference position ``at`` deleted."""
+    return parse(np.delete(np.roll(bits, -1000), at - 1000))
+
+
 def test_align_maps_rotation_and_slip():
     rng = np.random.default_rng(3)
     image, _ = synthetic_disk(1, rng=rng)
     bits = image.tracks[18][0].bits
     ref = parse(bits)
-    other = np.delete(np.roll(bits, -1000), 5000)
-    found = align(ref, parse(other))
+    data = np.flatnonzero(ref.block_kind == regions.Block.DATA)[1]
+    at = int(ref.block_start[data]) + regions.DATA_BITS // 2
+    found = align(ref, _slipped(bits, at))
     assert found.to_ref(np.array([0, 3000])).tolist() == [1000, 4000]
-    assert found.to_ref(np.array([6000]))[0] == 7001 % len(bits)
-    assert len(found.miss) and found.miss.min() >= 5000 + 1000 - regions.GROUP_BITS
+    assert len(found.miss) and found.miss.min() >= at - regions.GROUP_BITS
+    assert found.miss.max() < ref.block_start[data] + regions.DATA_BITS
+    gap = int(ref.gaps.start[data]) + int(ref.gaps.length[data]) // 2
+    found = align(ref, _slipped(bits, gap))
+    assert len(found.miss) == 0
+    assert found.to_ref(np.array([gap + 2000 - 1000]))[0] == gap + 2001
+
+
+def test_align_follows_drift_between_syncs():
+    image, _ = synthetic_disk(1, rng=np.random.default_rng(5))
+    bits = image.tracks[18][0].bits
+    ref = parse(bits)
+    data = ref.block_kind[ref.gaps.block] == regions.Block.DATA
+    at = ref.gaps.start[data] + 8 * (ref.gaps.length[data] // 16)
+    fill = bits[at[0] : at[0] + 8]
+    rev = parse(
+        np.roll(np.insert(bits, np.repeat(at, len(fill)), np.tile(fill, len(at))), 777)
+    )
+    assert 2 * len(fill) * len(at) > np.diff(np.sort(ref.block_start)).min()
+    found = align(ref, rev)
+    assert len(found.miss) == 0
+    mapped = np.sort(found.to_ref(rev.block_start.astype(np.int64)))
+    assert mapped.tolist() == np.sort(ref.block_start).tolist()
+
+
+def test_align_without_syncs_compares_whole_revolution():
+    rng = np.random.default_rng(4)
+    bits = (rng.random(4000) < 0.5).astype(np.uint8)
+    bits[np.flatnonzero(bits[:-1] & bits[1:])] = 0
+    ref = parse(bits)
+    found = align(ref, parse(np.roll(bits, -300)))
+    assert len(ref.sync_start) == 0 and len(found.miss) == 0
+    assert found.to_ref(np.array([0]))[0] == 300
+
+
+@pytest.fixture(name="dev10", scope="module")
+def dev10_fixture():
+    caps = {}
+    for side in ("a", "b"):
+        for key, found in survey.load_captures(DATA / "hw" / "dev10" / side).items():
+            caps.setdefault(key, []).extend(found)
+    return caps, disk_map(survey.DiskImage("capture", caps), bins=128)
+
+
+def test_hw_rereads_of_a_clean_disk_agree(dev10):
+    caps, dmap = dev10
+    assert dmap.revs.tolist() == [len(caps[k]) for k in dmap.keys]
+    r = dmap.regions
+    assert not (r["stability"] == Stability.UNSTABLE).any()
+    assert not (r["kind"] == Kind.DISAGREE).any()
+    assert set(np.unique(r["kind"])) <= {
+        Kind.SYNC,
+        Kind.HEADER,
+        Kind.DATA,
+        Kind.GAP,
+        Kind.ZERO_SPAN,
+    }
+
+
+def test_hw_capture_passes_are_whole_revolutions(dev10):
+    caps, dmap = dev10
+    keys = [k for k in dmap.keys if len(caps[k]) > 2]
+    measured = survey.measure_image(survey.DiskImage("capture", caps))
+    for key in keys:
+        ref = measured.parsed[key]
+        best = measured.best[key][0]
+        for cap in caps[key]:
+            if cap is best:
+                continue
+            (rev,) = _passes(ref, cap)
+            rev = parse(rev)
+            assert len(rev.sync_start) == len(ref.sync_start)
+            assert sorted(rev.hdr[rev.block_kind == regions.Block.HEADER, 2]) == sorted(
+                ref.hdr[ref.block_kind == regions.Block.HEADER, 2]
+            )
 
 
 def test_parse_edge_tracks():
