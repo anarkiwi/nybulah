@@ -14,8 +14,11 @@ from functools import cached_property
 import numpy as np
 
 from .fastx import PA_2MHZ
-from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
+from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
 from .sim import (
+    CIA,
+    IO_ACCESS_CYCLE,
+    PA_FSDIR,
     PB_ATN_IN,
     PB_CLK_IN,
     PB_DATA_IN,
@@ -236,8 +239,13 @@ class BurstTiming:
         )
 
 
+LINES = (IEC_DATA, IEC_CLOCK, IEC_SRQ)
+HISTORY, SCHEDULED = 16, 64
+
+
 class TimedBus(Bus):
-    """Bus whose lines carry per-source edge history in microseconds."""
+    """Bus whose lines carry per-source edge history in microseconds; listeners see
+    every host change as (lines, t)."""
 
     def __init__(self, rise=0.5):
         self.rise = rise
@@ -245,6 +253,7 @@ class TimedBus(Bus):
         self.clock = lambda: 0.0
         self.version = 0
         self._host = 0
+        self.listeners = []
         super().__init__()
 
     @property
@@ -260,16 +269,30 @@ class TimedBus(Bus):
         """Set the adapter's asserted lines at time t."""
         self._host = value
         self.record("host", value, t)
+        for listen in self.listeners:
+            listen(value, t)
 
     def record(self, src, value, t):
         """Note source src asserting the lines in value from time t."""
-        for line in (IEC_DATA, IEC_CLOCK):
+        keep = SCHEDULED if isinstance(src, tuple) else HISTORY
+        for line in LINES:
             hist = self.edges.setdefault((src, line), [(-math.inf, False)])
             state = bool(value & line)
             if hist[-1][1] != state:
                 hist.append((max(t, hist[-1][0]), state))
-                del hist[:-16]
+                del hist[:-keep]
                 self.version += 1
+
+    def schedule(self, src, changes, t):
+        """Replace src's changes after t with changes [(time, lines)]; src is a tuple
+        (scheduled sources keep a longer history)."""
+        for line in LINES:
+            hist = self.edges.get((src, line))
+            while hist and len(hist) > 1 and hist[-1][0] > t:
+                hist.pop()
+        for at, value in changes:
+            self.record(src, value, at)
+        self.version += 1
 
     def _holds(self, hist, t):
         for ti, si in reversed(hist):
@@ -289,13 +312,13 @@ class TimedBus(Bus):
         return v
 
     def settles(self, t):
-        """Earliest time after t at which a rising line finishes, else inf."""
+        """Earliest time after t at which any line's level changes, else inf."""
         return min(
             (
-                ti + self.rise
+                ti + (0 if si else self.rise)
                 for hist in self.edges.values()
-                for ti, si in hist[-2:]
-                if not si and t < ti + self.rise
+                for ti, si in hist[1:]
+                if t < ti + (0 if si else self.rise)
             ),
             default=math.inf,
         )
@@ -306,6 +329,8 @@ class TimedBus(Bus):
 
 class TimedDrive1541(Drive1541):
     """1541 on a TimedBus: timestamps port writes and reads the bus at access time."""
+
+    TIMED = True
 
     def __init__(self, *args, cyc=1.0, read_jitter=0.0, seed=0, **kw):
         self.cyc, self.read_jitter = cyc, read_jitter
@@ -333,7 +358,7 @@ class TimedDrive1541(Drive1541):
     def pb_out(self, value):
         self._pb = value
         if isinstance(self.bus, TimedBus):
-            self.bus.record(self, self.drive_lines(), self.t_access)
+            self.bus.record(self, self.via_lines(), self.t_access)
 
     def next_access(self):
         """Time of the next instruction's port access."""
@@ -357,15 +382,86 @@ class TimedDrive1541(Drive1541):
 
 
 class TimedDrive1571(TimedDrive1541):
-    """1571 on a TimedBus; VIA1 PA5 (or cyc=0.5) selects 2 MHz."""
+    """1571 on a TimedBus; VIA1 PA5 (or cyc=0.5) selects 2 MHz.
+
+    The CIA's output changes go on the bus as scheduled edges (cycle n at mid-cycle,
+    like port accesses), redone after every CIA or port A write. In input mode it
+    samples SRQ once per cycle: a host low pulse that a sample sees, then a sample
+    seeing SRQ released, shift DATA at that sample in.
+    """
 
     MODEL, EXPANSION = Drive1571.MODEL, Drive1571.EXPANSION
 
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self._srq = []
+        if isinstance(self.bus, TimedBus):
+            self.bus.listeners.append(self._host_change)
+
+    def cycle_at(self, t):
+        """Cycle count (fractional) at time t."""
+        return self._c0 + (t - self._t0) / self.cyc
+
+    def _host_change(self, lines, t):
+        state = bool(lines & IEC_SRQ)
+        if (self._srq[-1][1] if self._srq else False) != state:
+            self._srq.append((t, state))
+
+    def _sample(self, t):
+        """First CIA sample cycle at or after time t."""
+        return math.ceil(self.cycle_at(t) - 0.5)
+
+    def _cia_inputs(self, c):
+        """Shift in the host's SRQ rises sampled up to cycle c."""
+        q = self._srq
+        while len(q) >= 2 and q[0][1] and not q[1][1]:
+            (ta, _), (tr, _) = q[0], q[1]
+            low, high = self._sample(ta), self._sample(tr + self.bus.rise)
+            if high > c:
+                return
+            if len(q) > 2 and self.time(high + 0.5) >= q[2][0]:
+                del q[1:3]  # no sample sees SRQ high before the next fall
+                continue
+            del q[:2]
+            if low < high and not self.via1.regs[1] & PA_FSDIR:
+                level = self.bus.level(self.time(high + 0.5))
+                self.cia.edge(0 if level & IEC_DATA else 1)
+        if q and not q[0][1]:
+            del q[0]
+
+    def read(self, addr):
+        """CPU read; CIA reads see the host's SRQ clocking so far."""
+        if self._kind[addr] == CIA:
+            self._cia_inputs(self.cycles + IO_ACCESS_CYCLE)
+        return super().read(addr)
+
     def write(self, addr, value):
-        """CPU write; a VIA1 port A write applies PA5 to the clock."""
+        """CPU write; port A applies PA5 to the clock, CIA and port A writes
+        reschedule the CIA's bus edges."""
+        k, reg = self._kind[addr], self._phys[addr] & 0xF
+        if k == CIA:
+            self._cia_inputs(self.cycles + IO_ACCESS_CYCLE)
         super().write(addr, value)
-        if self._kind[addr] == VIA1 and self._phys[addr] & 0xF in (1, 15):
+        porta = k == VIA1 and reg in (1, 15)
+        if porta:
             self.set_cyc(0.5 if value & PA_2MHZ else 1.0)
+        if porta or k == CIA:
+            self._cia_schedule(self.cycles + IO_ACCESS_CYCLE)
+
+    def _cia_schedule(self, c):
+        cia, fsdir = self.cia, self.via1.regs[1] & PA_FSDIR
+        u1, _, pend, *_ = cia.advance(c)
+        p = cia.latch + 1
+        steps = range(0 if u1 < 0 else 16 * (2 if pend >= 0 else 1))
+        cycles = sorted({c} | {u1 + k * p for k in steps if u1 + k * p > c})
+        changes = [(self.time(n + 0.5), cia.lines(n, fsdir)) for n in cycles]
+        self.bus.schedule((self, "cia"), changes, self.time(c + 0.5))
+
+    def reset(self):
+        super().reset()
+        self._srq.clear()
+        if isinstance(self.bus, TimedBus):
+            self.bus.schedule((self, "cia"), [(self.time(self.cycles), 0)], -math.inf)
 
 
 class SimX(SimCBM):
@@ -416,10 +512,11 @@ class SimX(SimCBM):
     def _host(self, value, t):
         self.bus.drive_host(value, t)
 
-    def _poll_until(self, line, state, t0, deadline):
-        """First poll instant in [t0, deadline] seeing line in state, else None."""
-        p, s, bus = self.timing.poll, self.timing.sync, self.bus
-        t = t0 + self.rng.uniform(0, p)
+    def _poll_until(self, line, state, t0, deadline, poll=None, phase=None):
+        """First poll instant in [t0, deadline] seeing line in state, else None; polls
+        every poll us (the timing's by default) from t0 + phase (random by default)."""
+        p, s, bus = poll or self.timing.poll, self.timing.sync, self.bus
+        t = t0 + (self.rng.uniform(0, p) if phase is None else phase)
         while t <= deadline:
             self._advance(t - s)
             if bool(bus.level(t - s) & line) == state:
@@ -442,9 +539,9 @@ class SimX(SimCBM):
         del edges
         self.vanish_at = self.ordinal + after_bytes
 
-    def _sync(self, n=1):
-        """Assert go for the next n bytes and return the SYNC detection time,
-        retracting on slices."""
+    def _sync(self, n=1, go=IEC_DATA, line=IEC_CLOCK):
+        """Assert go for the next n bytes and return the detection time of SYNC (line
+        released, then asserted), retracting go on slices."""
         if self.gap:
             self.idle(self.gap)
         span = range(self.ordinal, self.ordinal + n)
@@ -457,17 +554,17 @@ class SimX(SimCBM):
         grace = GRACE * self.timing.cyc
         while True:
             if not self._go:
-                self._host(IEC_DATA, self.now)
+                self._host(go, self.now)
                 self._go = True
             end = self.now + self.timing.slice
-            t = self._poll_until(IEC_CLOCK, False, self.now, end)
+            t = self._poll_until(line, False, self.now, end)
             if t is not None:
-                t = self._poll_until(IEC_CLOCK, True, t, end)
+                t = self._poll_until(line, True, t, end)
             if t is None:
                 self._host(0, end)
                 self._go = False
                 self.count["retracts"] += 1
-                t = self._poll_until(IEC_CLOCK, True, end, end + grace)
+                t = self._poll_until(line, True, end, end + grace)
             if t is not None:
                 self.now = t
                 self.ordinal += n
@@ -540,20 +637,49 @@ class SimX(SimCBM):
     def _burst_timing(self, f):
         return BurstTiming(f or round(16 * self.timing.cyc), via=self.timing.via)
 
-    def xb_read(self, size, f=None):
-        """Drive -> host burst transfer of size bytes (f defaults to the timing's
-        drive clock, as x_read does)."""
-        bt, out = self._burst_timing(f), bytearray()
+    def _read_bursts(self, size, burst, go=IEC_DATA, line=IEC_CLOCK):
+        """Drive -> host transfer in bursts: burst(t, n, first, out) appends the n
+        bytes timed from the detection t to out and returns its last sample time."""
+        out = bytearray()
         while len(out) < size:
-            n = min(XB_BURST, size - len(out))
-            first = self.ordinal
+            n, first = min(XB_BURST, size - len(out)), self.ordinal
             try:
-                t = self._sync(n)
+                t = self._sync(n, go, line)
             except (XTimeout, HostGone) as e:
                 raise self._fail(e, out)
             self._host(0, t + (AVR_FOUND + 2) / 16)
             self._go = False
             self.count["bursts"] += 1
+            self.now = burst(t, n, first, out) + self.timing.turn
+        return bytes(out)
+
+    def _write_bursts(self, data, changes):
+        """Host -> drive transfer in bursts: changes(t, burst, first) gives the
+        (time, lines) writes from the detection t."""
+        data = bytes(data)
+        for j in range(0, len(data), XB_BURST):
+            burst, first = data[j : j + XB_BURST], self.ordinal
+            try:
+                if not self.out_ready(len(burst), *out_banks(len(burst))):
+                    self.now += self.timing.timeout
+                    raise XTimeout("OUT endpoint never ready")
+                t = self._sync(len(burst))
+            except (XTimeout, HostGone) as e:
+                raise self._fail(e, data[:j])
+            self.count["bursts"] += 1
+            for at, lines in changes(t, burst, first):
+                self._advance(at)
+                self._host(lines, at)
+            self._go = False
+            self.now = at + self.timing.turn  # pylint: disable=undefined-loop-variable
+        self._advance(self.now)
+
+    def xb_read(self, size, f=None):
+        """Drive -> host burst transfer of size bytes (f defaults to the timing's
+        drive clock, as x_read does)."""
+        bt = self._burst_timing(f)
+
+        def burst(t, n, first, out):
             for i in range(n):
                 samples = []
                 for k, off in enumerate(bt.sample):
@@ -561,8 +687,9 @@ class SimX(SimCBM):
                     self._advance(at)
                     samples.append(self.bus.level(at) ^ self._flip(k, first + i))
                 out.append(decode(samples, XB_SEND_PAIRS))
-            self.now = at + self.timing.turn
-        return bytes(out)
+            return at  # pylint: disable=undefined-loop-variable
+
+        return self._read_bursts(size, burst)
 
     def _xb_changes(self, bt, burst, first):
         """(clock, lines) of a host -> drive burst: P0 at detection, P1..P3, the next
@@ -586,24 +713,13 @@ class SimX(SimCBM):
 
     def xb_write(self, data, f=None):
         """Host -> drive burst transfer."""
-        bt, data = self._burst_timing(f), bytes(data)
-        for j in range(0, len(data), XB_BURST):
-            burst, first = data[j : j + XB_BURST], self.ordinal
-            try:
-                if not self.out_ready(len(burst), *out_banks(len(burst))):
-                    self.now += self.timing.timeout
-                    raise XTimeout("OUT endpoint never ready")
-                t = self._sync(len(burst))
-            except (XTimeout, HostGone) as e:
-                raise self._fail(e, data[:j])
-            self.count["bursts"] += 1
-            for clock, lines in self._xb_changes(bt, burst, first):
-                at = self._clock(t, clock)
-                self._advance(at)
-                self._host(lines, at)
-            self._go = False
-            self.now = at + self.timing.turn
-        self._advance(self.now)
+        bt = self._burst_timing(f)
+        self._write_bursts(
+            data,
+            lambda t, burst, first: [
+                (self._clock(t, c), v) for c, v in self._xb_changes(bt, burst, first)
+            ],
+        )
 
     def xb2_read(self, size):
         """Burst read timed for a 1571 at 2 MHz."""

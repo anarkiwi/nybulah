@@ -1,10 +1,9 @@
-"""Cycle-stepped 1541/1571 + IEC bus + xum1541 model for running drive code without hardware.
+"""Cycle-stepped 1541/1571, IEC bus and xum1541 model: drive code without hardware.
 
 py65 6502 with the model's address decoding, VIA1 port B on an open-collector bus with
-ATN auto-acknowledge, and VIA1 timers 1 and 2 clocked by the CPU cycle counter. VIA2 and
-the 1571's WD1770 are served by an attached disk mechanism (nybulah.simdisk) when there is
-one. Writes to other I/O raise SimIOWrite. nybulah.simfast runs drives compiled unless
-NYBULAH_SIM=py65 (or drive.fast is False); nybulah.simhost holds the host stand-ins.
+ATN auto-acknowledge, VIA1 timers 1 and 2 and the 1571's 6526 (SRQ, DATA through the
+drivers VIA1 PA1 turns) clocked by the CPU cycle counter; VIA2 and the WD1770 come from
+nybulah.simdisk, simfast runs drives compiled unless NYBULAH_SIM=py65, simhost hosts.
 """
 
 import os
@@ -12,7 +11,7 @@ import os
 import numpy as np
 from py65.devices.mpu6502 import MPU
 
-from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
+from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
 
 PB_DATA_IN, PB_DATA_OUT, PB_CLK_IN, PB_CLK_OUT, PB_ATNA, PB_ATN_IN = (
     0x01,
@@ -23,9 +22,12 @@ PB_DATA_IN, PB_DATA_OUT, PB_CLK_IN, PB_CLK_OUT, PB_ATNA, PB_ATN_IN = (
     0x80,
 )
 RETURN_TRAP = 0xFFF0
-RAM, ROM, VIA1, OPEN, IO, VIA2, FDC = range(7)
+RAM, ROM, VIA1, OPEN, IO, VIA2, FDC, CIA = range(8)
 ACR_T1_FREERUN, IRQ_T1, IRQ_T2 = 0x40, 0x40, 0x20
 IO_ACCESS_CYCLE = 3
+CIA_BASE, PA_FSDIR = 0x4000, 0x02
+CRA_START, CRA_LOAD, CRA_SPOUT = 0x01, 0x10, 0x40
+ICR_TA, ICR_SP, ICR_IR = 0x01, 0x08, 0x80
 
 
 class SimTimeout(OpenCBMError):
@@ -59,6 +61,7 @@ def memory_map(model, expansion):
             VIA2: (a >= 0x1C00) & (a < 0x2000),
             FDC: (a >= 0x2000) & (a < 0x4000),
         }
+        io[CIA] = (a >= CIA_BASE) & (a < CIA_BASE + 16)
         kind[(a >= 0x6000) & low] = OPEN
     else:
         raise ValueError(f"unknown model {model}")
@@ -191,11 +194,160 @@ class Via:
         return self.acr, self.ier, self.latch
 
 
+class Cia:  # pylint: disable=too-many-instance-attributes
+    """6526 timer A, serial port and ICR as the datasheet describes them, in CPU cycles.
+
+    Timer A counts down from c0 at cycle t0 while CRA bit 0 runs it; underflows come every
+    latch + 1 cycles and reload the latch (continuous mode). Output mode (CRA bit 6): an
+    SDR byte starts at the first underflow after the write (u1; ``delay`` adds cycles of
+    unspecified pipeline before that underflow), CNT falls at u1 + 2kP with bit 7-k on SP
+    and rises P later; the 8th rise sets ICR bit 3 and starts a byte written meanwhile.
+    Input mode: edge() shifts SP in on each rising CNT and fills SDR after eight. The
+    other registers only hold what is written.
+    """
+
+    FIELDS = ("cra", "latch", "t0", "c0", "mask", "flags", "ticr", "sdr", "sr", "bits")
+    FIELDS += ("u1", "out", "pend", "sp", "rise", "delay")
+
+    def __init__(self):
+        self.delay = 0
+        self.reset()
+
+    def reset(self):
+        """RES: timers stopped at $FFFF, serial input, no flags."""
+        self.cra = self.mask = self.flags = self.ticr = self.t0 = self.rise = 0
+        self.sdr = self.sr = self.bits = self.out = 0
+        self.latch = self.c0 = 0xFFFF
+        self.u1 = self.pend = -1
+        self.sp = 1
+        self.regs = bytearray(16)
+
+    def next_uf(self, c):
+        """First timer A underflow after cycle c (timer running)."""
+        first, p = self.t0 + self.c0 + 1, self.latch + 1
+        return first if c < first else first + ((c - first) // p + 1) * p
+
+    def counter(self, c):
+        """Timer A count at cycle c."""
+        first = self.t0 + self.c0 + 1
+        if not self.cra & CRA_START:
+            return self.c0
+        if c < first:
+            return self.c0 - (c - self.t0)
+        return self.latch - (c - first) % (self.latch + 1)
+
+    def advance(self, c):
+        """(u1, out, pend, sp, rise, bytes done) once the shifter has run to cycle c."""
+        u1, out, pend, sp, rise, done = (
+            self.u1,
+            self.out,
+            self.pend,
+            self.sp,
+            self.rise,
+            0,
+        )
+        p = self.latch + 1
+        while 0 <= u1 <= c - 15 * p:
+            rise, sp, done = u1 + 15 * p, out & 1, done + 1
+            u1, out, pend = (u1 + 16 * p, pend, -1) if pend >= 0 else (-1, out, -1)
+        return u1, out, pend, sp, rise, done
+
+    def settle(self, c):
+        """Run the shifter and timer flags up to cycle c."""
+        self.u1, self.out, self.pend, self.sp, self.rise, done = self.advance(c)
+        if done:
+            self.flags |= ICR_SP
+        if self.cra & CRA_START and self.next_uf(self.ticr) <= c:
+            self.flags |= ICR_TA
+        self.ticr = c
+
+    def levels(self, c):
+        """(CNT, SP) output levels at cycle c."""
+        u1, out, _, sp, _, _ = self.advance(c)
+        if u1 < 0 or c < u1:
+            return 1, sp
+        k = (c - u1) // (self.latch + 1)
+        return k & 1, out >> 7 - (k >> 1) & 1
+
+    def lines(self, c, fsdir):
+        """IEC lines driven at cycle c: output mode with the bus drivers out."""
+        if not (fsdir and self.cra & CRA_SPOUT):
+            return 0
+        cnt, sp = self.levels(c)
+        return (0 if cnt else IEC_SRQ) | (0 if sp else IEC_DATA)
+
+    def edge(self, sp):
+        """A rising CNT in input mode, SP at sp."""
+        if self.cra & CRA_SPOUT:
+            return
+        self.sr, self.bits = (self.sr << 1 | sp) & 0xFF, self.bits + 1
+        if self.bits == 8:
+            self.bits, self.sdr = 0, self.sr
+            self.flags |= ICR_SP
+
+    def read(self, reg, c):
+        """Register read at cycle c."""
+        if reg in (4, 5):
+            return self.counter(c) >> 8 * (reg - 4) & 0xFF
+        if reg in (12, 13):
+            self.settle(c)
+            if reg == 12:
+                return self.sdr
+            v = self.flags | (ICR_IR if self.flags & self.mask else 0)
+            self.flags = 0
+            return v
+        return self.cra if reg == 14 else self.regs[reg]
+
+    def write(self, reg, value, c):
+        """Register write at cycle c."""
+        if reg == 4:
+            self.latch = self.latch & 0xFF00 | value
+        elif reg == 5:
+            self.latch = self.latch & 0xFF | value << 8
+            if not self.cra & CRA_START:
+                self.t0, self.c0 = c, self.latch
+        elif reg == 12:
+            self.settle(c)
+            self.sdr = value
+            if self.cra & CRA_SPOUT:
+                self.load(value, c)
+        elif reg == 13:
+            m = value & 0x7F
+            self.mask = self.mask | m if value & 0x80 else self.mask & ~m
+        elif reg == 14:
+            self.control(value, c)
+        else:
+            self.regs[reg] = value
+
+    def load(self, value, c):
+        """An SDR byte for the output shifter."""
+        if self.u1 > c:
+            self.out = value
+        elif self.u1 >= 0 or not self.cra & CRA_START:
+            self.pend = value
+        else:
+            self.u1, self.out = self.next_uf(c + self.delay), value
+
+    def control(self, value, c):
+        """CRA write: start/stop, force load, serial direction."""
+        self.settle(c)
+        count = self.latch if value & CRA_LOAD else self.counter(c)
+        if value & CRA_LOAD or (value ^ self.cra) & CRA_START or not value & CRA_START:
+            self.t0, self.c0 = c, count
+        if (value ^ self.cra) & CRA_SPOUT or not value & CRA_START:
+            self.u1 = self.pend = -1
+        self.cra = value & ~CRA_LOAD
+        if self.cra & CRA_SPOUT and self.u1 < 0 <= self.pend:
+            self.u1, self.out = self.next_uf(c + self.delay), self.pend
+            self.pend = -1
+
+
 class Drive1541:  # pylint: disable=too-many-instance-attributes
     """A drive CPU with its model's memory map, VIA1 and optional expansion RAM."""
 
     MODEL = "1541"
     EXPANSION = ((0x8000, 0xA000),)
+    TIMED = False
 
     def __init__(self, device=8, expansion=None, bus=None, resets_to_boot=1, seed=0):
         self.bus = bus or Bus()
@@ -206,11 +358,12 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         )
         self.store = bytearray(size)
         self.store[rom_at:] = np.random.default_rng(seed).bytes(size - rom_at)
-        self.pb_out = 0
         self.via1 = Via(self)
+        self.cia = Cia() if self.MODEL == "1571" else None
+        self.cycles = 0
+        self.pb_out = 0
         self.mpu = MPU(memory=_Memory(self))
         self.halted = True
-        self.cycles = 0
         self.resets_to_boot, self._pending = resets_to_boot, 0
         self.mech = None
         self.fast = os.environ.get("NYBULAH_SIM") != "py65"
@@ -227,6 +380,8 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
             return self.store[self._phys[addr]]
         if k == VIA1:
             return self.via1.read(self._phys[addr] & 0xF)
+        if k == CIA:
+            return self.cia.read(self._phys[addr], self.cycles + IO_ACCESS_CYCLE)
         if k in (VIA2, FDC) and self.mech is not None and self._phys[addr] < 16:
             return self.mech.read(k == FDC, self._phys[addr], self.cycles)
         return addr >> 8 if k == OPEN else 0
@@ -238,6 +393,10 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
             self.store[self._phys[addr]] = value & 0xFF
         elif k == VIA1 and self._phys[addr] < 16:
             self.via1.write(self._phys[addr], value & 0xFF)
+        elif k == CIA:
+            self.cia.write(
+                self._phys[addr], value & 0xFF, self.cycles + IO_ACCESS_CYCLE
+            )
         elif k == VIA2 and self.mech is not None and self._phys[addr] < 16:
             self.mech.write(False, self._phys[addr], value & 0xFF, self.cycles)
         elif k == FDC and self.mech is not None and self._phys[addr] == 0:
@@ -245,14 +404,21 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         elif k not in (ROM, OPEN):
             raise SimIOWrite(f"write ${value & 0xFF:02x} to I/O ${addr:04x}")
 
-    def drive_lines(self):
-        """IEC lines this drive is asserting."""
+    def via_lines(self):
+        """IEC lines VIA1 port B asserts (with ATN auto-acknowledge)."""
         lines = 0
         atn = bool(self.bus.host_lines & IEC_ATN)
         if self.pb_out & PB_DATA_OUT or atn != bool(self.pb_out & PB_ATNA):
             lines |= IEC_DATA
         if self.pb_out & PB_CLK_OUT:
             lines |= IEC_CLOCK
+        return lines
+
+    def drive_lines(self):
+        """IEC lines this drive is asserting."""
+        lines = self.via_lines()
+        if self.cia is not None:
+            lines |= self.cia.lines(self.cycles, self.via1.regs[1] & PA_FSDIR)
         return lines
 
     def port_b(self):
@@ -289,6 +455,8 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         """RESET pulse; DOS answers after resets_to_boot pulses once code has run."""
         self.halted, self.pb_out = True, 0
         self.via1.reset()
+        if self.cia is not None:
+            self.cia.reset()
         self._pending = max(self._pending - 1, 0)
 
     def step(self):

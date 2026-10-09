@@ -5,9 +5,10 @@ import pathlib
 import re
 import struct
 import time
+import warnings
 from importlib import resources
 
-from .fastx import XBLink, XLink
+from .fastx import SrqLink, XBLink, XLink
 from .link import (
     BASE,
     CLOCK_HZ,
@@ -34,6 +35,7 @@ __all__ = [
     "drivecode",
     "protocols",
     "recover",
+    "resolve",
     "supported",
 ]
 
@@ -120,7 +122,7 @@ def recover(cbm, dev, resets=2, timeout=3.0, poll=0.1):
     raise DriveUnresponsive(f"device {dev} silent after {resets} resets: {status!r}")
 
 
-LINKS = {"s1": S1Link, "s2": S2Link, "s3": XLink}
+LINKS = {"s1": S1Link, "s2": S2Link, "s3": XLink, "s4": SrqLink}
 
 
 def link_class(cbm, protocol):
@@ -130,6 +132,14 @@ def link_class(cbm, protocol):
         if probe("xb") if probe else hasattr(cbm, "xb_read"):
             return XBLink
     return LINKS[protocol]
+
+
+def resolve(cbm, protocol):
+    """protocol, or s3 when s4 is asked of an adapter without it (pre-v11 firmware)."""
+    if protocol == "s4" and not supported(cbm, "s4") and supported(cbm, "s3"):
+        warnings.warn("adapter lacks SRQ fast serial (firmware v11); using s3")
+        return "s3"
+    return protocol
 
 
 class Monitor:
@@ -153,6 +163,7 @@ class Monitor:
         idle_s=0.9 * WATCHDOG_IDLE_S,
         clock=time.monotonic,
     ):
+        protocol = resolve(cbm, protocol)
         if not supported(cbm, protocol):
             raise ValueError(f"protocol must be one of {protocols()}")
         self.cbm, self.dev, self.protocol = cbm, dev, protocol
@@ -220,7 +231,7 @@ class Monitor:
         self._last = self.clock()
 
     def set_fast(self, fast):
-        """Run a 1571 at 2 MHz (True) or 1 MHz; only the s3 link supports it."""
+        """Run a 1571 at 2 MHz (True) or 1 MHz; only the s3 and s4 links support it."""
         if not hasattr(self.link, "set_fast"):
             raise ValueError(f"{self.protocol} cannot change the drive clock")
         self.link.set_fast(fast)

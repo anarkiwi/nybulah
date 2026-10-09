@@ -50,7 +50,7 @@ def add_arguments(ap):
     ap.add_argument("--size", type=int, default=0x2000)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--protocol", choices=protocols(), default="s1")
-    ap.add_argument("--fast", action="store_true", help="1571 at 2 MHz (s3 only)")
+    ap.add_argument("--fast", action="store_true", help="1571 at 2 MHz (s3, s4)")
 
 
 def execute(args, cbm):

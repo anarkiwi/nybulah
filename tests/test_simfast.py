@@ -2,18 +2,20 @@
 
 import numpy as np
 import pytest
+from py65.assembler import Assembler
 from py65.devices.mpu6502 import MPU
 
-from nybulah import simfast
+from nybulah import simcia, simfast
 from nybulah.monitor import Monitor
+from nybulah.opencbm import IEC_DATA, IEC_SRQ
 from nybulah.nibbler import Nibbler
 from nybulah.sim import Drive1541, Drive1571, SimIOWrite, SimTimeout
 from nybulah.simhost import SimCBM
 from nybulah.simdisk import Media, disk_drive
 
-HIGH = (0x00, 0x01, 0x03, 0x07, 0x18, 0x1C, 0x20, 0x60, 0x80, 0xC0, 0xFF)
+HIGH = (0x00, 0x01, 0x03, 0x07, 0x18, 0x1C, 0x20, 0x40, 0x60, 0x80, 0xC0, 0xFF)
 LOW = (0x00, 0x01, 0x04, 0x05, 0x08, 0x09, 0x0C, 0x0D, 0x0F, 0x10, 0xFE, 0xFF)
-LINKS = {"drive", "media", "bus", "mpu", "via1", "mech", "memory", "corrupt"}
+LINKS = {"drive", "media", "bus", "mpu", "via1", "cia", "mech", "memory", "corrupt"}
 SKIP = LINKS | {"fast", "tracks", "_cells", "excycles", "addcycles"}
 
 
@@ -33,6 +35,7 @@ def state(drive):
     """Everything py65, Via, Mechanism and Media hold for a drive."""
     out = [snapshot(drive), snapshot(drive.mpu), snapshot(drive.via1)]
     out.append(drive.bus.host_lines)
+    out.append(None if drive.cia is None else snapshot(drive.cia))
     if drive.mech is not None:
         out += [snapshot(drive.mech), snapshot(drive.mech.media)]
         out.append({k: v.tobytes() for k, v in drive.mech.media.tracks.items()})
@@ -104,9 +107,22 @@ def opcode_trials(make, trials, seed):
                 )
                 if d.mech is not None:
                     d.mech.pb, d.mech.pcr = pb, int(regs[0]) | 0x0C
+                if d.cia is not None:
+                    randomize_cia(d, via, pb, regs)
             step_both(ref, fast)
             assert registers(ref) == registers(fast), hex(op)
     assert not differences(ref, fast)
+
+
+def randomize_cia(d, via, pb, regs):
+    """CIA timer/shifter state and the bus driver bit from a trial's random values."""
+    c, cia = d.cycles, d.cia
+    cia.latch, cia.cra = int(via[0]) & 7, pb & 0x49
+    cia.t0, cia.c0 = c - int(via[1]) % 9, int(via[2]) % 5
+    cia.u1 = c + int(regs[1]) % 40 - 20 if pb & 0x80 else -1
+    cia.out, cia.pend = int(regs[2]), int(regs[3]) if pb & 0x20 else -1
+    cia.ticr, cia.flags, cia.mask = c - 3, pb & 0x09, pb & 0x08
+    d.via1.regs[1] = pb & 0x02
 
 
 def lockstep(ref, fast, instructions):
@@ -299,11 +315,100 @@ def test_decoded_tables_follow_py65():
 
 def test_interpreted_kernels_match_compiled(g64, monkeypatch):
     """The kernels as plain Python agree with py65 too (and are measured by coverage)."""
-    for name, obj in vars(simfast).items():
-        if hasattr(obj, "py_func"):
-            monkeypatch.setattr(simfast, name, obj.py_func)
+    for module in (simfast, simcia):
+        for name, obj in vars(module).items():
+            if hasattr(obj, "py_func"):
+                monkeypatch.setattr(module, name, obj.py_func)
     opcode_trials(mechanism_drive("1571"), 2, 4)
     twin, nib = twin_rig(g64, "1571", 200)
     nib.write_track(4, bytes(range(256)) * 4, start="index")
     test_bus_transfers_match_py65("s2")
+    test_cia_shift_out_matches_py65(1)
     assert twin.ref.mech.log == twin.fast.mech.log
+
+
+def assemble(org, *lines):
+    """py65-assembled code at org; "lbl:" lines define labels for later branches."""
+    asm, out, labels = Assembler(MPU()), bytearray(), {}
+    for line in lines:
+        if line.endswith(":"):
+            labels[line[:-1]] = org + len(out)
+            continue
+        for name, at in labels.items():
+            line = line.replace(name, f"${at:04x}")
+        out += bytes(asm.assemble(line, org + len(out)))
+    return bytes(out)
+
+
+SETUP = ("lda #$01", "sta $4004", "lda #$00", "sta $4005")
+SHIFT_OUT = assemble(
+    0x400,
+    *SETUP,
+    "lda #$41",
+    "sta $400e",
+    "lda #$02",
+    "sta $180f",
+    "ldx #$00",
+    "next:",
+    "stx $400c",
+    "lda #$08",
+    "wait:",
+    "bit $400d",
+    "beq wait",
+    "lda $1800",
+    "inx",
+    "bne next",
+    "rts",
+)
+SHIFT_IN = assemble(
+    0x400,
+    *SETUP,
+    "lda #$01",
+    "sta $400e",
+    "ldy #$00",
+    "next:",
+    "lda #$08",
+    "wait:",
+    "bit $400d",
+    "beq wait",
+    "lda $400c",
+    "sta $0500,y",
+    "iny",
+    "cpy #$20",
+    "bne next",
+    "rts",
+)
+
+
+@pytest.mark.parametrize("delay", [0, 2])
+def test_cia_shift_out_matches_py65(delay):
+    ref, fast = pair(Drive1571)
+    for d in (ref, fast):
+        d.cia.delay = delay
+        d.load(0x400, SHIFT_OUT)
+        d.call(0x400)
+    lines = set()
+    while not ref.halted:
+        step_both(ref, fast)
+        assert registers(ref) == registers(fast)
+        lines.add(ref.drive_lines())
+        fast_lines = simfast.drive_lines(simfast.pack(fast, -1, False)[0])
+        assert fast_lines == ref.drive_lines()
+    assert lines >= {0, IEC_SRQ, IEC_DATA, IEC_SRQ | IEC_DATA}
+    assert fast.halted and not differences(ref, fast)
+
+
+def test_cia_shift_in_matches_py65():
+    ref, fast = pair(Drive1571)
+    for d in (ref, fast):
+        d.load(0x400, SHIFT_IN)
+        d.call(0x400)
+    for n, bit in enumerate(np.random.default_rng(3).integers(0, 2, 4096)):
+        if ref.halted:
+            break
+        step_both(ref, fast)
+        if n % 2:
+            for d in (ref, fast):
+                d.cia.edge(int(bit))
+    assert ref.dump(0x500, 32) == fast.dump(0x500, 32) != bytes(32)
+    assert fast.halted and not differences(ref, fast)

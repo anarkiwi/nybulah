@@ -4,8 +4,8 @@ simulated IEC bus, xum1541 transfers) and SimMonitor (drive calls without a bus)
 
 import numpy as np
 
-from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
-from .sim import Bus, Drive1541, HostGone, SimTimeout
+from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
+from .sim import PA_FSDIR, Bus, Drive1541, HostGone, SimTimeout
 from .simfast import NEVER, eligible, run_drive, run_transfer
 
 IDENTITY = {
@@ -168,9 +168,15 @@ class SimCBM:
         self.bus.host_lines |= lines
 
     def iec_release(self, lines):
-        """Release host lines."""
+        """Release host lines; a released SRQ clocks DATA into listening CIAs."""
         self._edge()
+        rising = self.bus.lines() & IEC_SRQ & lines
         self.bus.host_lines &= ~lines
+        if rising and not self.bus.lines() & IEC_SRQ:
+            sp = 0 if self.bus.lines() & IEC_DATA else 1
+            for d in self.drives.values():
+                if d.cia is not None and not (d.TIMED or d.via1.regs[1] & PA_FSDIR):
+                    d.cia.edge(sp)
 
     def iec_wait(self, line, state):
         """Run the drive until line is asserted (state=1) or released (state=0)."""

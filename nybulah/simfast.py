@@ -1,8 +1,8 @@
-"""Compiled drive simulator: py65's 6502 with the drive's memory map, VIA1 and disk.
+"""Compiled drive simulator: py65's 6502 with the drive's memory map, VIA1, CIA, disk.
 
-``run_drive`` executes whole instructions as Drive1541.step, Via and simdisk.Mechanism
-would; an instruction needing Python (unimplemented opcode, raising access, unfetched
-track, corrupt hook) runs through py65, and a mechanism update it owes runs after it.
+``run_drive`` executes whole instructions as Drive1541.step, Via, Cia (simcia) and
+simdisk.Mechanism would; an instruction needing Python (unimplemented opcode, raising
+access, unfetched track, corrupt hook) runs through py65, then any mechanism update owed.
 """
 
 # pylint: disable=too-many-return-statements,too-many-branches
@@ -14,17 +14,19 @@ import operator
 import weakref
 
 import numpy as np
-from numba import njit
 from py65.devices.mpu6502 import MPU
 
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA
 from .sim import ACR_T1_FREERUN, FDC, IO_ACCESS_CYCLE, IRQ_T1, IRQ_T2, OPEN, RAM
+from .sim import CIA, PA_FSDIR, RETURN_TRAP, ROM, VIA1, VIA2, Bus, SimTimeout
 from .sim import PB_ATN_IN, PB_ATNA, PB_CLK_IN, PB_CLK_OUT, PB_DATA_IN, PB_DATA_OUT
-from .sim import RETURN_TRAP, ROM, VIA1, VIA2, Bus, Drive1541, Drive1571, SimTimeout
+from .sim import Drive1541, Drive1571
 from .simdisk import CA1_FLAG, CELL_EPS, CPU_HZ, HT_MAX, HT_STOP, HT_TRACK1
 from .simdisk import INDEX_FRACTION, PB_INPUTS, PB_MOTOR, PB_PHASE, PB_SYNC, PB_WE
 from .simdisk import PCR_MODE, PCR_SOE, PCR_WRITE, PHASE_OFFSET, SYNC_ONES, V_FLAG
 from .simdisk import WANDER_NEWTON, WD_INDEX, Mechanism, Media, disk_drive
+from .simcia import CCRA, END, cia_lines, cia_read, cia_write, kernel
+from .simcia import pack_cia, unpack_cia
 
 A, X, Y, SP, P, PC, CYC, PCYC, HALT, STEPS = range(10)
 ACR, IER, LATCH, T1START, T1ACK, T2LATCH, T2START, T2ACK = range(10, 18)
@@ -34,7 +36,7 @@ ONES, COUNT, SHREG, PENDING, CA1, WRITTEN, ARMED, OVER, UNDER = range(34, 43)
 WD, WPROT, LOGGING, NEV, HT, BUMPS, KSIDE, KHT, CSIDE, CHT = range(43, 53)
 FRESH, CORRUPT, DEFER, RESAMPLE = range(53, 57)
 VREGS, MREGS, HOSTL = 57, 73, 89
-STATE = 90
+STATE = END
 DUE, SYNC_START, RPM, AMP, PERIOD = range(5)
 
 MPU_FIELDS = {A: "a", X: "x", Y: "y", SP: "sp", P: "p", PC: "pc"}
@@ -47,6 +49,7 @@ MECH_FIELDS |= {MLATCH: "latch", N: "_n", ONES: "_ones", COUNT: "_count"}
 MECH_FIELDS |= {SHREG: "_shreg", PENDING: "_pending", CA1: "_ca1", WRITTEN: "_written"}
 MECH_FIELDS |= {ARMED: "_armed", OVER: "overruns", UNDER: "underruns"}
 MECH_FIELDS |= {HT: "halftrack", BUMPS: "bumps", WPROT: "write_protect"}
+assert HOSTL < CCRA
 
 OK, HALTED, LIMIT, PYTHON, FULL, DEFERRED, MOVED = range(7)
 PROTO, PLEN, HOP, HBYTE, HC, HB, HWAIT, BUDGET = range(8)
@@ -128,8 +131,6 @@ def host_programs():
 
 
 HOST_PROGRAMS, HOST_LENGTHS = host_programs()
-# Kernels allocate nothing: without NRT their array arguments are not refcounted.
-kernel = njit(cache=True, _nrt=False)
 
 
 @kernel
@@ -279,7 +280,7 @@ def drive_lines(s):
     lines = IEC_CLOCK if pb & PB_CLK_OUT else 0
     if pb & PB_DATA_OUT or (s[HOSTL] & IEC_ATN != 0) != (pb & PB_ATNA != 0):
         lines |= IEC_DATA
-    return lines
+    return lines | cia_lines(s, s[CYC], s[VREGS + 1] & PA_FSDIR)
 
 
 @kernel
@@ -437,6 +438,8 @@ def writable(s, amap, addr):
     k, phys = amap[addr] & 7, amap[addr] >> KIND_BITS
     if k == VIA1:
         return phys < 16
+    if k == CIA:
+        return True
     if s[MECH] and k in (VIA2, FDC) and phys < (16 if k == VIA2 else 1):
         return can_update(s)
     return k in (RAM, ROM, OPEN)
@@ -450,6 +453,8 @@ def rd(s, f, amap, store, cells, ev, addr):
         return np.int64(store[phys])
     if k == VIA1:
         return via_read(s, phys & 0xF)
+    if k == CIA:
+        return cia_read(s, phys, s[CYC] + IO_ACCESS_CYCLE)
     if k in (VIA2, FDC) and s[MECH] and phys < 16:
         return mech_read(s, f, cells, ev, k == FDC, phys)
     return np.int64(addr >> 8 if k == OPEN else 0)
@@ -463,6 +468,8 @@ def wr(s, f, amap, store, cells, ev, addr, value):
         store[phys] = value
     elif k == VIA1:
         via_write(s, phys, value)
+    elif k == CIA:
+        cia_write(s, phys, value, s[CYC] + IO_ACCESS_CYCLE)
     elif k in (VIA2, FDC):
         mech_write(s, f, cells, ev, k == FDC, phys, value)
 
@@ -890,6 +897,7 @@ def pack(drive, steps, lines):
         -1,
     )
     s[VREGS : VREGS + 16] = memoryview(drive.via1.regs)
+    pack_cia(drive.cia, s)
     cells = np.zeros(1, np.uint8) if drive.mech is None else pack_mech(drive.mech, s, f)
     return (s, f, *memory(drive), cells, ev)
 
@@ -900,6 +908,7 @@ def unpack(drive, s, f, cells, ev):
     for (idx, _, names), obj in ((MPU_GROUP, drive.mpu), (VIA_GROUP, drive.via1)):
         vars(obj).update(zip(names, s[idx].tolist()))
     drive.via1.regs[:] = s[VREGS : VREGS + 16].astype(np.uint8).tobytes()
+    unpack_cia(drive.cia, s)
     drive.cycles, drive.pb_out = int(s[CYC]), int(s[PBOUT])
     if s[HOSTL] != drive.bus.host_lines:
         drive.bus.host_lines = int(s[HOSTL])

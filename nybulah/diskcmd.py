@@ -5,7 +5,7 @@ import pathlib
 
 from . import disk
 from .formats import read_d64, read_d71, write_d64, write_d71
-from .monitor import Monitor, protocols, supported
+from .monitor import Monitor, protocols, resolve, supported
 from .nibbler import Nibbler, TrackError
 from .ramprobe import identify_model
 
@@ -30,7 +30,7 @@ def _session(args, cbm):
     kind = args.image.suffix.lower()
     if kind not in FORMATS:
         raise ValueError(f"{args.image}: expected .d64 or .d71")
-    if not supported(cbm, args.transport):
+    if not supported(cbm, resolve(cbm, args.transport)):
         raise ValueError(f"transport {args.transport} is not available here")
     model = identify_model(cbm, args.dev)
     if kind == ".d71" and model != "1571":
