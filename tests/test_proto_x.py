@@ -300,3 +300,12 @@ def test_clock_switch_is_s3_only():
     mon = Monitor(cbm, 9, "s1")
     with pytest.raises(ValueError, match="cannot change the drive clock"):
         mon.set_fast(True)
+
+
+def test_bench_counts_checksum_retries():
+    from nybulah import bench
+
+    cbm = simx.make("1541", 1.0, rise=1.0, dev=9)
+    cbm.faults = {40: (0, IEC_DATA)}
+    out = bench.run(cbm, 9, 0x8000, 64, 1, "s3")
+    assert out["errors"] == 0 and out["rejects"] >= 1

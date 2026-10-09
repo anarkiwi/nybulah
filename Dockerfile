@@ -6,7 +6,7 @@
 ARG OPENCBM_SOURCE=git
 ARG OPENCBM_IMAGE=anarkiwi/opencbm:latest
 ARG OPENCBM_REPO=https://github.com/anarkiwi/OpenCBM
-ARG OPENCBM_REF=1617823447e3b4d663cb058dd74b0aa17d579703
+ARG OPENCBM_REF=07a95bdfd677533d44e8078715ca2dcecd13c7ef
 
 FROM ubuntu:26.04 AS drivecode
 RUN apt-get update && apt-get install -y --no-install-recommends cc65 make \

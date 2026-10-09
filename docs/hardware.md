@@ -35,10 +35,9 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybula
 ## S3 (X protocol), both drives powered
 
 S3 needs xum1541 firmware v9 or later and the plugin this image builds by
-default (`OPENCBM_SOURCE=git`). With firmware v10 and a v10 plugin it uses
-burst X ([protocol.md](protocol.md)); build the image from a local OpenCBM
-tree (branch `xum1541-xfast`) until `OPENCBM_REF` points at it, since a v9
-plugin refuses v10 firmware:
+default (`OPENCBM_SOURCE=git`, OpenCBM branch `xum1541-xfast`). With firmware
+v10 it uses burst X ([protocol.md](protocol.md)); with v9 it falls back to
+per-byte X. A local OpenCBM tree can be used instead:
 
 ```sh
 docker build --build-arg OPENCBM_SOURCE=local --build-context opencbm=../OpenCBM --target runtime -t nybulah .
@@ -68,29 +67,29 @@ its other subcommands (`nybulah <command> --help`), e.g.
 
 ## Flashing the ZoomFloppy firmware
 
-The firmware hex is built from the same OpenCBM commit the image uses (for
-v10, the `xum1541-xfast` branch and `xum1541-ZOOMFLOPPY-v10.hex`):
+The firmware hex is built from the same OpenCBM commit the image uses:
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
-git checkout 1617823447e3b4d663cb058dd74b0aa17d579703
+git checkout 07a95bdfd677533d44e8078715ca2dcecd13c7ef
 docker build -f Dockerfile.nybulah --target firmware-hex -o fw .
-docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v09.hex
+docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v10.hex
 ```
 
-`info` must print `model 2 version 9`. Then, with the ZoomFloppy plugged in
+`info` must print `model 2 version 10` (it exits with status 1 regardless). Then, with the ZoomFloppy plugged in
 (drives may stay connected), flash it; the adapter re-enumerates as a DFU
 bootloader during the update, so the container gets the whole USB tree:
 
 ```sh
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v "$PWD/fw:/fw" \
-  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v09.hex
+  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v10.hex
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb --entrypoint xum1541cfg nybulah devinfo
 ```
 
-`devinfo` should report firmware version 9. If `update` reports no devices
+`devinfo` should report firmware version 10. If `update` reports no devices
 found, the adapter may already have re-enumerated as its DFU bootloader before
-the tool looked for it; run `update` again. Flashing the stock
+the tool looked for it; run `update` again. `update` refuses a hex with the
+version already installed unless given `-f` (`xum1541cfg -f update ...`). Flashing the stock
 `xum1541/xum1541-ZOOMFLOPPY-v08.hex` from the same tree the same way reverts it.
 
 ## Expected results
@@ -100,18 +99,20 @@ the tool looked for it; run `update` again. Flashing the stock
 | 8      | 1571    | `$6000-$7FFF`  |
 | 10     | 1541-II | `$8000-$9FFF`  |
 
-Transfer rates measured on a ZoomFloppy with firmware v9, both drives powered,
-8 KB blocks (bytes/s):
+Transfer rates measured on a ZoomFloppy, both drives powered, 8 KB blocks
+(bytes/s). Burst X: 100 blocks each way per column, no data errors and no
+checksum retries:
 
-| path | 1541-II | 1571 1 MHz | 1571 2 MHz |
-|------|---------|------------|------------|
-| M-R | 463 | 461 | |
-| S1 read / write | 1634 / 1493 | 1669 / 1498 | |
-| X read / write | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
+| path | firmware | 1541-II | 1571 1 MHz | 1571 2 MHz |
+|------|----------|---------|------------|------------|
+| M-R | any | 463 | 461 | |
+| S1 read / write | any | 1634 / 1493 | 1669 / 1498 | |
+| X read / write | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
+| burst X read / write | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
 
 `nybulah bench --protocol s3 --fast` runs a 1571 at 2 MHz for the transfer
 (VIA1 PA5) and returns it to 1 MHz before handing back to DOS. Burst X
-(firmware v10) predictions are in [protocol-review.md](protocol-review.md).
+predictions and margins are in [protocol-review.md](protocol-review.md).
 
 ## Probe safety
 
