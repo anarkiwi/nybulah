@@ -335,7 +335,7 @@ class SimX(SimCBM):
         """Drive -> host transfer of size bytes."""
         tm = timing or self.timing
         out = bytearray()
-        for i in range(size):
+        for _ in range(size):
             try:
                 t = self._sync()
             except (XTimeout, HostGone) as e:
