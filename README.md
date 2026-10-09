@@ -21,7 +21,7 @@ them back.
   stock S1/S2 protocols. With the modified xum1541 firmware it uses the X
   protocol: CLK/DATA only, two bits per edge, one handshake per 64-byte burst
   (firmware v10), and a 16-bit block check with retry. A 1571 can use its
-  CIA shift register on SRQ instead (s4, firmware v11). Watchdogs on the drive, in the firmware and on the host return
+  CIA shift register on SRQ instead (s4, firmware v11), and with firmware v12 streams whole revolutions without expansion RAM. Watchdogs on the drive, in the firmware and on the host return
   everything to a usable state after a stall, with no power cycling.
 - **Analysis on the host:**
   - vectorised GCR codec;

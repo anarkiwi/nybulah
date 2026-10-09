@@ -1,11 +1,14 @@
 """Streaming capture: drive/stream.s on the timed 1571 with the firmware v12 adapter model."""
 
+import contextlib
+import functools
+import json
 import struct
 
 import numpy as np
 import pytest
 
-from nybulah import disk, simsrq
+from nybulah import cli, disk, simsrq, streamprobe
 from nybulah import stream as fmt
 from nybulah.analysis.cycle import find_cycle
 from nybulah.analysis.gcr import bits_per_revolution
@@ -115,7 +118,7 @@ def test_stress_syncs_at_the_fastest_zone(seed):
 def test_multi_revolution_merge(g64):
     """Index edges cut revolutions of one length; between them every sector reads
     once per revolution, and the image layer takes a revolution from them."""
-    cbm, mech, nib = rig(Media.from_g64(g64))
+    _, mech, nib = rig(Media.from_g64(g64))
     mech.log = []
     cap = nib.stream(36, revolutions=3)
     idx = cap.index_bits()
@@ -359,3 +362,44 @@ def test_start_lag_follows_latched_ones():
     late, prompt = fmt.start_lag([9, 0], cell)
     assert late == np.mean(fmt.NW_WRITE) + fmt.NW_SYNC - cell
     assert prompt == fmt.NW_POLL / 2
+
+
+def probe_rig(monkeypatch, g64, halftrack):
+    """streamprobe against the timed 1571; returns (cbm, mechanism)."""
+    cbm, mech, nib = rig(Media.from_g64(g64), halftrack=halftrack)
+    monkeypatch.setattr(streamprobe, "identify_model", lambda cbm, dev: "1571")
+    monkeypatch.setattr(
+        streamprobe, "Monitor", lambda cbm, dev, proto: contextlib.nullcontext(nib.mon)
+    )
+    monkeypatch.setattr(
+        streamprobe,
+        "Nibbler",
+        functools.partial(
+            Nibbler, stepms=1, settle_ms=1, spinup_s=0, sleep=lambda s: None
+        ),
+    )
+    return cbm, mech
+
+
+def test_streamprobe_homes_then_streams(monkeypatch, capsys, g64, tmp_path):
+    cbm, mech = probe_rig(monkeypatch, g64, 9)
+    path = tmp_path / "p.npz"
+    out = cli.main(
+        ["streamprobe", "--dev", "9", "--halftrack", "4", "--save", str(path)], cbm
+    )
+    assert json.loads(capsys.readouterr().out) == out
+    assert out["adapter"] == out["drive"] == "done" and out["halftrack"] == 4
+    assert out["home"]["estimate"] == 9 and len(out["index"]) == 2
+    assert out["syncs"] > 0 and out["sync_cycles_median"] > 0
+    assert len(Capture.load(path).data) == out["bytes"] and out["saved"] == str(path)
+    assert mech.halftrack == 4 and mech.bumps == mech.inner_stops == 0
+
+
+def test_streamprobe_refusals(monkeypatch, g64):
+    cbm, mech = probe_rig(monkeypatch, g64, 36)
+    with pytest.raises(ValueError, match="34 outward steps"):
+        cli.main(["streamprobe", "--dev", "9", "--max-steps", "33"], cbm)
+    assert mech.halftrack == 36 and mech.bumps == 0
+    monkeypatch.setattr(streamprobe, "identify_model", lambda cbm, dev: "1541")
+    with pytest.raises(ValueError, match="needs a 1571"):
+        cli.main(["streamprobe", "--dev", "9"], cbm)

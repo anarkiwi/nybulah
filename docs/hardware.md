@@ -137,12 +137,57 @@ with drive 8 the 1571 and a formatted disk inserted:
    reading contradicted the position and the head stayed where it was read;
    every outward step started from halftrack 3 or more by the estimate.
 
+## 1571 streaming (firmware v12)
+
+Streaming needs firmware v12 and the plugin from the same tree (branch
+`xum1541-stream`). Build the image from the local checkout:
+
+```sh
+docker build --build-arg OPENCBM_SOURCE=local --build-context opencbm=../opencbm-srq --target runtime -t nybulah .
+```
+
+Flash `xum1541-ZOOMFLOPPY-v12.hex` as below (`info` must print
+`model 2 version 12`, `devinfo` firmware version 12). Then, in order, with
+drive 8 the 1571 and a formatted disk inserted:
+
+1. Memory only, no head movement: the s4 benches and timing probes above
+   (`bench --protocol s4 --addr 0x6000`, with and without `--fast`;
+   `xprobe.py --cia` and `--sweep`). v12 must give the same results as v11.
+2. Homing dry run (`homeprobe --dev 8 --transport s4 --headers`, no steps).
+3. One track, one revolution, homed through `Nibbler.home` within the dry
+   run's `outward_steps` (N); the probe refuses a larger plan and never
+   bumps:
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 8 --headers --max-steps N --halftrack 36 --save /data/artifacts/stream-36.npz
+   ```
+
+   Expect `adapter` and `drive` "done", 2 `index` positions about 7140
+   bytes apart (`revolution_bytes`, zone 2) and `syncs` near 38 (19 sectors).
+4. Zone 3 (the tightest byte period) and several revolutions:
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 8 --max-steps N --halftrack 2 --revolutions 3 --save /data/artifacts/stream-2.npz
+   ```
+
+   (N again from the plan; 34 with the head left on track 18). Expect about
+   7690 bytes per revolution and 4 `index` positions.
+   `adapter` "overrun" means the host did not drain the stream in time;
+   "framing" or "timeout" a drive or line fault (the drive stops on ATN).
+5. A whole disk without expansion RAM; every track streams on a 1571 with
+   v12 (`.d71` reads both sides):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah read --dev 8 --transport s4 /data/artifacts/disk.d64
+   ```
+
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin: commit
 `07a95bdf` (branch `xum1541-xfast`) for v10, commit `89920a0d`
 (branch `xum1541-srq`) for v11
-(SRQ fast serial; also builds v10's protocols):
+(SRQ fast serial; also builds v10's protocols), branch `xum1541-stream` for
+v12 (streaming; also builds v11's):
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM

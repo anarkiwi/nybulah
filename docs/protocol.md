@@ -419,3 +419,115 @@ The same terms predict 46.2 KB/s at 2 MHz and 23.3 KB/s at 1 MHz for the
 fixed loop. `tools/xprobe.py --sweep` measures t and C on the host clock;
 `bench.sweep` fitted to the adapter's clock in co-simulation gives the
 drive-bound t (`test_sweep_fits_the_drive_bound_rate`).
+
+## 1571 streaming capture (firmware v12)
+
+A stream reads a track continuously for whole revolutions with no expansion
+RAM: every byte the drive latches goes out through the CIA shift register as
+it arrives and the adapter forwards it to USB with no handshake. Only a 1571
+at 2 MHz under s4 streams; `Nibbler(stream=None)` picks it when the adapter
+reports `XUM1541_CAP_STREAM`, and D64/D71 reads then use it. Firmware v9-v11
+commands are unchanged.
+
+Sources: drive `drive/stream.s` (`stream_1571.bin`, loaded at `$0300` over
+`seek_1571.bin`, the `SEEK` build of `track.s`, whose prep placed the head),
+host `Nibbler.stream`, decoding `nybulah/stream.py`, adapter model
+`SimSRQ.srq2_stream`; adapter `srq_stream_loop`/`srq_stream8` in
+`xum1541/x.c`, plugin `opencbm_plugin_srq2_stream` (asynchronous IN
+transfers, `lib/plugin/xum1541/stream.c`). The head moves only through
+`Nibbler.seek`, `locate` and `home`.
+
+### Bytes on the wire
+
+The adapter samples CLK at each byte's bit 7: released is a data byte,
+asserted a metadata byte. Metadata is never `$00`:
+
+| value | name | meaning |
+|---|---|---|
+| `%tttttt01` | SYNC_START | t = T2 bits 7-2 when SYNC was seen low |
+| `%tttttt10` | SYNC_CONT | inside a sync, timestamps under 256 cycles apart |
+| `%tttttt11` | SYNC_END | t when SYNC was seen high; ends the oldest open sync |
+| `$04` / `$08` | START / INDEX | stream start; rising index edge |
+| `$40` / `$44` / `$48` | END / END_NOINDEX / END_ATN | how the drive stopped |
+
+USB carries a data byte as itself, data `$00` as `ESC $00`, metadata m as
+`ESC m`, and ends with `ESC` and an adapter code: `$80` done (END seen), `$84`
+overrun (both IN banks full when a byte arrived), `$88` framing (a byte
+began before SRQ rose), `$8C` timeout (no SRQ fall within 20 ms), `$90`
+truncated (requested length reached); a short packet or ZLP ends the
+transfer, with no status block. The requested length counts 64-byte units.
+On any code but done the adapter holds ATN at least 8622 us (256 bytes at
+32 us, at 285 rpm: the drive's longest interval between ATN checks), then
+until SRQ has been quiet for 1 ms, at most 50 ms; the drive sends END_ATN,
+restores the CIA (CRA, timer A latch), PA1, PA5 and clears ICR, as on every
+exit. The drive refuses with `ST_SLOW` at 1 MHz and `ST_NOGO` when the host
+never asserts CLK; `Nibbler` refuses a 1541 or older firmware.
+
+### Drive rules
+
+t = 0 at an SDR write; the shifter needs 32 cycles per byte and the ICR flag
+shows within 39 (see s4 above), so:
+
+- a write follows the previous one by 40 or more cycles, or follows the ICR
+  flag;
+- a waiting byte is read at the first V sample after a write and held in X;
+  X and the VIA latch are the only buffers;
+- data goes first: metadata waits for an idle shifter and no waiting byte,
+  except SYNC_START and SYNC_CONT, which no byte can be waiting behind; a
+  metadata slot is given up when V appears by t = 22 (24 after a timed
+  write) and the byte goes out at 41 (45);
+- CLK changes 14 or more cycles after a write and 2 or more before the next:
+  the adapter samples it 4 to 14 cycles after a write;
+- inside a sync only SYNC_CONT is sent; metadata due then waits for the
+  bytes after the sync, so timestamps unwrap and SYNC_ENDs keep their order.
+
+### Drive schedule (cycles after the write)
+
+| path | entered | V samples | write of the next byte | otherwise |
+|---|---|---|---|---|
+| `nw` idle poll | 28+ | 0 and 6 of 15, SYNC at 5 | 12 after the `bvs` | ATN, T1 every 256 polls |
+| `pwo` after a write from `nw` | 0 | | (due metadata at 40) | `nw` at 29 |
+| `pwm` metadata slot | 12 | 12, 18, 22 | 41 / 45 (`pv`) | metadata at 40 |
+| `pwb` after a timed write | 1 | 1, 28 | 43 | `nw` at 33 |
+| `mpw` after metadata | 4 | 4, 28 | 46 / 43 | `nw` at 33 |
+| `ee` byte already waiting | 1-24 | | 42 after the read | |
+| sync loop `sp` | | SYNC every 11 | | ATN, T1, index, SYNC_CONT |
+| `se` sync end | 7-8 after the read | each poll until ICR | at the ICR flag | |
+
+### Margins
+
+The shortest byte period is zone 3 at 310 rpm, 52 x 300 / 310 = 50.3 cycles.
+
+| quantity | worst case | budget | margin |
+|---|---|---|---|
+| write spacing | 40 (`pwm`), 43 (`tv`) | ICR flag at 39 or less | 1 cycle |
+| byte ready to read | 21 (V at 23, read at `mpw` 4) | 50.3 | 29 cycles |
+| back-to-back writes | 43 | 50.3 | backlog drains 7.3 cycles per byte |
+| adapter frame | 264-296 clocks | SRQ_FRAME 256 | 8 clocks |
+| adapter next poll | 303 clocks | SRQ_WAIT 306 | 3 clocks |
+
+A metadata byte goes out only when nothing is waiting, so it delays at most
+the byte that lands during its 40-cycle slot (the slot is abandoned up to t =
+22), and that delay drains by the next metadata slot. INDEX lands within 4
+bytes of the edge. `misc/x_timing.py` steps the compiled `srq_stream8` (6-clock
+fall wait) against these bounds and `misc/srq_timing_test.c` checks them.
+
+### Host decoding
+
+`Stream.syncs(cell)` pairs SYNC_START/SYNC_END first in first out, adds
+SYNC_CONT spans and bounds each sync's low time: the SYNC read that saw the
+change takes 12 cycles to its T2 read at the start and 7-8 at the end, a
+SYNC read waits at most 125 cycles at the start (data paths) and 70 at the
+end (sync loop), timestamps lose 3 bits, and the start lag follows the
+latched trailing ones (`start_lag`). Multi-revolution captures carry their
+index positions, which `index_bits`, `passes.stream_syncs`, the cycle finder
+and the disk map use as for RAM captures.
+
+### Tests
+
+`tests/test_stream.py` streams every zone at 300 and 310 rpm on the timed
+1571 with the adapter model: every latched byte arrives in order, every sync
+lies inside its bounds, writes are 40 or more cycles apart, and no stream read
+hits either stop (`Mechanism.bumps`, `inner_stops`). A throttled host drain
+gives overrun, a silent drive a timeout with ATN, and multi-revolution streams
+merge on their index edges.
