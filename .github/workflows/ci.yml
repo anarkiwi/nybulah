@@ -19,6 +19,7 @@ jobs:
         with:
           path: ~/basecache
           key: ${{ steps.key.outputs.key }}
+          restore-keys: basecache-
       - if: steps.cache.outputs.cache-hit != 'true' && env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v4
         with:

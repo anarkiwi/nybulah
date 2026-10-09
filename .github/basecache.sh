@@ -2,7 +2,7 @@
 # Digest-pinned base images held in an OCI layout so builds never resolve them
 # against a registry.
 #   basecache.sh key            cache key over every pinned FROM
-#   basecache.sh fetch          copy the pinned images into the layout
+#   basecache.sh fetch          rebuild the layout, reusing images already in it
 #   basecache.sh up             start buildkitd from the layout, print build contexts
 set -euo pipefail
 dir=${BASECACHE:-$HOME/basecache}
@@ -13,9 +13,13 @@ src() { local n=${1%@*}; echo "docker://${n%:*}@${1#*@}"; }
 case $1 in
 key) echo "basecache-$(all | sha256sum | cut -c1-16)" ;;
 fetch)
+  rm -rf "$dir.old" && { [ ! -d "$dir" ] || mv "$dir" "$dir.old"; }
   for r in $(all); do
-    skopeo copy -q --retry-times 5 --multi-arch system "$(src "$r")" "oci:$dir:${r##*:}"
+    from=$(src "$r")
+    grep -qs "\"${r##*:}\"" "$dir.old/index.json" && from=oci:$dir.old:${r##*:}
+    skopeo copy -q --retry-times 8 --multi-arch system "$from" "oci:$dir:${r##*:}"
   done
+  rm -rf "$dir.old"
   ;;
 up)
   bk=$(pins "$root/.github/buildkit/Dockerfile")
