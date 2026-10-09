@@ -1,6 +1,14 @@
 """Transport-independent GCR analysis: codec, sectors and revolution detection."""
 
-from .cycle import Cycle, TrackKind, extract_revolution, find_cycle, index_align
+from .cycle import (
+    Cycle,
+    TrackKind,
+    extract_revolution,
+    find_cycle,
+    header_period,
+    index_align,
+)
+from .faults import FaultKind, capture_faults, gcr_faults
 from .gcr import (
     bit_rate,
     bits_per_revolution,
@@ -17,7 +25,14 @@ from .gcr import (
     to_bytes,
     track_capacity,
 )
-from .capture import capture_bits, trailing_ones
+from .capture import (
+    ByteCapture,
+    Segments,
+    capture_bits,
+    framed_capture,
+    segments,
+    trailing_ones,
+)
 from .sector import (
     SectorError,
     TrackDecode,
@@ -28,7 +43,15 @@ from .sector import (
 )
 
 __all__ = [
+    "ByteCapture",
     "Cycle",
+    "FaultKind",
+    "Segments",
+    "capture_faults",
+    "framed_capture",
+    "gcr_faults",
+    "header_period",
+    "segments",
     "SectorError",
     "TrackDecode",
     "TrackKind",

@@ -1,10 +1,11 @@
 """1541 sector header/data blocks, standard track formatting and track decoding."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import IntEnum
 
 import numpy as np
 
+from .capture import segments
 from .gcr import (
     decode_bits,
     encode,
@@ -149,14 +150,26 @@ class TrackDecode:
     """Sectors recovered from one track.
 
     ``data`` is ``(n, 256)``, ``errors`` holds D64 error-info bytes, ``ids``
-    the header disk ID per sector (BAM order) and ``offsets`` the bit position
-    of each sector's header (sync end), -1 when absent.
+    the header disk ID per sector (BAM order), ``offsets`` the bit position of
+    each sector's header (sync end) and ``copy`` which of its ``copies`` headers
+    in stream order was used, -1 when absent.
     """
 
     data: np.ndarray
     errors: np.ndarray
     ids: np.ndarray
     offsets: np.ndarray
+    copy: np.ndarray = None
+    copies: np.ndarray = None
+
+
+def valid_headers(hdr, valid):
+    """Rows of decoded blocks that are header blocks with legal GCR and a good checksum."""
+    return (
+        (hdr[:, 0] == HEADER_ID)
+        & valid[:, :6].all(axis=1)
+        & (np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0)
+    )
 
 
 def _windows(bits, starts, width):
@@ -196,20 +209,34 @@ def _read_blocks(bits, ends, track, sectors, disk_id):
     return hdr, blk[nxt], err
 
 
-def _best_per_sector(sector, err, n):
-    """Sectors with a header and, for each, the index of its best header."""
+def _best_per_sector(sector, err, n, out):
+    """Sectors with a header and the index of each one's best header.
+
+    Sets ``out.copy`` (the best header's rank among its sector's headers in
+    stream order) and ``out.copies``.
+    """
     cand = np.flatnonzero(err)
     key = np.full(n, _NONE, np.int64)
     np.minimum.at(key, sector[cand], _RANK[err[cand]] * len(err) + cand)
     found = np.flatnonzero(key != _NONE)
-    return found, key[found] % len(err)
+    sec = sector[cand].astype(np.int64)
+    order = np.lexsort((cand, sec))
+    copy = np.full(len(err), -1, np.int64)
+    copy[cand[order]] = np.arange(len(cand)) - np.searchsorted(sec[order], sec[order])
+    best = key[found] % len(err)
+    out.copy[found] = copy[best]
+    out.copies = np.bincount(sec, minlength=n)[:n]
+    return found, best
 
 
 def decode_track(bits, track, disk_id=None, sectors=None):
-    """Decode the sectors of a circular track bit stream.
+    """Decode the sectors of a circular track bit stream or a byte-ready capture.
 
+    Every header in the stream is tried and the best read of each sector kept.
     ``disk_id`` (BAM order) enables ID-mismatch (29) detection.
     """
+    if hasattr(bits, "positions"):
+        bits = segments(bits).bits
     bits = np.asarray(bits, dtype=np.uint8)
     n = sectors_per_track(track) if sectors is None else sectors
     out = TrackDecode(
@@ -217,6 +244,8 @@ def decode_track(bits, track, disk_id=None, sectors=None):
         np.full(n, SectorError.HEADER_NOT_FOUND, np.uint8),
         np.zeros((n, 2), np.uint8),
         np.full(n, -1, np.int64),
+        np.full(n, -1, np.int64),
+        np.zeros(n, np.int64),
     )
     starts, lengths = runs_of_ones(bits, circular=True)
     if len(starts) == 0 or lengths[0] >= len(bits):
@@ -224,7 +253,7 @@ def decode_track(bits, track, disk_id=None, sectors=None):
         return out
     ends = (starts + lengths) % len(bits)
     hdr, blk, err = _read_blocks(bits, ends, track, n, disk_id)
-    found, best = _best_per_sector(hdr[:, 2], err, n)
+    found, best = _best_per_sector(hdr[:, 2], err, n, out)
     out.errors[found] = err[best]
     out.ids[found] = hdr[best][:, [5, 4]]
     out.offsets[found] = ends[best]
@@ -234,19 +263,23 @@ def decode_track(bits, track, disk_id=None, sectors=None):
 
 
 def merge_decodes(a, b):
-    """Per sector, the better of two decodes of the same track (a wins ties)."""
+    """Per sector, the better of two decodes of the same track (a wins ties).
+
+    ``copies`` add up; ``copy`` keeps the rank within the decode it came from.
+    """
     take = _RANK[b.errors] < _RANK[a.errors]
-    return TrackDecode(
-        *(
-            np.where(take.reshape(-1, *[1] * (x.ndim - 1)), y, x)
-            for x, y in (
-                (a.data, b.data),
-                (a.errors, b.errors),
-                (a.ids, b.ids),
-                (a.offsets, b.offsets),
-            )
-        )
+
+    def pick(x, y):
+        if x is None or y is None:
+            return None
+        return np.where(take.reshape(-1, *[1] * (x.ndim - 1)), y, x)
+
+    out = TrackDecode(
+        *(pick(getattr(a, f.name), getattr(b, f.name)) for f in fields(a))
     )
+    if a.copies is not None and b.copies is not None:
+        out.copies = a.copies + b.copies
+    return out
 
 
 def header_tracks(bits):
@@ -256,6 +289,4 @@ def header_tracks(bits):
     if len(starts) == 0 or lengths[0] >= len(bits):
         return np.zeros(0, np.uint8)
     hdr, valid = decode_bits(_windows(bits, (starts + lengths) % len(bits), 80))
-    ok = (hdr[:, 0] == HEADER_ID) & valid[:, :6].all(axis=1)
-    ok &= np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0
-    return hdr[ok, 3]
+    return hdr[valid_headers(hdr, valid), 3]

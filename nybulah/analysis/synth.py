@@ -2,7 +2,8 @@
 
 import numpy as np
 
-from .gcr import CLOCK_HZ, NOMINAL_RPM
+from .capture import SYNC_ERROR_BITS, ByteCapture
+from .gcr import CLOCK_HZ, NOMINAL_RPM, SYNC_MIN_BITS, runs_of_ones
 
 
 def simulate_capture(track_bits, length, start=0, noise=0.0, weak=None, rng=None):
@@ -38,3 +39,41 @@ def simulate_flux(
     cells = (starts[:, None] + ones[None]).ravel().astype(np.float64)
     times = (cells + phase + jitter * rng.standard_normal(len(cells))) * cell
     return np.sort(times), len(track_bits) * cell * np.arange(revolutions + 1)
+
+
+def _syncs(stream, start):
+    """Complete sync runs ``(starts, lengths)`` after the capture starts, and that start."""
+    starts, lengths = runs_of_ones(stream)
+    whole = starts + lengths < len(stream)
+    starts, lengths = starts[whole], lengths[whole]
+    if start != "sync":
+        return starts, lengths, 0
+    frame = int(starts[starts > 0][0] + lengths[starts > 0][0])
+    keep = starts >= frame
+    return starts[keep], lengths[keep], frame
+
+
+def byte_capture(stream, nbytes, start="sync", sync_error=SYNC_ERROR_BITS, rng=None):
+    """What byte ready latches from a bit stream, with syncs measured to ``±sync_error``.
+
+    Each sync restarts byte framing; bytes complete until SYNC asserts on the
+    tenth one. ``start="sync"`` begins after the first complete sync.
+    """
+    rng = np.random.default_rng(rng)
+    stream = np.asarray(stream, np.uint8)
+    starts, lengths, frame = _syncs(stream, start)
+    frames = np.concatenate(([frame], starts + lengths))
+    counts = np.append(starts + SYNC_MIN_BITS - 1, len(stream)) - frames
+    counts = np.maximum(counts, 0) // 8
+    idx = np.concatenate([f + np.arange(8 * c) for f, c in zip(frames, counts)])
+    data = np.packbits(stream[idx.astype(np.int64)])
+    positions = np.cumsum(counts)[:-1]
+    keep = positions < min(nbytes, len(data))
+    error = rng.integers(-sync_error, sync_error + 1, int(keep.sum()))
+    return ByteCapture(
+        data[:nbytes],
+        positions[keep],
+        np.maximum(lengths[keep] + error, SYNC_MIN_BITS),
+        start,
+        sync_error,
+    )
