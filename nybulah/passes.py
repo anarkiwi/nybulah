@@ -406,6 +406,36 @@ def wrap_fits(waits, fine, xlo, xhi):
     return w, (w <= hi[..., None]) & explained(waits[..., None] + 256 * w)
 
 
+def _ts_candidates(arr, count, iters, period, tb, fine):
+    """Candidate TB bytes ``k`` (count +- BAND) per TS sync, their wrap counts and fits."""
+    n = len(arr.read)
+    plo, phi = ts_pulse(iters)
+    slack = TB_LOOP + TB_OUT[-1][0]
+    k = count[:, None] + np.arange(-BAND, BAND + 1)[None, :]
+    kk = np.clip(k, 1, n - 1)
+    waits = np.concatenate(([TB_BVS], tb_intervals(tb)[0]))[kk]
+    w, fits = wrap_fits(
+        waits,
+        fine[kk],
+        (plo * (1 - DRIFT) - slack)[:, None],
+        (phi * (1 + DRIFT) + PRE_ONES * period / CELLS + slack)[:, None],
+    )
+    return k, w, fits
+
+
+def _pick_wraps(n, count, w, fits, offs, matched):
+    """Fewest fitting wrap count and the spread of further fits at each matched byte."""
+    rows, col = np.arange(len(count)), offs + BAND
+    first = np.argmax(fits[rows, col], axis=1)
+    last = fits.shape[2] - 1 - np.argmax(fits[rows, col, ::-1], axis=1)
+    hit = count + offs
+    sel = matched & (hit >= 1) & (hit < n)
+    fewest, spread = np.zeros(n, np.int64), np.zeros(n, np.int64)
+    fewest[hit[sel]] = w[rows, col, first][sel]
+    spread[hit[sel]] = (last - first)[sel]
+    return fewest, spread
+
+
 def ts_wraps(arr, ts, period, anchored, tb):
     """TB timer wraps after each TS sync: ``(fewest, spread, unmatched)``.
 
@@ -421,28 +451,11 @@ def ts_wraps(arr, ts, period, anchored, tb):
     fine = np.diff(arr.read, prepend=0.0) - period
     if not anchored:
         count = count + best_offset(count, fine > period / CELLS)[0]
-    plo, phi = ts_pulse(iters)
-    slack = TB_LOOP + TB_OUT[-1][0]
-    k = count[:, None] + np.arange(-BAND, BAND + 1)[None, :]
-    kk = np.clip(k, 1, n - 1)
-    waits = np.concatenate(([TB_BVS], tb_intervals(tb)[0]))[kk]
-    w, fits = wrap_fits(
-        waits,
-        fine[kk],
-        (plo * (1 - DRIFT) - slack)[:, None],
-        (phi * (1 + DRIFT) + PRE_ONES * period / CELLS + slack)[:, None],
-    )
+    k, w, fits = _ts_candidates(arr, count, iters, period, tb, fine)
     late = (iters >= 256) & (iters % 256 == 0)
     free = np.concatenate(([0], np.where(late[:-1], TS_LATE_MERGE, 0)))
     offs, matched = align((k < 1) | (k >= n) | fits.any(axis=2), free)
-    rows, col = np.arange(len(count)), offs + BAND
-    first = np.argmax(fits[rows, col], axis=1)
-    last = fits.shape[2] - 1 - np.argmax(fits[rows, col, ::-1], axis=1)
-    hit = count + offs
-    sel = matched & (hit >= 1) & (hit < n)
-    fewest, spread = np.zeros(n, np.int64), np.zeros(n, np.int64)
-    fewest[hit[sel]] = w[rows, col, first][sel]
-    spread[hit[sel]] = (last - first)[sel]
+    fewest, spread = _pick_wraps(n, count, w, fits, offs, matched)
     return fewest, spread, int((~matched).sum())
 
 
