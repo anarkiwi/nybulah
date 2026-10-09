@@ -64,3 +64,33 @@ def test_s3_session(tmp_path):
         adapter("s3", device=10), tmp_path, "--devs", "10", "--proto", "s3"
     )
     assert summary["10"]["bench_s3"]["errors"] == 0 and summary["10"]["alias_s3"] == []
+
+
+def test_disk_survey_step(tmp_path, monkeypatch):
+    import contextlib
+    import functools
+
+    import numpy as np
+
+    from nybulah.formats import D64, d64_to_g64
+    from nybulah.nibbler import Nibbler
+    from nybulah.simdisk import Media, SimMonitor, disk_drive
+
+    image = D64(np.zeros((683, 256), np.uint8))
+    drive = disk_drive("1541", Media.from_g64(d64_to_g64(image, progress=False)), 10)
+    monkeypatch.setattr(
+        hwcheck,
+        "Monitor",
+        lambda cbm, dev, proto: contextlib.nullcontext(SimMonitor(cbm.drives[dev])),
+    )
+    monkeypatch.setattr(
+        hwcheck,
+        "Nibbler",
+        functools.partial(
+            Nibbler, stepms=1, settle_ms=1, spinup_s=0, sleep=lambda s: None
+        ),
+    )
+    summary, _ = run(SimCBM(drive, dev=10), tmp_path, "--devs", "10", "--disk")
+    zones = summary["10"]["disk"]["zones"]
+    assert [z["sectors_ok"] for z in zones] == [21, 19, 18, 17]
+    assert summary["10"]["disk"]["rpm"] is None

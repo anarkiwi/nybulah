@@ -27,6 +27,16 @@ Bits are `uint8` arrays holding 0/1, MSB first.
 - `decode_track(bits, track, disk_id=None, sectors=None)` returns a
   `TrackDecode`. It tries every sync at any bit alignment. Each sector gets the
   best read found and its error code, in D64 error-byte terms.
+- `merge_decodes(a, b)` keeps the better read of each sector across two decodes
+  of one track. `header_tracks(bits)` lists the track numbers found in valid
+  headers.
+
+## Captures (`nybulah.analysis.capture`)
+
+`capture_bits(data, positions, runs, lead=0)` turns a byte-ready capture back
+into a bit stream. It inserts the sync ones that were never latched, so each
+sync's run (the latched trailing ones plus the inserted ones) matches its
+measured length. `trailing_ones(bits, ends)` counts the latched part.
 
 ## Revolution detection (`nybulah.analysis.cycle`)
 

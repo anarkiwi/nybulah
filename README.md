@@ -33,7 +33,8 @@ them back.
   bytes are supported.
 - **Disk operations:** read and write D64 on the 1541 and 1571, and D71 on the
   1571, through the fast transport. Every write is verified by re-capture.
-- **Telemetry:** sync lengths are timed from the drive's SYNC line. On a stock
+- **Telemetry:** sync lengths are timed from the drive's SYNC line, to within
+  ±3 bits. On a stock
   1571 the index sensor gives index-aligned captures and a measured RPM.
   Every capture can be archived with its telemetry, so images can be
   re-derived later.
@@ -46,7 +47,7 @@ them back.
 | Raw tracks from a 1571 | serial IEC + 8 KB RAM expansion | SRQ or parallel | no | flux |
 | Other drives powered on the bus | yes | depends on transport | with S1 or original transfer | n/a |
 | Recovers from stalls without power cycling | yes (firmware v9) | no | no | n/a |
-| Exact sync lengths | timed from the SYNC line | no | no | yes |
+| Sync lengths | timed from the SYNC line (±3 bits) | no | no | yes |
 | Index alignment and RPM on a stock 1571 | WD1770 index sensor | needs an SC+-style sensor mod | no | yes |
 | Revolution detection | bit-level FFT autocorrelation with a significance test | byte matching within a fixed window | n/a | tool-dependent |
 | Licence | Apache-2.0 | GPL-3.0 | GPL-2.0 | various |

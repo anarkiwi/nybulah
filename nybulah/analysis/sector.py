@@ -231,3 +231,31 @@ def decode_track(bits, track, disk_id=None, sectors=None):
     readable = _RANK[out.errors[found]] < _RANK[SectorError.DATA_NOT_FOUND]
     out.data[found[readable]] = blk[best[readable], 1:257]
     return out
+
+
+def merge_decodes(a, b):
+    """Per sector, the better of two decodes of the same track (a wins ties)."""
+    take = _RANK[b.errors] < _RANK[a.errors]
+    return TrackDecode(
+        *(
+            np.where(take.reshape(-1, *[1] * (x.ndim - 1)), y, x)
+            for x, y in (
+                (a.data, b.data),
+                (a.errors, b.errors),
+                (a.ids, b.ids),
+                (a.offsets, b.offsets),
+            )
+        )
+    )
+
+
+def header_tracks(bits):
+    """Track numbers in the checksum-valid sector headers of a circular bit stream."""
+    bits = np.asarray(bits, dtype=np.uint8)
+    starts, lengths = runs_of_ones(bits, circular=True)
+    if len(starts) == 0 or lengths[0] >= len(bits):
+        return np.zeros(0, np.uint8)
+    hdr, valid = decode_bits(_windows(bits, (starts + lengths) % len(bits), 80))
+    ok = (hdr[:, 0] == HEADER_ID) & valid[:, :6].all(axis=1)
+    ok &= np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0
+    return hdr[ok, 3]

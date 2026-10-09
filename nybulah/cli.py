@@ -2,10 +2,16 @@
 
 import argparse
 
-from . import bench, hwcheck, ramprobe
+from . import bench, diskcmd, hwcheck, ramprobe
 from .tool import run
 
-COMMANDS = {"hwcheck": hwcheck, "bench": bench, "ramprobe": ramprobe}
+COMMANDS = {
+    "hwcheck": hwcheck,
+    "bench": bench,
+    "ramprobe": ramprobe,
+    "read": diskcmd.READ,
+    "write": diskcmd.WRITE,
+}
 
 
 def main(argv=None, cbm=None):

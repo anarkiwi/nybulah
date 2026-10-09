@@ -34,3 +34,4 @@ disable = ["missing-module-docstring", "missing-function-docstring", "import-out
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: whole-disk simulations"]

@@ -1,8 +1,9 @@
 """Cycle-stepped 1541/1571 + IEC bus + xum1541 model for running drive code without hardware.
 
 py65 6502 with the model's address decoding, VIA1 port B on an open-collector bus with
-ATN auto-acknowledge, and VIA1 timer 1 clocked by the CPU cycle counter. Writes to I/O
-other than VIA1's base registers raise SimIOWrite; SimCBM mirrors the OpenCBM API subset.
+ATN auto-acknowledge, and VIA1 timers 1 and 2 clocked by the CPU cycle counter. VIA2 and
+the 1571's WD1770 are served by an attached disk mechanism (nybulah.simdisk) when there is
+one. Writes to other I/O raise SimIOWrite; SimCBM mirrors the OpenCBM API subset.
 """
 
 import numpy as np
@@ -19,8 +20,9 @@ PB_DATA_IN, PB_DATA_OUT, PB_CLK_IN, PB_CLK_OUT, PB_ATNA, PB_ATN_IN = (
     0x80,
 )
 RETURN_TRAP = 0xFFF0
-RAM, ROM, VIA1, OPEN, IO = range(5)
-ACR_T1_FREERUN, IRQ_T1 = 0x40, 0x40
+RAM, ROM, VIA1, OPEN, IO, VIA2, FDC = range(7)
+ACR_T1_FREERUN, IRQ_T1, IRQ_T2 = 0x40, 0x40, 0x20
+IO_ACCESS_CYCLE = 3
 IDENTITY = {
     "1541": (0, "1541", "CBM DOS V2.6 1541"),
     "1571": (2, "1571", "CBM DOS V3.0 1571"),
@@ -50,23 +52,32 @@ def memory_map(model, expansion):
     phys = np.zeros(0x10000, np.int64)
     if model == "1541":
         ram, rom_size = low & (a & 0x1800 == 0), 0x4000
-        via1 = low & (a & 0x1C00 == 0x1800)
+        io = {VIA1: low & (a & 0x1C00 == 0x1800), VIA2: low & (a & 0x1C00 == 0x1C00)}
     elif model == "1571":
         ram, rom_size = a < 0x0800, 0x8000
-        via1 = (a >= 0x1800) & (a < 0x1C00)
+        io = {
+            VIA1: (a >= 0x1800) & (a < 0x1C00),
+            VIA2: (a >= 0x1C00) & (a < 0x2000),
+            FDC: (a >= 0x2000) & (a < 0x4000),
+        }
         kind[(a >= 0x6000) & low] = OPEN
     else:
         raise ValueError(f"unknown model {model}")
     kind[ram], phys[ram] = RAM, a[ram] & 0x7FF
-    kind[via1], phys[via1] = VIA1, a[via1] & 0x3FF
+    for k, sel in io.items():
+        kind[sel], phys[sel] = k, a[sel] & (0x1FFF if k == FDC else 0x3FF)
     rom_at = 0x800 + sum(e[2] if len(e) > 2 else e[1] - e[0] for e in expansion)
     kind[~low], phys[~low] = ROM, rom_at + (a[~low] & (rom_size - 1))
+    _place_expansion(kind, phys, expansion)
+    return kind.tolist(), phys.tolist(), rom_at, rom_at + rom_size
+
+
+def _place_expansion(kind, phys, expansion):
     top = 0x800
     for lo, hi, *size in expansion:
         n = size[0] if size else hi - lo
         kind[lo:hi], phys[lo:hi] = RAM, top + np.arange(hi - lo) % n
         top += n
-    return kind.tolist(), phys.tolist(), rom_at, rom_at + rom_size
 
 
 class Bus:
@@ -99,7 +110,7 @@ class IdleDOSDrive:
 
 
 class Via:
-    """6522 registers used by drive code: port B, timer 1, ACR, IFR, IER."""
+    """6522 registers used by drive code: port B, timers 1 and 2, ACR, IFR, IER."""
 
     def __init__(self, drive):
         self.drive = drive
@@ -108,6 +119,8 @@ class Via:
     def reset(self):
         """Power-on state."""
         self.acr = self.ier = self.latch = self.t1_start = self.t1_ack = 0
+        self.t2_latch = self.t2_start = 0
+        self.t2_ack = True
         self.regs = bytearray(16)
 
     def _t1_events(self):
@@ -116,9 +129,15 @@ class Via:
             return 0
         return e // (self.latch + 2) + 1 if self.acr & ACR_T1_FREERUN else 1
 
+    def t2(self):
+        """Timer 2 counter: one-shot from its latch, counting on past zero."""
+        return (self.t2_latch - (self.drive.cycles - self.t2_start)) & 0xFFFF
+
     def ifr(self):
-        """Interrupt flags; only timer 1 is a source."""
+        """Interrupt flags; timers 1 and 2 are the sources."""
         v = IRQ_T1 if self._t1_events() > self.t1_ack else 0
+        if not self.t2_ack and self.drive.cycles - self.t2_start > self.t2_latch:
+            v |= IRQ_T2
         return v | 0x80 if v & self.ier else v
 
     def read(self, reg):
@@ -132,6 +151,9 @@ class Via:
             return count >> 8 * (reg - 4) & 0xFF
         if reg in (6, 7):
             return self.latch >> 8 * (reg - 6) & 0xFF
+        if reg in (8, 9):
+            self.t2_ack |= reg == 8
+            return self.t2() >> 8 * (reg - 8) & 0xFF
         return {0xB: self.acr, 0xD: self.ifr(), 0xE: self.ier | 0x80}.get(
             reg, self.regs[reg]
         )
@@ -146,6 +168,11 @@ class Via:
             self.latch = self.latch & 0xFF | value << 8
             if reg == 5:
                 self.t1_start, self.t1_ack = self.drive.cycles, 0
+        elif reg == 8:
+            self.t2_latch = self.t2_latch & 0xFF00 | value
+        elif reg == 9:
+            self.t2_latch = self.t2_latch & 0xFF | value << 8
+            self.t2_start, self.t2_ack = self.drive.cycles, False
         elif reg == 0xB:
             self.acr = value
         elif reg == 0xD:
@@ -161,7 +188,7 @@ class Via:
         return self.acr, self.ier, self.latch
 
 
-class Drive1541:
+class Drive1541:  # pylint: disable=too-many-instance-attributes
     """A drive CPU with its model's memory map, VIA1 and optional expansion RAM."""
 
     MODEL = "1541"
@@ -182,6 +209,7 @@ class Drive1541:
         self.halted = True
         self.cycles = 0
         self.resets_to_boot, self._pending = resets_to_boot, 0
+        self.mech = None
 
     @property
     def responsive(self):
@@ -195,6 +223,8 @@ class Drive1541:
             return self.store[self._phys[addr]]
         if k == VIA1:
             return self.via1.read(self._phys[addr] & 0xF)
+        if k in (VIA2, FDC) and self.mech is not None and self._phys[addr] < 16:
+            return self.mech.read(k == FDC, self._phys[addr], self.cycles)
         return addr >> 8 if k == OPEN else 0
 
     def write(self, addr, value):
@@ -204,6 +234,10 @@ class Drive1541:
             self.store[self._phys[addr]] = value & 0xFF
         elif k == VIA1 and self._phys[addr] < 16:
             self.via1.write(self._phys[addr], value & 0xFF)
+        elif k == VIA2 and self.mech is not None and self._phys[addr] < 16:
+            self.mech.write(False, self._phys[addr], value & 0xFF, self.cycles)
+        elif k == FDC and self.mech is not None and self._phys[addr] == 0:
+            self.mech.write(True, 0, value & 0xFF, self.cycles)
         elif k not in (ROM, OPEN):
             raise SimIOWrite(f"write ${value & 0xFF:02x} to I/O ${addr:04x}")
 
@@ -253,6 +287,8 @@ class Drive1541:
         """Execute one instruction unless halted; return cycles used."""
         if self.halted:
             return 0
+        if self.mech is not None and self.cycles >= self.mech.due:
+            self.mech.update(self.cycles)
         before = self.mpu.processorCycles
         self.mpu.step()
         n = self.mpu.processorCycles - before
