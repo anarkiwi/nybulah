@@ -32,9 +32,9 @@ def test_jsr_returns_registers(proto):
     cbm = make_cbm()
     # lda #$12; ldx #$34; ldy #$56; rts
     with Monitor(cbm, 10, proto) as mon:
-        mon.write(0x0700, bytes([0xA9, 0x12, 0xA2, 0x34, 0xA0, 0x56, 0x60]))
-        assert mon.jsr(0x0700) == (0x12, 0x34, 0x56)
-        assert mon.read(0x0700, 1) == b"\xa9"
+        mon.write(0x8100, bytes([0xA9, 0x12, 0xA2, 0x34, 0xA0, 0x56, 0x60]))
+        assert mon.jsr(0x8100) == (0x12, 0x34, 0x56)
+        assert mon.read(0x8100, 1) == b"\xa9"
 
 
 @pytest.mark.parametrize("proto", ["s1", "s2"])

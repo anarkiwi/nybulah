@@ -1,7 +1,14 @@
 ; Resident command loop for 1541/1571 speaking an xum1541 fast protocol.
 ;
-; Assemble with -D PROTO=1 (S1: CLK/DATA only, safe with other drives on the
-; bus) or -D PROTO=2 (S2: ATN-strobed, only this drive may be listening).
+; The transport comes from an include selected by -D PROTO=n:
+;   1  proto_s1.inc  S1: CLK/DATA only, safe with other drives on the bus
+;   2  proto_s2.inc  S2: ATN-strobed, only this drive may be listening
+;   3  proto_x.inc   firmware-assisted protocol, built only when present
+; A transport defines open, close, tosend, torecv, getbyte (returns A) and
+; sendbyte (sends A). getbyte/sendbyte may use A, X and tmp/tmp+1 but must
+; preserve Y; each starts with WDRESET and spins only through WAIT. close
+; performs the exit handshake only: exit releases every line afterwards.
+;
 ; VIA1 port B ($1800): PB0 DATA in, PB1 DATA out, PB2 CLK in, PB3 CLK out,
 ; PB4 ATNA, PB7 ATN in. ATNA must equal ATN in or the drive pulls DATA.
 ;
@@ -10,11 +17,23 @@
 ;   'W' addr len  receive len bytes into addr
 ;   'J' addr      jsr addr, then send A, X, Y
 ;   'Q'           release the bus and return to DOS
+;
+; Watchdog: VIA1 T1 free-runs with IRQs masked, polled through IFR bit 6 only
+; inside WAIT spin loops; WD_TICKS periods without a byte of progress make
+; the drive release the bus, restore zero page and VIA1, and return to DOS
+; exactly like 'Q'. The 1571 in 2 MHz mode halves the timeout.
 
         .export start
 
 IEC     = $1800
 VIA1PA  = $1801
+T1CL    = $1804
+T1CH    = $1805
+T1LL    = $1806
+T1LH    = $1807
+ACR     = $180B
+IFR     = $180D
+IER     = $180E
 
 DATA_IN  = $01
 DATA_OUT = $02
@@ -22,19 +41,74 @@ CLK_IN   = $04
 CLK_OUT  = $08
 ATNA     = $10
 
+ACR_T1_FREERUN = $40
+IRQ_T1   = $40
+
+CLOCK_HZ = 1000000
+WD_MS    = 1000
+WD_CYCLES = CLOCK_HZ / 1000 * WD_MS
+WD_TICKS = WD_CYCLES / $10000 + 1
+WD_LATCH = WD_CYCLES / WD_TICKS - 2     ; free-run period is latch + 2
+
 ptr     = $30
 len     = $32
 tmp     = $34
 zpsize  = 6
 
+; Restart the no-progress budget. Clobbers A.
+.macro WDRESET
+        lda #WD_TICKS
+        sta wdcnt
+.endmacro
+
+; Spin until `ready` (a branch mnemonic) is taken after the test sequence
+; t1..t3, polling the watchdog on every miss. Preserves A, X and Y.
+.macro WAIT ready, t1, t2, t3
+        .local spin, done
+spin:   t1
+.ifnblank t2
+        t2
+.endif
+.ifnblank t3
+        t3
+.endif
+        ready done
+        bit IFR
+        bvc spin
+        jsr wdtick
+        bne spin
+done:
+.endmacro
+
         .segment "CODE"
 
 start:  sei
+        tsx
+        stx savesp
         ldx #zpsize - 1
 :       lda ptr,x
         sta zpsave,x
         dex
         bpl :-
+        lda ACR
+        sta viasave
+        lda IER
+        sta viasave+1
+        lda T1LL
+        sta viasave+2
+        lda T1LH
+        sta viasave+3
+        lda #IRQ_T1
+        sta IER
+        lda viasave
+        and #$3F
+        ora #ACR_T1_FREERUN
+        sta ACR
+        lda #<WD_LATCH
+        sta T1CL
+        lda #>WD_LATCH
+        sta T1CH
+        WDRESET
         jsr open
 
 loop:   jsr getbyte
@@ -46,14 +120,35 @@ loop:   jsr getbyte
         beq cmd_jsr
         cmp #'Q'
         bne loop
+        jsr close
+
+exit:   ldx savesp
+        txs
+        lda #$00
+        sta IEC
         ldx #zpsize - 1
 :       lda zpsave,x
         sta ptr,x
         dex
         bpl :-
-        jsr close
+        lda viasave+2
+        sta T1LL
+        lda viasave+3
+        sta T1LH
+        lda viasave
+        sta ACR
+        bit T1CL                ; clear T1 flag
+        lda viasave+1
+        sta IER                 ; re-enables what was enabled (bit 7 reads 1)
         lda VIA1PA              ; clear CA1 (ATN) flag
         cli
+        rts
+
+; One T1 period elapsed inside WAIT: ack it, expire after WD_TICKS.
+; Returns with Z clear; preserves A, X and Y.
+wdtick: bit T1CL
+        dec wdcnt
+        beq exit
         rts
 
 cmd_read:
@@ -122,169 +217,17 @@ declen: lda len
         rts
 
 .if PROTO = 1
-
-; Idle: host holds CLK, drive holds DATA. Ready is signalled with CLK alone,
-; which a DOS-idle drive never asserts; host DATA, drive drops CLK, host takes
-; CLK and drops DATA, drive takes DATA.
-open:   lda #CLK_OUT
-        sta IEC
-:       lda IEC
-        lsr
-        bcc :-
-        lda #$00
-        sta IEC
-:       lda IEC
-        lsr
-        bcs :-
-        lda #DATA_OUT
-        sta IEC
-        rts
-
-close:  lda #$00
-        sta IEC
-        rts
-
-tosend:
-torecv: rts
-
-; Receive A, MSB first.
-getbyte:
-        ldx #$08
-@bit:   lda #CLK_IN
-:       bit IEC                 ; host releases CLK: DATA holds the bit
-        bne :-
-        lda #$00
-        sta IEC
-        lda IEC
-        and #DATA_IN
-        sta tmp+1
-        lsr
-        rol tmp
-        lda #CLK_OUT            ; ack
-        sta IEC
-:       lda IEC                 ; host inverts DATA
-        and #DATA_IN
-        cmp tmp+1
-        beq :-
-        lda #$00
-        sta IEC
-        lda #CLK_IN
-:       bit IEC                 ; host reasserts CLK
-        beq :-
-        lda #DATA_OUT
-        sta IEC
-        dex
-        bne @bit
-        lda tmp
-        rts
-
-; Send A, LSB first, on CLK.
-sendbyte:
-        sta tmp
-        ldx #$08
-@bit:   lda #CLK_IN
-:       bit IEC                 ; host holds CLK
-        beq :-
-        lda #$00
-        lsr tmp
-        bcc :+
-        lda #CLK_OUT
-:       sta IEC                 ; DATA released: bit valid on CLK
-        eor #CLK_OUT
-        sta tmp+1
-:       lda IEC                 ; host acks with DATA
-        lsr
-        bcc :-
-        lda tmp+1               ; flip CLK
-        sta IEC
-:       lda IEC                 ; host releases DATA
-        lsr
-        bcs :-
-        lda #DATA_OUT
-        sta IEC
-        dex
-        bne @bit
-        rts
-
+        .include "proto_s1.inc"
 .elseif PROTO = 2
-
-; S2 bit cell: host strobes ATN, drive answers on CLK, payload on DATA, LSB
-; first. Receive idle: ATN and CLK asserted. Send idle: CLK released.
-open:   lda #CLK_OUT            ; ready: CLK alone (DOS idle never does this)
-        sta IEC
-:       bit IEC                 ; wait for host ATN
-        bpl :-
-        lda #CLK_OUT | ATNA
-        sta IEC
-        rts
-
-close:
-:       bit IEC                 ; wait for host to release ATN
-        bmi :-
-        lda #$00
-        sta IEC
-        rts
-
-tosend: lda #ATNA
-        sta IEC
-        rts
-
-torecv:
-:       bit IEC
-        bpl :-
-        lda #CLK_OUT | ATNA
-        sta IEC
-        rts
-
-getbyte:
-        ldx #$04
-@bit:
-:       bit IEC                 ; ATN released: DATA holds even bit
-        bmi :-
-        lda #CLK_OUT
-        sta IEC
-        lda IEC
-        lsr
-        ror tmp
-        lda #$00                ; release CLK: ack
-        sta IEC
-:       bit IEC                 ; ATN asserted: DATA holds odd bit
-        bpl :-
-        lda #ATNA
-        sta IEC
-        lda IEC
-        lsr
-        ror tmp
-        lda #CLK_OUT | ATNA     ; assert CLK: ack
-        sta IEC
-        dex
-        bne @bit
-        lda tmp
-        rts
-
-sendbyte:
-        sta tmp
-        ldx #$04
-@bit:   lda #$00
-        lsr tmp
-        rol
-        asl
-        ora #CLK_OUT | ATNA
-:       bit IEC
-        bpl :-
-        sta IEC
-        lda #$00
-        lsr tmp
-        rol
-        asl
-:       bit IEC
-        bmi :-
-        sta IEC
-        dex
-        bne @bit
-        rts
-
+        .include "proto_s2.inc"
+.elseif PROTO = 3
+        .include "proto_x.inc"
+.else
+        .error "PROTO must be 1, 2 or 3"
 .endif
 
 zpsave: .res zpsize
+viasave: .res 4                 ; ACR, IER, T1 latch lo/hi
 regs:   .res 3
+savesp: .res 1
+wdcnt:  .res 1
