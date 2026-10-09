@@ -31,6 +31,8 @@ them back.
   - index alignment.
 - **Formats:** G64, NIB, NB2, D64 and D71, with conversion between them. Error
   bytes are supported.
+- **Compatibility readers:** NBZ, G64/G71 with SPS EXT, P64, SCP and KryoFlux,
+  decoded through a 1541 read-circuit model (`nybulah convert`, `nybulah info`).
 - **Disk operations:** read and write D64 on the 1541 and 1571, and D71 on the
   1571, through the fast transport. Every write is verified by re-capture.
 - **Telemetry:** sync lengths are timed from the drive's SYNC line, to within
@@ -87,6 +89,8 @@ s1|s2|s3` and `--retries`.
 - [docs/disk.md](docs/disk.md): D64/D71 reading and writing
 - [docs/analysis.md](docs/analysis.md): GCR, revolution detection and format
   APIs
+- [docs/formats.md](docs/formats.md): supported image formats, flux decoding
+  and licences
 
 ## Development
 

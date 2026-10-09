@@ -6,6 +6,8 @@ import contextlib
 
 def run(module, args, cbm=None):
     """Execute a tool module against cbm, or a freshly opened adapter."""
+    if not getattr(module, "NEEDS_ADAPTER", True):
+        return module.execute(args, cbm)
     if cbm is None:
         from .opencbm import OpenCBM
 

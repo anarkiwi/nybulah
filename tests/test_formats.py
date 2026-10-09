@@ -86,7 +86,7 @@ def test_g64_roundtrip_halftracks_and_speed_map():
         assert np.array_equal(back.tracks[key].data, track.data)
         assert np.array_equal(back.tracks[key].speed, track.speed)
     with pytest.raises(ValueError):
-        read_g64(b"GCR-1571" + raw[8:])
+        read_g64(b"GCR-1581" + raw[8:])
 
 
 def test_d64_g64_d64_with_errors():
