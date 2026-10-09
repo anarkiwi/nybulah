@@ -50,7 +50,7 @@ class P64:
     sides: int = 1
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _decode_bit(state, buf, probs, slot):
     low, high, code, pos = state[0], state[1], state[2], state[3]
     prob = probs[slot]
@@ -72,7 +72,7 @@ def _decode_bit(state, buf, probs, slot):
     return bit
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _decode_dword(state, buf, probs, ctx, model):
     value = 0
     for byte in range(4):
@@ -87,13 +87,13 @@ def _decode_dword(state, buf, probs, ctx, model):
     return value
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _decode_flag(state, buf, probs, ctx, slot, model):
     ctx[model] = _decode_bit(state, buf, probs, slot + ctx[model])
     return ctx[model]
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _decode_stream(buf, count):
     probs = np.full(_PROBS, 2048, np.int64)
     ctx = np.zeros(10, np.int64)
@@ -119,7 +119,7 @@ def _decode_stream(buf, count):
     return positions, strengths
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _encode_bit(state, out, probs, slot, bit):
     low, high, pos = state[0], state[1], state[3]
     prob = probs[slot]
@@ -138,7 +138,7 @@ def _encode_bit(state, out, probs, slot, bit):
     state[0], state[1], state[3] = low, high, pos
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _encode_dword(state, out, probs, ctx, model, value):
     for byte in range(4):
         byte_value = (value >> (8 * byte)) & 0xFF
@@ -153,13 +153,13 @@ def _encode_dword(state, out, probs, ctx, model, value):
         ctx[model + byte] = byte_value
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _encode_flag(state, out, probs, ctx, slot, model, bit):
     _encode_bit(state, out, probs, slot + ctx[model], bit)
     ctx[model] = bit
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _encode_stream(positions, strengths):
     probs = np.full(_PROBS, 2048, np.int64)
     ctx = np.zeros(10, np.int64)

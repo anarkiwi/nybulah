@@ -15,7 +15,7 @@ OOB_STREAM_INFO, OOB_INDEX, OOB_STREAM_END, OOB_KFINFO, OOB_EOF = 1, 2, 3, 4, 13
 _SCK = re.compile(rb"sck=([0-9.eE+]+)")
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _oob_blocks(buf):
     """``(type, payload offset, size)`` of every out-of-band block."""
     out = np.empty((len(buf) // 4 + 1, 3), np.int64)
@@ -41,7 +41,7 @@ def _oob_blocks(buf):
     return out[:n]
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _flux(buf, index_pos, index_counter):
     """Intervals (sample clocks) and the sample time of each index pulse."""
     flux = np.empty(len(buf), np.int64)

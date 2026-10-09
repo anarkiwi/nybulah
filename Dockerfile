@@ -55,7 +55,8 @@ FROM opencbm-${OPENCBM_SOURCE} AS base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/venv/bin:$PATH \
-    OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+    OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
+    NUMBA_CACHE_DIR=/tmp/numba-cache
 WORKDIR /app
 
 FROM base AS test

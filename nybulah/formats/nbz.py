@@ -15,7 +15,7 @@ MAX_CHAIN = 256
 _NO_POS = -1
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _varint(buf, pos):
     value = 0
     while pos < len(buf):
@@ -27,7 +27,7 @@ def _varint(buf, pos):
     return -1, pos
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _decode(buf, out):
     """Decode into ``out``, or only measure when ``out`` is empty; -1 if malformed."""
     marker = buf[0]
@@ -72,7 +72,7 @@ def lz_decompress(buf):
     return out
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _put_varint(out, pos, value):
     groups = 1
     while value >> (7 * groups):
@@ -83,7 +83,7 @@ def _put_varint(out, pos, value):
     return pos
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _worthwhile(length, offset):
     """A reference is emitted only when it is shorter than the literals."""
     if length >= 8:
@@ -92,7 +92,7 @@ def _worthwhile(length, offset):
     return length >= 4 and offset <= limits[length]
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _match(src, chain, pos, max_chain):
     """Longest non-overlapping earlier match at ``pos``: ``(length, offset)``."""
     n = len(src)
@@ -113,7 +113,7 @@ def _match(src, chain, pos, max_chain):
     return best_len, best_off
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _encode(src, marker, max_chain):
     n = len(src)
     out = np.empty(2 * n + 1, np.uint8)
