@@ -87,9 +87,14 @@ Both paths start the same way:
    its pairs. Chance agreement is Σf² over the capture's byte histogram. A
    partial first or last segment is compared over its common prefix.
 3. A shift is rejected if any pair has two checksum-valid headers with
-   different sector, track or ID. On a uniformly formatted disk, every data
-   block is identical, so a shift of one sector less than a revolution would
-   otherwise score as high as the true period.
+   different sector, track or ID, or if such a header pair lies at a distance
+   one of the shift's significant pairs could span (their distance bounds
+   overlap). On a uniformly formatted disk, every data block is identical, so
+   a shift a few sectors short of a revolution can score higher than the true
+   period, which an 8 KB capture spans with only a couple of pairs. When one
+   pass missed a sync (two blocks read as one segment), that alias's pairs
+   fall under two segment shifts, and the header pair that contradicts it may
+   sit under only one of them.
 4. The best remaining shift must be significant at family-wise level `alpha`,
    using a Bonferroni correction over the shifts tried. Otherwise the capture
    is `UNFORMATTED`.
@@ -126,9 +131,12 @@ When `index_aligned=True`, the start is bit 0 of the capture.
 
 `extract_revolution(x, cycle)` cuts out one revolution:
 
-- For a capture, it takes the exact bits between a measured sync and its next
-  pass, rotated to the start. The length can differ from `cycle.length` within
-  the sync error.
+- For a capture, it takes the exact bits between a measured sync and the
+  measured sync nearest one `cycle.length` later, rotated to the start. The
+  length can differ from `cycle.length` within the sync error.
+  `revolution_spans(capture, cycle)` chains these passes into successive whole
+  revolutions, cut inside syncs; unlike stepping `cycle.segments` syncs at a
+  time, it survives a missed sync.
 - For a bit stream, it takes `cycle.length` bits from the start.
 
 `index_align({key: (bits, cycle)})` gives every track a start at its index

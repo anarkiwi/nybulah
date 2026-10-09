@@ -2,7 +2,8 @@
 
 Continuous bit streams: the physically possible lag whose bit agreement is most
 significant (FFT autocorrelation). Byte-ready captures: the segment shift whose
-contents repeat most significantly without contradicting a sector header.
+contents repeat most significantly without two different sector headers at a
+distance its pairs could span.
 """
 
 from dataclasses import dataclass, replace
@@ -183,36 +184,75 @@ class _Pairs:
         return _zscore(self.agree, self.total, self.chance)
 
 
-def _best_shift(pairs, valid, key):
+def _overlaps(pairs, error, mask, other):
+    """Which ``mask`` pairs have a distance some ``other`` pair could also span.
+
+    Pair ``(i, j)`` spans ``dist`` within ``error * (j - i)``; two pairs can be
+    the same revolution when their bounds overlap.
+    """
+    if not other.any():
+        return np.zeros_like(mask)
+    slack = error * (pairs.j - pairs.i)
+    lo, hi = pairs.dist - slack, pairs.dist + slack
+    order = np.argsort(lo[other])
+    starts, reach = lo[other][order], np.maximum.accumulate(hi[other][order])
+    k = np.searchsorted(starts, hi, "right") - 1
+    return mask & (k >= 0) & (reach[np.maximum(k, 0)] >= lo)
+
+
+def _clashes(pairs, error, lead, differ):
+    """Whether a header pair that differs lies at a distance some ``lead`` pair
+    could span and shares no segment with any of them: under that
+    revolution the two headers would be one sector seen twice."""
+    used = np.zeros(int(pairs.j.max(initial=0)) + 1, bool)
+    used[pairs.i[lead]] = used[pairs.j[lead]] = True
+    free = differ & ~used[pairs.i] & ~used[pairs.j]
+    return _overlaps(pairs, error, lead, free).any()
+
+
+def _best_shift(pairs, valid, key, error, alpha):
     """Pairs of the most significant shift no valid header pair contradicts.
 
-    Returns ``(mask, match, z, tests)``.
+    A shift is contradicted by two valid, different headers in one of its
+    pairs, or in a pair of other segments at a distance one of the pairs
+    measuring its length could span (see :func:`_measuring`): a sync missed
+    in one pass moves a revolution's pairs to a neighbouring segment shift,
+    which the contradicting header pairs need not share. Returns
+    ``(measuring pairs, match, z, tests)``.
     """
     shifts, inv = np.unique(pairs.j - pairs.i, return_inverse=True)
     differ = valid[pairs.i] & valid[pairs.j] & (key[pairs.i] != key[pairs.j])
+    strong = pairs.z() >= _threshold(alpha, 1)
     agree, total = np.bincount(inv, pairs.agree), np.bincount(inv, pairs.total)
     z = _zscore(agree, total, pairs.chance)
-    z[(np.bincount(inv, differ) > 0) | (total == 0)] = -np.inf
+    z[(np.bincount(inv, differ, len(shifts)) > 0) | (total == 0)] = -np.inf
+    for s in np.flatnonzero(np.isfinite(z)):
+        if _clashes(pairs, error, _measuring(pairs, inv == s, strong, error), differ):
+            z[s] = -np.inf
     best = int(np.argmax(z))
     return (
-        inv == best,
+        _measuring(pairs, inv == best, strong, error),
         float(agree[best] / max(total[best], 1)),
         float(z[best]),
         len(shifts),
     )
 
 
-def _revolution(seg, pairs, sel, alpha):
-    """Length, its standard error and the segment period from the chosen pairs.
+def _measuring(pairs, sel, strong, error):
+    """The pairs of ``sel`` that measure its length.
 
     Pairs whose own agreement is significant are preferred; distances beyond
     the sync-error bound of their median belong to misaligned pairs.
     """
-    strong = sel & (pairs.z() >= _threshold(alpha, 1))
-    sel = strong if strong.any() else sel
+    sel = sel & strong if (sel & strong).any() else sel.copy()
     shift = pairs.j - pairs.i
     middle = np.sort(pairs.dist[sel])[(sel.sum() - 1) // 2]
-    sel &= np.abs(pairs.dist - middle) <= 2 * seg.error * shift
+    return sel & (np.abs(pairs.dist - middle) <= 2 * error * shift)
+
+
+def _revolution(seg, pairs, sel):
+    """Length, its standard error and the segment period from measuring pairs."""
+    shift = pairs.j - pairs.i
     cover = np.zeros(len(seg) + 1)
     np.add.at(cover, pairs.i[sel] + 1, 1)
     np.add.at(cover, pairs.j[sel] + 1, -1)
@@ -228,10 +268,10 @@ def _segment_cycle(seg, lo, hi, alpha, nominal, index_aligned):
     if pairs.chance >= 1 or not pairs.i.size:
         return unformatted
     valid, key, sector = _segment_headers(seg)
-    sel, match, z, tests = _best_shift(pairs, valid, key)
+    sel, match, z, tests = _best_shift(pairs, valid, key, seg.error, alpha)
     if not z >= _threshold(alpha, tests):
         return replace(unformatted, match=match, z=max(z, 0.0))
-    length, sigma, period = _revolution(seg, pairs, sel, alpha)
+    length, sigma, period = _revolution(seg, pairs, sel)
     if max(lo - length, length - hi) > _threshold(alpha, 1) * sigma:
         return replace(unformatted, match=match, z=z)
     start = 0 if index_aligned else _segment_anchor(seg, valid & (sector == 0), period)
@@ -369,21 +409,51 @@ def _byte_z(bits, lag):
     return float(_zscore((words[0] == words[1]).sum(), n, chance))
 
 
+def _sync_passes(seg, cycle):
+    """Per measured sync: its run start, the measured sync nearest
+    ``cycle.length`` bits on (index into the same runs), whether that is
+    within the sync-error bound, whether it is also ``cycle.segments`` syncs
+    on (no sync missed in between), and the miss in bits."""
+    k = np.flatnonzero(seg.run >= 0)
+    run = seg.run[k]
+    if len(run) < 2:
+        none = np.zeros(0, bool)
+        return run[:0], k[:0], none, none, k[:0]
+    m = np.clip(np.searchsorted(run, run + cycle.length), 1, len(run) - 1)
+    m -= (run + cycle.length - run[m - 1]) < (run[m] - run - cycle.length)
+    off = np.abs(run[m] - run - cycle.length)
+    ok = (m > np.arange(len(run))) & (off <= seg.error * (k[m] - k))
+    return run, m, ok, k[m] - k == cycle.segments, off
+
+
 def _segment_revolution(seg, cycle):
     """Bits between a sync and the same sync one period later, rotated to ``cycle.start``.
 
-    None when no measured pair of syncs spans the period.
+    None when no measured sync has a pass (see :func:`revolution_spans`).
     """
-    k = np.flatnonzero(seg.run[: -cycle.segments] >= 0)
-    width = seg.run[k + cycle.segments] - seg.run[k]
-    k = k[np.abs(width - cycle.length) <= seg.error * cycle.segments]
-    if not k.size:
+    run, m, ok, exact, off = _sync_passes(seg, cycle)
+    if not ok.any():
         return None
-    inside = (seg.run[k] <= cycle.start) & (cycle.start < seg.run[k + cycle.segments])
-    off = np.abs(seg.run[k + cycle.segments] - seg.run[k] - cycle.length)
-    k = int(k[np.lexsort((off, ~inside))[0]])
-    rev = seg.bits[seg.run[k] : seg.run[k + cycle.segments]]
-    return np.roll(rev, -((cycle.start - seg.run[k]) % len(rev)))
+    inside = (run <= cycle.start) & (cycle.start < run[m])
+    a = np.flatnonzero(ok)[np.lexsort((off[ok], ~inside[ok], ~exact[ok]))[0]]
+    rev = seg.bits[run[a] : run[m[a]]]
+    return np.roll(rev, -((cycle.start - run[a]) % len(rev)))
+
+
+def revolution_spans(capture, cycle):
+    """``(start, end)`` bits of successive whole revolutions of a byte-ready capture.
+
+    Each runs from a measured sync to the measured sync nearest one
+    ``cycle.length`` on, within the sync-error bound, chained from the first
+    sync that has one; cuts fall inside syncs, so no framed bit is split.
+    """
+    run, m, ok, _, _ = _sync_passes(segments(capture), cycle)
+    spans = []
+    a = int(np.argmax(ok)) if ok.any() else -1
+    while a >= 0 and ok[a]:
+        spans.append((int(run[a]), int(run[m[a]])))
+        a = int(m[a])
+    return spans
 
 
 def extract_revolution(bits, cycle):
