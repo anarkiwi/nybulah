@@ -184,8 +184,8 @@ drive 8 the 1571 and a formatted disk inserted:
    docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 8 --headers --max-steps N --halftrack 36 --save /data/artifacts/stream-36.npz
    ```
 
-   Expect `adapter` and `drive` "done", 2 `index` positions about 7140
-   bytes apart (`revolution_bytes`, zone 2) and `syncs` near 38 (19 sectors).
+   Expect `adapter` and `drive` "done", 2 `index` positions about 6980
+   bytes apart (`revolution_bytes`, zone 2; sync bits are not bytes) and `syncs` near 38 (19 sectors).
 4. Zone 3 (the tightest byte period) and several revolutions:
 
    ```sh
