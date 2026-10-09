@@ -209,14 +209,14 @@ class Capture:  # pylint: disable=too-many-instance-attributes
             return v1_syncs(self)
         anchored, base = self.base >= 0, max(self.base, 0)
         ts = self.ts_syncs() if self.ts is not None else None
+        rev = self.revolution_bytes() if ts is not None or self.tb is not None else None
         if self.tb is not None:
-            rev = self.revolution_bytes()
             end = None
             if ts is None or self._r("status", self.ts_result) & ST_STOPPED_TS:
                 end = self._ts_count() if ts is not None else 0
             return passes.merge_tb(self.data, base, self.tb, ts, anchored, rev, end)
         if ts is not None:
-            return passes.merge_ts(self.data, base, ts, self.cell_cycles, anchored)
+            return passes.merge_ts(self.data, base, ts, self.cell_cycles, anchored, rev)
         none = np.zeros(0, np.int64)
         return passes.Syncs(none, none, none, none, none, len(self.data))
 

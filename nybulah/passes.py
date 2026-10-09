@@ -309,17 +309,78 @@ def align(consistent, free=None):
     return path - width // 2, consistent[np.arange(n), path]
 
 
-def _events_offsets(events, base, mask, anchored):
-    """Per-event BITS offsets for pass events landing on ``mask`` positions.
+def sync_weights(ok, ones):
+    """Evidence of a sync before each byte: -log of the share of BITS boundaries
+    latching that many ones (0 where no sync fits).
 
-    Events past either end of the BITS bytes constrain nothing.
+    A sync's latched ones depend on its bit phase, not on the data, so of two
+    alignments landing as many syncs on capable bytes the likelier puts them
+    where the data itself rarely latches such ones.
     """
-    events = np.asarray(events, np.int64)
-    shift = 0 if anchored else best_offset(events + base, mask)[0]
-    pos = base + shift + events[:, None] + np.arange(-BAND, BAND + 1)[None, :]
-    inside = (pos > 0) & (pos < len(mask))
-    offs, matched = align(~inside | mask[np.clip(pos, 0, len(mask) - 1)])
-    return offs + shift, matched
+    ok, ones = np.asarray(ok, bool), np.asarray(ones, np.int64)
+    freq = np.bincount(ones[ok], minlength=PRE_ONES + 1) / len(ok)
+    out = np.zeros(len(ok))
+    out[ok] = -np.log(freq[ones[ok]])
+    return out
+
+
+def _fold(a, rev, op):
+    """``a`` over one revolution of ``rev`` bytes, its repeat merged by ``op``."""
+    out = a[:rev].copy()
+    out[: len(a) - rev] = op(out[: len(a) - rev], a[rev:])
+    return out
+
+
+def _likeliest_shift(events, ok, weight):
+    """Circular shift putting most ``events`` on ``ok``, then the most ``weight``."""
+    size = len(ok)
+    hist = np.conj(np.fft.rfft(np.bincount(events % size, minlength=size)))
+    hits, score = (np.fft.irfft(np.fft.rfft(a) * hist, size) for a in (ok, weight))
+    best = np.flatnonzero(hits.round() == hits.round().max())
+    return int(best[np.argmax(score[best])])
+
+
+def _aligned(events, ok, weight, circular):
+    """DP offsets of ``events`` onto ``ok``; ``(offs, matched, misses, weight)``.
+
+    Linear positions past either end constrain nothing; circular ones wrap.
+    """
+    pos = events[:, None] + np.arange(-BAND, BAND + 1)[None, :]
+    if circular:
+        pos, inside = pos % len(ok), np.ones(pos.shape, bool)
+    else:
+        inside = (pos > 0) & (pos < len(ok))
+        pos = np.clip(pos, 0, len(ok) - 1)
+    offs, matched = align(~inside | ok[pos])
+    rows, col = np.arange(len(events)), offs + BAND
+    counted = matched & inside[rows, col]
+    return (
+        offs,
+        matched,
+        int((~matched).sum()),
+        float(weight[pos[rows, col]][counted].sum()),
+    )
+
+
+def _events_offsets(events, base, ok, weight, anchored, rev=None):
+    """Per-event BITS offsets for pass events landing on ``ok`` positions.
+
+    Over a known revolution of ``rev`` bytes an anchored pass keeps its
+    anchor unless another alignment explains the events better: fewer
+    misses, then more :func:`sync_weights`. Without one an anchored pass is
+    taken as placed and events past either end constrain nothing.
+    """
+    events = base + np.asarray(events, np.int64)
+    if rev:
+        ok, weight = _fold(ok, rev, np.logical_or), _fold(weight, rev, np.maximum)
+    shifts = [0] if anchored else []
+    if rev and len(events):
+        shifts.append((_likeliest_shift(events, ok, weight) + base) % rev - base)
+    elif not anchored:
+        shifts.append(best_offset(events, ok)[0])
+    fits = [_aligned(events + s, ok, weight, bool(rev)) for s in shifts]
+    i = min(range(len(fits)), key=lambda j: (fits[j][2], -fits[j][3]))
+    return fits[i][0] + shifts[i], fits[i][1]
 
 
 @dataclasses.dataclass
@@ -540,12 +601,15 @@ def tb_excess(arr, breaks, period, error, hidden):
     return np.concatenate(([-np.inf], lo)), np.concatenate(([np.inf], hi))
 
 
-def _tb_positions(arr, base, ok, anchored):
-    """BITS index of each TB byte, following slips at the definite syncs."""
+def _tb_positions(arr, base, evidence, anchored, rev):
+    """BITS index of each TB byte, following slips at the definite syncs.
+
+    ``evidence`` is ``(capable, sync weights)`` of the BITS bytes.
+    """
     n = len(arr.read)
     period = float(np.median(np.diff(arr.read))) if n > 1 else 0.0
     definite = np.flatnonzero(arr.lo[1:] - arr.hi[:-1] - period > period / CELLS) + 1
-    offs, matched = _events_offsets(definite, base, ok, anchored)
+    offs, matched = _events_offsets(definite, base, *evidence, anchored, rev)
     which = np.clip(np.searchsorted(definite, np.arange(n), "right") - 1, 0, None)
     pos = base + np.arange(n) + (offs[which] if len(definite) else 0)
     return pos, int((~matched).sum())
@@ -605,7 +669,8 @@ def merge_tb(  # pylint: disable=too-many-arguments
             for j in range(spread.max() + 1)
         ]
         arr = arrs[0]
-    pos, missed = _tb_positions(arr, base, ok, anchored)
+    evidence = (ok, sync_weights(ok, latched))
+    pos, missed = _tb_positions(arr, base, evidence, anchored, anchored and revolution)
     steady = np.where(pos < len(data), pos, pos - (revolution or len(data)))
     inside = (steady > 0) & (steady < len(data))
     at = np.clip(steady, 0, len(data) - 1)
@@ -635,16 +700,26 @@ def _low_rows(positions, est, plo, phi, cell, n):
     return rows
 
 
-def merge_ts(data, base, ts, cell, anchored=True):
-    """Syncs of a BITS pass from TS alone: exact positions, lengths from SYNC low time."""
+def merge_ts(  # pylint: disable=too-many-arguments
+    data, base, ts, cell, anchored=True, revolution=None
+):
+    """Syncs of a BITS pass from TS alone: exact positions, lengths from SYNC low time.
+
+    With the ``revolution`` in bytes each sync is placed on every turn.
+    """
     data = np.asarray(data, np.uint8)
     count, iters = ts
     ok, latched = capable(data)
-    offs, matched = _events_offsets(count, base, ok, anchored)
+    weight = sync_weights(ok, latched)
+    offs, matched = _events_offsets(count, base, ok, weight, anchored, revolution)
     plo, phi = ts_pulse(iters)
     sel = np.flatnonzero(matched)
+    pos = base + count[sel] + offs[sel]
+    if revolution:
+        pos = (pos % revolution)[None, :] + [[0], [revolution]]
+        sel = np.tile(sel, 2)
     rows = _low_rows(
-        base + count[sel] + offs[sel],
+        np.ravel(pos),
         (plo[sel] + phi[sel]) / 2,
         plo[sel],
         phi[sel],

@@ -86,6 +86,17 @@ are aligned by cross-correlating their syncs with the boundaries a sync can
 occupy. Slips (a weak area changing the byte count) are followed by dynamic
 programming over a ±8 byte band.
 
+An anchor unique in the BITS bytes can still match elsewhere in a later pass:
+a byte that reads differently each revolution (a format's write splice) can
+spell it in a gap. On a blank-formatted track the anchored placement then
+looks consistent, because GCR of zero-filled data blocks lets a sync fit every
+5 bytes. So over a known revolution the anchored placement is checked against
+the circular alignment that lands the most syncs where a sync can fit, and
+among those, the one where the latched ones are least common in the BITS
+bytes. A sync's latched ones depend on its bit phase, not on the data, so
+this is the likelier alignment. The anchor is kept unless the other alignment
+leaves fewer syncs unplaced or is likelier.
+
 **BITS loss bound.** The wait polls byte ready (V) at most 7 cycles apart.
 A byte is read 8 cycles after the poll that sees it, and the next wait starts
 19 cycles after that poll, or 32 after a page change. A byte seen u cycles
