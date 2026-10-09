@@ -193,6 +193,14 @@ class OpenCBM:
         """Write bytes with the X protocol (xum1541 firmware v9+)."""
         self._write_n("x", data)
 
+    def x2_read(self, size):
+        """Read size bytes with the X protocol timed for a 1571 at 2 MHz."""
+        return self._read_n("x2", size)
+
+    def x2_write(self, data):
+        """Write bytes with the X protocol timed for a 1571 at 2 MHz."""
+        self._write_n("x2", data)
+
     def supports(self, protocol):
         """Whether plugin and firmware speak protocol; s3 is probed with an empty read."""
         if protocol != "s3":

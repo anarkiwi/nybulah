@@ -195,10 +195,22 @@ class Monitor:
         self._last = self.clock()
         return data
 
+    def touch(self):
+        """Restart the idle window after a command sent outside transact."""
+        self._last = self.clock()
+
+    def set_fast(self, fast):
+        """Run a 1571 at 2 MHz (True) or 1 MHz; only the s3 link supports it."""
+        if not hasattr(self.link, "set_fast"):
+            raise ValueError(f"{self.protocol} cannot change the drive clock")
+        self.link.set_fast(fast)
+
     def stop(self):
         """Return the drive to DOS."""
         if not self.running:
             return
+        if getattr(self.link, "fast", False):
+            self.set_fast(False)
         self.running = False
         if not self.alive():
             self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)

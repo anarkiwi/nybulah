@@ -300,3 +300,36 @@ def test_timing_report(capsys):
     )
     assert simx.TimedBus().settles(0.0) == float("inf")
     assert IEC_CLOCK
+
+
+def test_1571_switches_to_2mhz_and_back():
+    cbm, mon = session("1571", 1.0)
+    idle = mon.idle_s
+    mon.set_fast(True)
+    assert cbm.drive.cyc == 0.5 and mon.idle_s == idle / 2
+    data = rand(0x300, 7)
+    mon.write(0x6000, data)
+    assert mon.read(0x6000, len(data)) == data
+    assert mon.link.rejects == 0
+    mon.set_fast(True)
+    mon.stop()
+    cbm.settle()
+    assert cbm.drive.cyc == 1.0 and cbm.drive.halted
+    assert cbm.drive.dump(0x30, len(ZP)) == ZP
+
+
+def test_2mhz_needs_the_2mhz_adapter_timing():
+    cbm, mon = session("1571", 1.0)
+    mon.set_fast(True)
+    mon.link.rx, mon.link.tx = cbm.s3_read, cbm.s3_write
+    mon.link.retries = 0
+    with pytest.raises((ChecksumError, OpenCBMError)):
+        mon.write(0x6000, rand(64))
+        mon.read(0x6000, 64)
+
+
+def test_clock_switch_is_s3_only():
+    cbm = simx.make("1571", 1.0, dev=9)
+    mon = Monitor(cbm, 9, "s1")
+    with pytest.raises(ValueError, match="cannot change the drive clock"):
+        mon.set_fast(True)
