@@ -1,7 +1,9 @@
 # X transport: drive-timed two-bit IEC transfers
 
 X moves bytes between a ZoomFloppy (xum1541 firmware v9+) and drive code in a
-1541/1571 over CLK and DATA only. ATN is never touched, so DOS drives that
+1541/1571 over CLK and DATA only. Firmware v10 adds burst X (below), which the
+host uses whenever plugin and firmware offer it; this section describes the v9
+per-byte form it falls back to. ATN is never touched, so DOS drives that
 share the bus stay idle (they only react to ATN). The drive is the timing
 master: its code runs a fixed, branch-free schedule after a SYNC edge, and the
 16 MHz adapter, which can time edges to a fraction of a microsecond, samples or
@@ -161,13 +163,93 @@ bounds. Each 4 KiB block adds about 16 monitor bytes and three USB
 round trips (a few ms), under 2 % at 1 MHz. The adapter's USB work happens
 between bytes while go is released, so it never stretches a timed window.
 
+## Burst X (firmware v10)
+
+Burst X keeps the X lines, idle state, session handshakes and recovery, but pays
+one go/SYNC per burst of up to 64 bytes instead of per byte: after SYNC the
+drive runs a branch-free loop with a fixed cycle count per byte and the adapter
+follows that schedule open-loop, interrupts masked, until the burst ends.
+Design and cycle budgets: [protocol-review.md](protocol-review.md).
+
+Sources: `drive/proto_xb.inc` (`monitor_xb.bin`), `nybulah/simx.py`
+(`BurstTiming`, `xb_read`/`xb_write`), `nybulah/fastx.py` (`XBLink`);
+adapter `xum1541/x.c` (`xb_rx`/`xb_tx`), plugin
+`opencbm_plugin_xb[2]_read_n/_write_n` (`XUM1541_X | XUM_X_BURST`, `XUM_X_2MHZ`
+for a 1571 at 2 MHz; -1 below firmware 10).
+
+### Bursts
+
+The adapter cuts every transfer into 64-byte bursts from its start (two
+32-byte USB packets, one per bank of the double-banked endpoint, switched at a
+fixed point of its loop); the drive ends its bursts at 64-byte aligned
+addresses. The host therefore moves the head of a block whose address is not
+aligned in a transfer of its own. Before a burst the adapter waits until both
+IN banks are free (read) or the burst's bytes are buffered (write), so the bus
+never waits on USB; it then asserts go, detects SYNC as in v9 (slices, retract,
+grace) and runs the burst.
+
+### Drive schedule (drive cycles after the SYNC write; byte i adds i periods)
+
+| | P0 | P1 | P2 | P3 | release | period |
+|---|---|---|---|---|---|---|
+| send: port write (DATA, CLK) | 14 (b1,b3) | 26 (b5,b7) | 50 (b0,b2) | 62 (b4,b6) | 74 after the last byte | 67 |
+| receive: port read (DATA, CLK) | 12 (b5,b7) | 20 (b4,b6) | 30 (b1,b3) | 38 (b0,b2) | CLK released at 6 | 52 |
+
+The receive loop rebuilds `b = r0<<5 ^ r1<<4 ^ r2<<1 ^ r3` from raw port reads
+(`lda`/`eor $1800`, three `asl` between r1 and r2, one elsewhere). The device
+number inputs PB5/PB6 (K) add the constant `K ^ K<<1`, which `open` patches
+into an `eor #` in the loop's free slot. Loops sit in one page each
+(`PAGEFIT`), operands are page-aligned or self-modified, so every count is
+exact; `test_drive_schedule_matches_timing_table` traces them.
+
+### Adapter offsets (clocks from the detecting poll, byte i adds i periods)
+
+Same budgets and formulas as v9 (`X_SAMPLE`, `X_CHANGE`); P0 of the first
+written byte goes out at detection, P0 of each later byte midway between the
+previous byte's last read and its first.
+
+| | 1 MHz (16 clocks/cycle) | 2 MHz (8 clocks/cycle) |
+|---|---|---|
+| read samples, period | 325 613 901 1093, 1072 | 165 309 453 549, 536 |
+| write changes (P0 first, P1-P3, next P0, release) | 4 244 388 532 804 672, 832 | 4 116 188 260 396 336, 416 |
+| smallest slack, read / write | 5.31 / 2.81 us | 2.31 / 1.06 us |
+| with 200 ppm over a 64-byte burst | 4.45 / 2.15 us | 1.88 / 0.73 us |
+
+`python -m nybulah.simx` prints these from `BurstTiming`; `xum1541/misc/x_timing.py`
+steps the compiled burst routines (three bytes, bank switch included) against
+the same `X_SAMPLE`/`X_CHANGE` values. The co-simulation passes at 0.95x the
+smallest slack with R at its budget and drive sampling jitter, and at
++-200 ppm, and fails beyond the largest slack plus P, 2V and R or at the drift
+that moves the last byte that far (`tests/test_proto_xb.py`).
+
+### Monitor commands
+
+`monitor_xb.bin` replaces the byte commands with 5-byte command bursts
+`addr len op` (little endian) received into zero page `$30-$34`:
+
+```
+'R' addr len  -> len bytes from addr, then s1 s2 op
+'W' addr len  <- len bytes to addr,   then s1 s2 op
+'J' addr      -> jsr addr, then A X Y
+'Q'           exit handshake, return to DOS
+```
+
+A truncated command burst leaves op 0, which the drive ignores. The check is
+the v9 one over command and data, except that the send loop enters each update
+with carry = bit 3 of the byte (`fastx.xbsum`); blocks are up to 8 KiB and
+repeated on a mismatch. Zero page `$30-$36` is saved and restored.
+
+### Throughput
+
+| Path | cycles/byte | 1 MHz | 2 MHz (1571) |
+|---|---|---|---|
+| burst read (67 + about 165 per burst) | 69.6 | 14.4 KB/s | 28.8 KB/s |
+| burst write (52 + about 165 per burst) | 54.6 | 18.3 KB/s | 36.7 KB/s |
+
+Co-simulation, drive-bound; the same model gives the v9 rates within 1 % of
+the hardware measurements.
+
 ## 1571 SRQ fast serial
 
-The 1571's CIA shift register clocks a byte out on DATA with SRQ as the bit
-clock at up to phi2/4 (500 kbit/s at 2 MHz), with no per-bit drive code; the
-ZoomFloppy already samples SRQ edges (`iec_srq_read`). That is roughly 5x X
-at 2 MHz and also ATN-free, so idle drives on the bus are unaffected (1541s
-ignore SRQ). It needs the 1571 in fast-serial mode and its own drive routine,
-and only helps the 1571; X stays the common path. Both are separate from
-track capture, so a capture routine that starts at the index pulse can hand
-its buffer to either transport afterwards.
+Not implemented; see [protocol-review.md](protocol-review.md) for the
+estimate (about 2x burst X on a 1571 at 2 MHz) and what it needs.

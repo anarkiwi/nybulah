@@ -4,6 +4,8 @@
 ;   1  proto_s1.inc  S1: CLK/DATA only, safe with other drives on the bus
 ;   2  proto_s2.inc  S2: ATN-strobed, only this drive may be listening
 ;   3  proto_x.inc   firmware-assisted protocol, built only when present
+;   4  proto_xb.inc  its burst form (firmware v10); supplies its own command
+;                    loop (5-byte command bursts, checked blocks)
 ; A transport defines open, close, tosend, torecv, getbyte (returns A) and
 ; sendbyte (sends A). getbyte/sendbyte may use A, X and tmp/tmp+1 but must
 ; preserve Y; each starts with WDRESET and spins only through WAIT. close
@@ -58,7 +60,11 @@ WD_IDLE_TICKS = CLOCK_HZ / 1000 * WD_IDLE_MS / WD_PERIOD
 ptr     = $30
 len     = $32
 tmp     = $34
+.if PROTO = 4
+zpsize  = 7
+.else
 zpsize  = 6
+.endif
 
 ; Restart the no-progress budget (wdload ticks). Clobbers A.
 .macro WDRESET
@@ -86,6 +92,9 @@ done:
 .endmacro
 
         .segment "CODE"
+.if PROTO = 4
+        .org $0500                      ; absolute, so loops can be page-fitted
+.endif
 
 start:  sei
         tsx
@@ -117,6 +126,9 @@ start:  sei
         sta wdload
         WDRESET
         jsr open
+.if PROTO = 4
+        jmp loop
+.else
 
 loop:   ldx #WD_IDLE_TICKS
         stx wdload
@@ -132,6 +144,7 @@ loop:   ldx #WD_IDLE_TICKS
         cmp #'Q'
         bne loop
         jsr close
+.endif
 
 exit:   ldx savesp
         txs
@@ -161,6 +174,8 @@ wdtick: bit T1CL
         dec wdcnt
         beq exit
         rts
+
+.if PROTO <> 4
 
 cmd_read:
         jsr getargs
@@ -226,6 +241,7 @@ declen: lda len
         lda len
         ora len+1
         rts
+.endif
 
 .if PROTO = 1
         .include "proto_s1.inc"
@@ -233,13 +249,18 @@ declen: lda len
         .include "proto_s2.inc"
 .elseif PROTO = 3
         .include "proto_x.inc"
+.elseif PROTO = 4
+        .include "proto_xb.inc"
 .else
-        .error "PROTO must be 1, 2 or 3"
+        .error "PROTO must be 1, 2, 3 or 4"
 .endif
 
 zpsave: .res zpsize
 viasave: .res 4                 ; ACR, IER, T1 latch lo/hi
 regs:   .res 3
+.if PROTO = 4
+.assert regs & (XB_BURST - 1) <= XB_BURST - 3, error, "regs crosses a burst"
+.endif
 savesp: .res 1
 wdcnt:  .res 1
 wdload: .res 1

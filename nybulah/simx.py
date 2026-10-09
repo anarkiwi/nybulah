@@ -1,13 +1,14 @@
-"""Timed co-simulation of the X transport (drive/proto_x.inc) against an xum1541 model.
+"""Timed co-simulation of X (drive/proto_x.inc) and burst X (proto_xb.inc) with xum1541.
 
-Times are in microseconds; port accesses happen mid final cycle, assertions are instant
-and releases read asserted for `rise`. SimX mirrors the firmware's per-byte go, SYNC
-detection and pair timing; `python -m nybulah.simx` prints the derived timing table.
+Times in us; port accesses happen mid final cycle, assertions are instant, releases read
+asserted for `rise`. SimX mirrors the firmware's go, SYNC detection and pair timing (the
+burst model in its integer clocks); `python -m nybulah.simx` prints the timing tables.
 """
 
 import argparse
 import dataclasses
 import math
+from collections import Counter
 from functools import cached_property
 
 import numpy as np
@@ -33,6 +34,15 @@ SEND_PAIRS = ((1, 3), (5, 7), (0, 2), (4, 6))
 RECV_PAIRS = ((0, 2), (1, 3), (4, 6), (5, 7))
 GRACE = 32
 AVR_HZ = 16_000_000
+XB_BURST = 64
+XB_BANK = 32
+XB_SEND = (14, 26, 50, 62, 74)
+XB_SEND_PERIOD = 67
+XB_RECV = (6, 12, 20, 30, 38)
+XB_RECV_PERIOD = 52
+XB_SEND_PAIRS = ((1, 3), (5, 7), (0, 2), (4, 6))
+XB_RECV_PAIRS = ((5, 7), (4, 6), (1, 3), (0, 2))
+AVR_RISE, AVR_POLL, AVR_SYNC, AVR_FOUND = 16, 6, 1, 4
 
 
 class XError(OpenCBMError):
@@ -67,9 +77,9 @@ def decode(samples, pairs):
 class Timing:
     """Adapter offsets from the SYNC detection, centred in the drive's windows.
 
-    cyc: drive cycle in us (0.5 for a 1571 at 2 MHz); rise: release budget; poll,
-    sync: adapter edge loop and synchroniser; via: drive sampling error (cyc/2);
-    turn: adapter time from the last sample to the next go.
+    cyc: drive cycle in us; rise: release budget; poll, sync: adapter edge loop and
+    synchroniser; via: drive sampling error (cyc/2); turn: adapter time from the last
+    sample to the next go; slice, timeout: go retraction slice and I/O timeout.
     """
 
     cyc: float = 1.0
@@ -78,6 +88,8 @@ class Timing:
     sync: float = 1 / 16
     via: float | None = None
     turn: float = 3.0
+    slice: float = 20_000.0
+    timeout: float = 200_000.0
 
     @property
     def v(self):
@@ -119,6 +131,109 @@ class Timing:
             "sample": [round(x * f) for x in self.sample],
             "drive": [round(x * f) for x in self.drive],
         }
+
+
+def out_ready(k, current, busy):
+    """Firmware rule for starting a k-byte write burst on the OUT endpoint: the CPU
+    sees only the current bank (current bytes); busy is NBUSYBK, a count of filled
+    banks (two read 0b10). A burst past one bank needs it full and the next filled."""
+    return current == XB_BANK and busy == 2 if k > XB_BANK else current >= k
+
+
+def out_banks(k):
+    """(current bank bytes, NBUSYBK) once the host's packets for k bytes arrived."""
+    return min(k, XB_BANK), min(-(-k // XB_BANK), 2)
+
+
+@dataclasses.dataclass(frozen=True)
+class BurstTiming:
+    """Firmware v10 burst offsets in adapter clocks (x.c X_SAMPLE/X_CHANGE).
+
+    f: clocks per drive cycle (16 at 1 MHz, 8 at 2 MHz); offsets count from the SYNC
+    poll, byte i adds i periods, against XB_SEND/XB_RECV (drive cycles after SYNC).
+    rise, poll, sync: adapter budgets in clocks; via: drive sampling error in us.
+    """
+
+    f: int = 16
+    rise: int = AVR_RISE
+    poll: int = AVR_POLL
+    sync: int = AVR_SYNC
+    via: float | None = None
+
+    @property
+    def cyc(self):
+        """Drive cycle in us."""
+        return self.f / 16
+
+    @property
+    def v(self):
+        """Drive port sampling uncertainty (us)."""
+        return 0.5 * self.cyc if self.via is None else self.via
+
+    @property
+    def send_period(self):
+        """Clocks per drive -> host byte."""
+        return XB_SEND_PERIOD * self.f
+
+    @property
+    def recv_period(self):
+        """Clocks per host -> drive byte."""
+        return XB_RECV_PERIOD * self.f
+
+    @cached_property
+    def sample(self):
+        """Drive -> host: sample clocks of P0..P3, centred in [write + rise, next)."""
+        w = XB_SEND
+        return tuple(
+            ((w[k] + w[k + 1]) * self.f + self.rise - self.poll) // 2 for k in range(4)
+        )
+
+    def _mid(self, a, b):
+        return ((a + b) * self.f - self.poll - self.rise) // 2 - self.sync
+
+    @cached_property
+    def change(self):
+        """Host -> drive: P0 at detection, P1..P3, the next byte's P0, release."""
+        r, n = XB_RECV, XB_RECV_PERIOD
+        mids = tuple(self._mid(r[k], r[k + 1]) for k in (1, 2, 3))
+        return (AVR_FOUND,) + mids + (self._mid(r[4], r[1] + n), (r[4] + 4) * self.f)
+
+    def send_slack(self, ppm=0.0, n=XB_BURST):
+        """Per pair (left, right) slack in us of the worst byte of an n-byte burst."""
+        w, c, e = XB_SEND, self.cyc, abs(ppm) * 1e-6
+        d = (self.sample[3] + (n - 1) * self.send_period) / 16 * e
+        return tuple(
+            (
+                self.sample[k] / 16 - (w[k] * c + self.rise / 16) - d,
+                w[k + 1] * c - (self.sample[k] + self.poll) / 16 - d,
+            )
+            for k in range(4)
+        )
+
+    def recv_slack(self, ppm=0.0, n=XB_BURST):
+        """Per change (left, right) slack in us: P0 of byte 0, P1..P3, P0 of the next
+        byte, and the left slack of the final release."""
+        r, ch = np.array(XB_RECV) * self.cyc, np.array(self.change) / 16
+        d = (self.change[5] + (n - 1) * self.recv_period) / 16 * abs(ppm) * 1e-6
+        early, late = self.sync / 16, (self.sync + self.poll + self.rise) / 16
+        prev = r[1:] + self.v
+        nxt = np.append(r[2:], r[1] + XB_RECV_PERIOD * self.cyc) - self.v
+        left, right = early + ch[1:5] - prev - d, nxt - late - ch[1:5] - d
+        first = (
+            r[1] - self.v - max(r[0], late - self.rise / 16 + ch[0]) - self.rise / 16
+        )
+        return (
+            ((math.inf, first),)
+            + tuple(zip(left, right))
+            + ((early + ch[5] - prev[3] - d, math.inf),)
+        )
+
+    def margin(self, ppm=0.0, n=XB_BURST):
+        """Smallest (send, recv) slack in us."""
+        return (
+            min(min(p) for p in self.send_slack(ppm, n)),
+            min(min(p) for p in self.recv_slack(ppm, n)),
+        )
 
 
 class TimedBus(Bus):
@@ -254,23 +369,44 @@ class TimedDrive1571(TimedDrive1541):
 
 
 class SimX(SimCBM):
-    """SimCBM plus the xum1541 X protocol model (x_read/x_write, x2_* at 2 MHz).
+    """SimCBM plus the xum1541 X model (x_*, x2_* at 2 MHz) and burst X (xb_*, xb2_*).
 
-    skew shifts adapter offsets; faults: byte ordinal -> (pair, line) flipped on the
-    wire; pause: byte ordinal -> stall (us) before go; vanish_at: byte ordinal.
+    skew shifts adapter offsets; ppm scales burst offsets (adapter clock error); faults:
+    byte ordinal -> (pair, line) flipped; pause: byte ordinal -> stall (us) before go;
+    vanish_at: byte ordinal. firmware < 10 lacks burst X.
     """
 
     def __init__(self, drive, dev=8, timing=None, seed=0, **kw):
         super().__init__(drive, dev, kw.pop("budget", 4_000_000))
-        self.timing = timing or Timing(cyc=drive.cyc)
+        slice_us = kw.pop("slice_us", Timing.slice)
+        timeout_us = kw.pop("timeout_us", Timing.timeout)
+        self.timing = timing or Timing(drive.cyc, slice=slice_us, timeout=timeout_us)
         self.rng = np.random.default_rng(seed)
-        self.slice_us = kw.pop("slice_us", 20_000.0)
-        self.timeout_us = kw.pop("timeout_us", 200_000.0)
+        self.firmware = kw.pop("firmware", 10)
         if kw:
             raise TypeError(f"unexpected {sorted(kw)}")
-        self.skew, self.faults, self.pause, self.vanish_at = 0.0, {}, {}, None
+        self.skew, self.ppm, self.faults, self.pause = 0.0, 0.0, {}, {}
+        self.vanish_at = None
         self.now, self.ordinal, self._go = 0.0, 0, False
-        self.retracts = 0
+        self.count = Counter()
+
+    @property
+    def retracts(self):
+        """Go withdrawals after a slice without SYNC."""
+        return self.count["retracts"]
+
+    @property
+    def bursts(self):
+        """Burst transfers started."""
+        return self.count["bursts"]
+
+    out_ready = staticmethod(out_ready)
+
+    def supports(self, protocol):
+        """Whether this adapter speaks protocol ("xb" needs firmware 10)."""
+        if protocol == "xb":
+            return self.firmware >= 10
+        return hasattr(self, f"{protocol}_read")
 
     def _advance(self, t):
         d = self.drive
@@ -306,40 +442,42 @@ class SimX(SimCBM):
         del edges
         self.vanish_at = self.ordinal + after_bytes
 
-    def _sync(self):
-        """Assert go and return the SYNC detection time, retracting on slices."""
+    def _sync(self, n=1):
+        """Assert go for the next n bytes and return the SYNC detection time,
+        retracting on slices."""
         if self.gap:
             self.idle(self.gap)
-        if self.vanish_at == self.ordinal:
+        span = range(self.ordinal, self.ordinal + n)
+        if self.vanish_at in span:
             self.vanish_at = None
             raise HostGone("adapter vanished")
         self.now = max(self.now, self.drive.time(self.drive.cycles))
-        self.now += self.pause.pop(self.ordinal, 0.0)
+        self.now += sum(self.pause.pop(i, 0.0) for i in span)
         start = self.now
         grace = GRACE * self.timing.cyc
         while True:
             if not self._go:
                 self._host(IEC_DATA, self.now)
                 self._go = True
-            end = self.now + self.slice_us
+            end = self.now + self.timing.slice
             t = self._poll_until(IEC_CLOCK, False, self.now, end)
             if t is not None:
                 t = self._poll_until(IEC_CLOCK, True, t, end)
             if t is None:
                 self._host(0, end)
                 self._go = False
-                self.retracts += 1
+                self.count["retracts"] += 1
                 t = self._poll_until(IEC_CLOCK, True, end, end + grace)
             if t is not None:
                 self.now = t
-                self.ordinal += 1
+                self.ordinal += n
                 return t
             self.now = end + grace
-            if self.now - start > self.timeout_us:
+            if self.now - start > self.timing.timeout:
                 raise XTimeout("no SYNC from drive")
 
-    def _flip(self, k):
-        f = self.faults.get(self.ordinal - 1)
+    def _flip(self, k, ordinal=None):
+        f = self.faults.get(self.ordinal - 1 if ordinal is None else ordinal)
         return f[1] if f and f[0] == k else 0
 
     def _fail(self, e, partial):
@@ -395,6 +533,86 @@ class SimX(SimCBM):
 
     s3_read, s3_write = x_read, x_write
 
+    def _clock(self, t, clocks):
+        """Time of an adapter offset from the detection at t."""
+        return t + clocks * (1 + self.ppm * 1e-6) / 16 + self.skew
+
+    def _burst_timing(self, f):
+        return BurstTiming(f or round(16 * self.timing.cyc), via=self.timing.via)
+
+    def xb_read(self, size, f=None):
+        """Drive -> host burst transfer of size bytes (f defaults to the timing's
+        drive clock, as x_read does)."""
+        bt, out = self._burst_timing(f), bytearray()
+        while len(out) < size:
+            n = min(XB_BURST, size - len(out))
+            first = self.ordinal
+            try:
+                t = self._sync(n)
+            except (XTimeout, HostGone) as e:
+                raise self._fail(e, out)
+            self._host(0, t + (AVR_FOUND + 2) / 16)
+            self._go = False
+            self.count["bursts"] += 1
+            for i in range(n):
+                samples = []
+                for k, off in enumerate(bt.sample):
+                    at = self._clock(t, off + i * bt.send_period) - bt.sync / 16
+                    self._advance(at)
+                    samples.append(self.bus.level(at) ^ self._flip(k, first + i))
+                out.append(decode(samples, XB_SEND_PAIRS))
+            self.now = at + self.timing.turn
+        return bytes(out)
+
+    def _xb_changes(self, bt, burst, first):
+        """(clock, lines) of a host -> drive burst: P0 at detection, P1..P3, the next
+        byte's P0 and, after the last byte, the release."""
+        pairs = [
+            [
+                v ^ self._flip(k, first + i)
+                for k, v in enumerate(encode(b, XB_RECV_PAIRS))
+            ]
+            for i, b in enumerate(burst)
+        ]
+        out = [(bt.change[0], pairs[0][0])]
+        for i, p in enumerate(pairs):
+            base = i * bt.recv_period
+            out += [(base + bt.change[k], p[k]) for k in (1, 2, 3)]
+            more = i + 1 < len(pairs)
+            out.append(
+                (base + bt.change[4 if more else 5], pairs[i + 1][0] if more else 0)
+            )
+        return out
+
+    def xb_write(self, data, f=None):
+        """Host -> drive burst transfer."""
+        bt, data = self._burst_timing(f), bytes(data)
+        for j in range(0, len(data), XB_BURST):
+            burst, first = data[j : j + XB_BURST], self.ordinal
+            try:
+                if not self.out_ready(len(burst), *out_banks(len(burst))):
+                    self.now += self.timing.timeout
+                    raise XTimeout("OUT endpoint never ready")
+                t = self._sync(len(burst))
+            except (XTimeout, HostGone) as e:
+                raise self._fail(e, data[:j])
+            self.count["bursts"] += 1
+            for clock, lines in self._xb_changes(bt, burst, first):
+                at = self._clock(t, clock)
+                self._advance(at)
+                self._host(lines, at)
+            self._go = False
+            self.now = at + self.timing.turn
+        self._advance(self.now)
+
+    def xb2_read(self, size):
+        """Burst read timed for a 1571 at 2 MHz."""
+        return self.xb_read(size, 8)
+
+    def xb2_write(self, data):
+        """Burst write timed for a 1571 at 2 MHz."""
+        self.xb_write(data, 8)
+
 
 TIMED = {Drive1541: TimedDrive1541, Drive1571: TimedDrive1571}
 
@@ -418,12 +636,20 @@ def make(model="1541", cyc=1.0, rise=0.5, peers=0, dev=8, **kw):
 
 
 def report(cyc):
-    """Derived offsets and margins for one drive clock."""
+    """Derived offsets and margins for one drive clock (v9 and burst)."""
     t = Timing(cyc=cyc)
     r = {"cyc_us": cyc}
     for k in ("sample", "send_margin", "drive", "recv_margin"):
         r[k + "_us"] = [round(float(x), 3) for x in getattr(t, k)]
     r["avr_cycles"] = t.avr_cycles()
+    b = BurstTiming(round(16 * cyc))
+    r["burst"] = {
+        "sample": list(b.sample),
+        "change": list(b.change),
+        "period": [b.send_period, b.recv_period],
+        "margin_us": [round(float(x), 3) for x in b.margin()],
+        "margin_200ppm_us": [round(float(x), 3) for x in b.margin(200)],
+    }
     return r
 
 

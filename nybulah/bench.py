@@ -36,6 +36,7 @@ def run(cbm, dev, addr, size, reps, protocol="s1", pattern=None, fast=False):
             lambda: got.append(mon.read(addr, size)), size, reps, "read"
         )
         want = np.frombuffer(pattern, np.uint8)
+        out["rejects"] = getattr(mon.link, "rejects", 0)
         out["errors"] = sum(
             int(np.count_nonzero(np.frombuffer(g, np.uint8) != want)) for g in got
         )

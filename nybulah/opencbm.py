@@ -53,6 +53,20 @@ class OpenCBMError(IOError):
     """A libopencbm call reported failure."""
 
 
+def _transfers(proto, what):
+    """(read, write) methods for the plugin's opencbm_plugin_<proto>_read_n/_write_n."""
+
+    def read(self, size):
+        return self.read_n(proto, size)
+
+    def write(self, data):
+        self.write_n(proto, data)
+
+    read.__doc__ = f"Read size bytes with {what}."
+    write.__doc__ = f"Write bytes with {what}."
+    return read, write
+
+
 def load_library(name="opencbm"):
     """Load libopencbm and attach prototypes."""
     lib = ctypes.CDLL(ctypes.util.find_library(name) or f"lib{name}.so.0")
@@ -158,55 +172,33 @@ class OpenCBM:
             self._plugin[name] = proto(addr)
         return self._plugin[name]
 
-    def _read_n(self, proto, size):
+    def read_n(self, proto, size):
+        """Read size bytes through opencbm_plugin_<proto>_read_n."""
         buf = ctypes.create_string_buffer(size)
         fn = self._xfer(f"opencbm_plugin_{proto}_read_n")
         self._check(fn(self.fd, buf, size), f"{proto}_read", size)
         return buf.raw
 
-    def _write_n(self, proto, data):
+    def write_n(self, proto, data):
+        """Write bytes through opencbm_plugin_<proto>_write_n."""
         data = bytes(data)
         fn = self._xfer(f"opencbm_plugin_{proto}_write_n")
         self._check(fn(self.fd, data, len(data)), f"{proto}_write", len(data))
 
-    def s1_read(self, size):
-        """Read size bytes with the S1 protocol (CLK/DATA only)."""
-        return self._read_n("s1", size)
-
-    def s1_write(self, data):
-        """Write bytes with the S1 protocol (CLK/DATA only)."""
-        self._write_n("s1", data)
-
-    def s2_read(self, size):
-        """Read size bytes with the S2 protocol (ATN strobed)."""
-        return self._read_n("s2", size)
-
-    def s2_write(self, data):
-        """Write bytes with the S2 protocol (ATN strobed)."""
-        self._write_n("s2", data)
-
-    def s3_read(self, size):
-        """Read size bytes with the X protocol (xum1541 firmware v9+)."""
-        return self._read_n("x", size)
-
-    def s3_write(self, data):
-        """Write bytes with the X protocol (xum1541 firmware v9+)."""
-        self._write_n("x", data)
-
-    def x2_read(self, size):
-        """Read size bytes with the X protocol timed for a 1571 at 2 MHz."""
-        return self._read_n("x2", size)
-
-    def x2_write(self, data):
-        """Write bytes with the X protocol timed for a 1571 at 2 MHz."""
-        self._write_n("x2", data)
+    s1_read, s1_write = _transfers("s1", "the S1 protocol (CLK/DATA only)")
+    s2_read, s2_write = _transfers("s2", "the S2 protocol (ATN strobed)")
+    s3_read, s3_write = _transfers("x", "the X protocol (xum1541 firmware v9+)")
+    x2_read, x2_write = _transfers("x2", "X timed for a 1571 at 2 MHz")
+    xb_read, xb_write = _transfers("xb", "burst X (xum1541 firmware v10+)")
+    xb2_read, xb2_write = _transfers("xb2", "burst X timed for a 1571 at 2 MHz")
 
     def supports(self, protocol):
-        """Whether plugin and firmware speak protocol; s3 is probed with an empty read."""
-        if protocol != "s3":
+        """Whether plugin and firmware speak protocol; s3 (X) and xb (burst X) are
+        probed with an empty read."""
+        if protocol not in ("s3", "xb"):
             return hasattr(self, f"{protocol}_read")
         try:
-            self._read_n("x", 0)
+            self.read_n("x" if protocol == "s3" else "xb", 0)
         except OpenCBMError:
             return False
         return True

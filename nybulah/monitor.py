@@ -7,7 +7,7 @@ import struct
 import time
 from importlib import resources
 
-from .fastx import XLink
+from .fastx import XBLink, XLink
 from .link import (
     BASE,
     CLOCK_HZ,
@@ -65,11 +65,20 @@ def drivecode(name):
     raise FileNotFoundError(f"{name}.bin: build drive/ or set NYBULAH_DRIVECODE")
 
 
+def _drivecode_names():
+    return {f.name for d in _drivecode_dirs() if d.is_dir() for f in d.iterdir()}
+
+
 def protocols():
     """Protocols with an assembled monitor available."""
-    names = (f.name for d in _drivecode_dirs() if d.is_dir() for f in d.iterdir())
     return tuple(
-        sorted({m[1] for n in names if (m := re.match(r"monitor_(\w+)\.bin$", n))})
+        sorted(
+            {
+                m[1]
+                for n in _drivecode_names()
+                if (m := re.match(r"monitor_(s\d+)\.bin$", n))
+            }
+        )
     )
 
 
@@ -114,6 +123,15 @@ def recover(cbm, dev, resets=2, timeout=3.0, poll=0.1):
 LINKS = {"s1": S1Link, "s2": S2Link, "s3": XLink}
 
 
+def link_class(cbm, protocol):
+    """The link for protocol: s3 uses burst X when adapter and drive code allow."""
+    if protocol == "s3" and f"{XBLink.code_name}.bin" in _drivecode_names():
+        probe = getattr(cbm, "supports", None)
+        if probe("xb") if probe else hasattr(cbm, "xb_read"):
+            return XBLink
+    return LINKS[protocol]
+
+
 class Monitor:
     """Upload, start and talk to the monitor on one drive.
 
@@ -138,8 +156,10 @@ class Monitor:
         if not supported(cbm, protocol):
             raise ValueError(f"protocol must be one of {protocols()}")
         self.cbm, self.dev, self.protocol = cbm, dev, protocol
-        self.code = code if code is not None else drivecode(f"monitor_{protocol}")
-        self.link = LINKS[protocol](self)
+        cls = link_class(cbm, protocol)
+        name = getattr(cls, "code_name", f"monitor_{protocol}")
+        self.code = code if code is not None else drivecode(name)
+        self.link = cls(self)
         self.running = False
         self.timeout, self.idle_s, self.clock = timeout, idle_s, clock
         self._last = clock()

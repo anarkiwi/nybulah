@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1
 # OPENCBM_SOURCE=git builds libopencbm and the xum1541 plugin (bounded waits, X
-# protocol) from OPENCBM_REPO at OPENCBM_REF; OPENCBM_SOURCE=image uses OPENCBM_IMAGE.
+# protocol) from OPENCBM_REPO at OPENCBM_REF; OPENCBM_SOURCE=local builds them from
+# the build context named opencbm (--build-context opencbm=<OpenCBM tree>);
+# OPENCBM_SOURCE=image uses OPENCBM_IMAGE.
 ARG OPENCBM_SOURCE=git
 ARG OPENCBM_IMAGE=anarkiwi/opencbm:latest
 ARG OPENCBM_REPO=https://github.com/anarkiwi/OpenCBM
-ARG OPENCBM_REF=1617823447e3b4d663cb058dd74b0aa17d579703
+ARG OPENCBM_REF=07a95bdfd677533d44e8078715ca2dcecd13c7ef
 
 FROM ubuntu:26.04 AS drivecode
 RUN apt-get update && apt-get install -y --no-install-recommends cc65 make \
@@ -12,17 +14,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends cc65 make \
 COPY drive/ /src/drive/
 RUN mkdir -p /out && make -C /src/drive OUT=/out
 
-FROM ubuntu:24.04 AS opencbm-build
+FROM ubuntu:24.04 AS opencbm-deps
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cc65 git libncurses-dev libusb-1.0-0-dev \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+FROM opencbm-deps AS opencbm-src-git
 ARG OPENCBM_REPO
 ARG OPENCBM_REF
 RUN git init -q /src \
     && git -C /src fetch -q --depth 1 "${OPENCBM_REPO}" "${OPENCBM_REF}" \
     && git -C /src checkout -q FETCH_HEAD
+
+FROM opencbm-deps AS opencbm-src-local
+COPY --from=opencbm . /src
+
+FROM opencbm-src-${OPENCBM_SOURCE} AS opencbm-build
 WORKDIR /src
 RUN make -f LINUX/Makefile opencbm plugin-xum1541 \
     && make -f LINUX/Makefile DESTDIR=/out install install-plugin-xum1541
@@ -36,6 +45,8 @@ COPY --from=opencbm-build /out/etc/opencbm.conf /etc/opencbm.conf
 COPY --from=opencbm-build /out/etc/opencbm.conf.d/ /etc/opencbm.conf.d/
 COPY --from=opencbm-build /out/etc/udev/rules.d/ /etc/udev/rules.d/
 RUN echo /usr/local/lib > /etc/ld.so.conf.d/opencbm.conf && ldconfig
+
+FROM opencbm-git AS opencbm-local
 
 FROM ${OPENCBM_IMAGE} AS opencbm-image
 

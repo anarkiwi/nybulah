@@ -1,4 +1,8 @@
-"""S3 link for Monitor: the X transport (xum1541 v9+) with checked block transfers."""
+"""S3 links for Monitor: the X transport with checked block transfers.
+
+XLink speaks firmware v9 X (per-byte go/SYNC, drive/proto_x.inc); XBLink the v10
+burst form (drive/proto_xb.inc), chosen whenever the adapter supports it.
+"""
 
 import struct
 
@@ -8,7 +12,10 @@ from .link import BASE, WATCHDOG_IDLE_S, BusError, HandshakeTimeout, S1Link
 from .opencbm import IEC_CLOCK, IEC_DATA, OpenCBMError
 
 TAG = b"NYBX"
+XB_TAG = b"NYXB"
 CHUNK = 0x1000
+XB_CHUNK = 0x2000
+XB_BURST = 64
 VIA1PA = 0x1801
 PA_2MHZ = 0x20
 CLOCK_CODE = {
@@ -19,11 +26,23 @@ CLOCK_TAIL = bytes([0x8D]) + struct.pack("<H", VIA1PA) + b"\x60"
 
 
 def xsum(data):
-    """Block check of sendblk/recvblk: (s1, s2)."""
-    s = np.cumsum(np.frombuffer(bytes(data), np.uint8), dtype=np.int64)
+    """Block check of sendblk/recvblk: (s1, s2) over bytes or per-byte addends."""
+    if isinstance(data, np.ndarray):
+        b = data.astype(np.int64)
+    else:
+        b = np.frombuffer(bytes(data), np.uint8)
+    s = np.cumsum(b, dtype=np.int64)
     if not s.size:
         return 0, 0
     return int(s[-1] & 0xFF), int(((s & 0xFF).sum() + (s[-1] >> 8)) & 0xFF)
+
+
+def xbsum(received, sent=b""):
+    """Burst check: received bytes add b, sent bytes add b plus bit 3 of b (the
+    carry the drive's send loop leaves)."""
+    r = np.frombuffer(bytes(received), np.uint8).astype(np.int64)
+    t = np.frombuffer(bytes(sent), np.uint8).astype(np.int64)
+    return xsum(np.concatenate((r, t + (t >> 3 & 1))))
 
 
 class ChecksumError(BusError):
@@ -39,6 +58,8 @@ class XLink(S1Link):
 
     idle_line = 0
     retries = 3
+    code_name = "monitor_s3"
+    speeds = {False: "s3", True: "x2"}
 
     def __init__(self, mon):
         super().__init__(mon)
@@ -61,9 +82,9 @@ class XLink(S1Link):
         if addr + len(code) > 0x0800:
             raise ValueError("no room for the clock switch after the monitor")
         self.write(addr, code)
-        self.tx(b"J" + struct.pack("<H", addr))
+        self.send(b"J" + struct.pack("<H", addr))
         self.fast = fast
-        speed = "x2" if fast else "s3"
+        speed = self.speeds[fast]
         self.rx = getattr(self.cbm, f"{speed}_read")
         self.tx = getattr(self.cbm, f"{speed}_write")
         self.mon.idle_s *= 0.5 if fast else 2.0
@@ -149,3 +170,66 @@ class XLink(S1Link):
                 return xsum(block) == tuple(self.mon.transact(cmd, 3)[:2]), None
 
             self._checked(op)
+
+
+class XBLink(XLink):
+    """Firmware v10 burst X: 5-byte command bursts (addr, len, op), checked blocks.
+
+    The adapter cuts a transfer into XB_BURST-byte bursts from its start, the drive at
+    XB_BURST-aligned addresses, so an unaligned block moves its head separately.
+    """
+
+    code_name = "monitor_xb"
+    speeds = {False: "xb", True: "xb2"}
+    chunk = XB_CHUNK
+
+    def __init__(self, mon):
+        if XB_TAG not in mon.code:
+            raise ValueError("monitor code lacks the NYXB tag")
+        super(XLink, self).__init__(mon)  # pylint: disable=bad-super-call
+        self.rx, self.tx = self.cbm.xb_read, self.cbm.xb_write
+        self.rejects = 0
+        self.fast = False
+
+    @staticmethod
+    def packet(payload):
+        """5-byte command burst for a v9-style payload (op, then addr and len)."""
+        return payload[1:5].ljust(4, b"\0") + payload[:1]
+
+    def send(self, payload):
+        super().send(self.packet(payload))
+
+    def _split(self, addr, n):
+        head = min(n, XB_BURST - addr % XB_BURST)
+        return [m for m in (head, n - head) if m]
+
+    def _block(self, op, addr, n, data=None):
+        cmd = self.packet(op + struct.pack("<HH", addr, n))
+        self.mon.transact(op + struct.pack("<HH", addr, n))
+        if data is None:
+            got = b"".join(self.rx(m) for m in self._split(addr, n))
+            check = xbsum(cmd, got)
+        else:
+            got = None
+            at = 0
+            for m in self._split(addr, n):
+                self.tx(data[at : at + m])
+                at += m
+            check = xbsum(cmd + data)
+        reply = self.rx(3)
+        self.mon.touch()
+        return check == tuple(reply[:2]), got
+
+    def read(self, addr, size):
+        """Read size bytes, chunk at a time, each checked."""
+        out = bytearray()
+        for a in range(addr, addr + size, self.chunk):
+            n = min(self.chunk, addr + size - a)
+            out += self._checked(lambda a=a, n=n: self._block(b"R", a, n))
+        return bytes(out)
+
+    def write(self, addr, data):
+        """Write bytes, chunk at a time, each checked."""
+        for i in range(0, len(data), self.chunk):
+            block = bytes(data[i : i + self.chunk])
+            self._checked(lambda a=addr + i, b=block: self._block(b"W", a, len(b), b))
