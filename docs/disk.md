@@ -37,6 +37,11 @@ it opens a session, and restores them on close. On a 1571 it also selects
 | Buffer (31 pages) | `$8000-$9EFF` | `$6000-$7EFF` |
 | `PASS` code (1 page, holds **write**) | `$9F00` | `$7F00` |
 
+A streaming Nibbler (1571, s4, firmware v12) keeps the `SEEK` build of
+`track.s` at `$0300` and loads the stream code over it to stream; RAM passes
+and writes load `track_1571.bin` there first, and refuse with `TrackError`
+when its `PASS` page does not read back from expansion RAM.
+
 - **prep** sets the motor, LED and density bits. On a 1571 it also sets the
   side bit (VIA1 PA2). It steps a signed number of halftracks with a delay per
   step, then waits a settle time.
@@ -99,7 +104,8 @@ exactly; a byte already waiting when its wait began is pinned from a timed
 neighbour. The extra cycles across a sync are known to the sum of the two
 windows, at most 2 + 7 cycles, against a cell of 3.25 cycles at zone 3. The
 hidden-one count is the feasible integer nearest the middle (0, or enough to
-make 10 ones with the latched ones), and every sync carries the bounds the
+make 10 ones with the latched ones; an excess that fits neither takes the
+nearer, so one below zero is never a sync), and every sync carries the bounds the
 windows allow (`Capture.sync_bounds`). Since 9 cycles is under 3 cells at
 any supported speed, the estimate is within ±1 bit (a few in 10⁴ reach
 ±2 or ±3, inside their bounds), and exact when the windows are narrow.

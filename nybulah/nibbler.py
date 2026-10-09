@@ -414,7 +414,7 @@ def stream_size(revolutions):
     return 64 * math.ceil(2 * per_rev * (revolutions + 2) / 64)
 
 
-class Nibbler:
+class Nibbler:  # pylint: disable=too-many-instance-attributes
     """Track-level access to one drive through a started monitor.
 
     The head position is tracked on the host and found by ``locate()`` the first time
@@ -447,7 +447,7 @@ class Nibbler:
         streaming = self._can_stream() if stream is None else bool(stream)
         if streaming and not self._can_stream():
             raise ValueError("streaming needs a 1571, s4 and xum1541 firmware v12")
-        self._overlay = "" if streaming else None
+        self._streaming, self._overlay = streaming, None
         self.halftrack = None
         self.motor = self._sensing = False
         self._saved = None
@@ -460,7 +460,11 @@ class Nibbler:
     @property
     def streaming(self):
         """Captures stream (drive/stream.s) instead of using expansion RAM."""
-        return self._overlay is not None
+        return self._streaming
+
+    @property
+    def _track_code(self):
+        return f"track_{self.model}"
 
     def _can_stream(self):
         supports = getattr(getattr(self.mon, "cbm", None), "supports", None)
@@ -471,25 +475,35 @@ class Nibbler:
         )
 
     def _load(self, overlay):
-        """Stream mode: put the seek (prep) or stream code at CODE_BASE."""
-        if self._overlay != overlay:
-            code = drivecode(overlay)
-            self.mon.write(CODE_BASE, code[:CODE_SIZE])
-            if code[CODE_SIZE:]:
-                self.mon.write(STREAM_ZP, code[CODE_SIZE:])
-            self._overlay, self._sensing = overlay, False
+        """Put the track, seek (prep) or stream code at CODE_BASE.
+
+        The track code's PASS page goes after the expansion RAM buffer and
+        must read back; the stream code's tail goes to zero page.
+        """
+        if self._overlay == overlay:
+            return
+        code = drivecode(overlay)
+        self._overlay = None
+        self.mon.write(CODE_BASE, code[:CODE_SIZE])
+        tail = code[CODE_SIZE:]
+        if overlay == self._track_code:
+            at = self.buffer + NPAGES * 256
+            self.mon.write(at, tail)
+            if bytes(self.mon.read(at, len(tail))) != tail:
+                raise TrackError(f"no expansion RAM at ${at:04X} for the track code")
+        elif tail:
+            self.mon.write(STREAM_ZP, tail)
+        self._overlay, self._sensing = overlay, False
 
     def open(self):
         """Load the routines and set up VIA state; saves everything close restores."""
         mon = self.mon
+        self._overlay = None
         if self.streaming:
-            self._overlay = ""
             self._load(SEEK_CODE)
             self._saved = [(ZP, mon.read(ZP, ZP_STREAM_SIZE))]
         else:
-            code = drivecode(f"track_{self.model}")
-            mon.write(CODE_BASE, code[:CODE_SIZE])
-            mon.write(self.buffer + NPAGES * 256, code[CODE_SIZE:])
+            self._load(self._track_code)
             self._saved = [(ZP, mon.read(ZP, ZP_SIZE))]
         self._saved.append((PCR2, mon.read(PCR2, 1)))
         if self.model == "1571":
@@ -535,7 +549,7 @@ class Nibbler:
         return self.mon.jsr(entry)[0]
 
     def _prep(self, pbset, side, steps):
-        if self.streaming:
+        if self._overlay == STREAM_CODE:
             self._load(SEEK_CODE)
         while True:
             chunk = max(-127, min(127, steps))
@@ -764,6 +778,7 @@ class Nibbler:
         )
 
     def _pass(self, kind, mode, anchor=b""):
+        self._load(self._track_code)
         self._sensing = False
         self._params(
             mode=mode, npages=NPAGES, kind=kind, alen=len(anchor), anchor=anchor
@@ -837,6 +852,7 @@ class Nibbler:
         if len(data) % 256 or not 0 < len(data) <= NPAGES * 256:
             raise ValueError(f"{len(data)} bytes is not 1..{NPAGES} whole pages")
         density = self.seek(halftrack, density, side)
+        self._load(self._track_code)
         self._sensing = False
         self.mon.write(self.buffer, data)
         self._params(mode=START[start], npages=len(data) // 256)

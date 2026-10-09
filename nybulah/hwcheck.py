@@ -18,8 +18,9 @@ from .nibbler import Nibbler
 class Session:
     """Runs steps against one adapter and streams their records."""
 
-    def __init__(self, cbm, log, recover_timeout=3.0):
+    def __init__(self, cbm, log, recover_timeout=3.0, archive=None):
         self.cbm, self.log, self.recover_timeout = cbm, log, recover_timeout
+        self.archive = archive
         self.records = []
 
     def emit(self, rec):
@@ -55,13 +56,14 @@ class Session:
         self.emit({"step": name, "dev": dev, "ok": None, "skipped": reason})
 
 
-def disk_step(cbm, dev, proto, model, allow_bump=False):
-    """Read one track per density zone without writing anything."""
+def disk_step(cbm, dev, proto, model, allow_bump=False, archive=None):
+    """Read one track per density zone without writing anything; ``archive``
+    saves the captures."""
     with (
         Monitor(cbm, dev, proto) as mon,
         Nibbler(mon, model, allow_bump=allow_bump) as nib,
     ):
-        return disk.survey(nib)
+        return disk.survey(nib, archive=archive)
 
 
 FAST = ("s3", "s4")  # protocols that can run a 1571 at 2 MHz
@@ -118,7 +120,16 @@ def check_dev(  # pylint: disable=too-many-arguments
     else:
         model = probe["model"]
         session.step(
-            "disk", dev, lambda: disk_step(cbm, dev, protos[0], model, allow_bump)
+            "disk",
+            dev,
+            lambda: disk_step(
+                cbm,
+                dev,
+                protos[0],
+                model,
+                allow_bump,
+                session.archive and session.archive / f"dev{dev}",
+            ),
         )
 
 
@@ -176,7 +187,7 @@ def execute(args, cbm):
     args.out.mkdir(parents=True, exist_ok=True)
     path = args.out / f"hwcheck-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     with path.open("w") as log:
-        session = Session(cbm, log, args.recover_timeout)
+        session = Session(cbm, log, args.recover_timeout, path.with_suffix(""))
         for dev in args.devs:
             check_dev(
                 session,

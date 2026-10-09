@@ -167,6 +167,14 @@ def test_run_range_feasibility():
     assert passes.run_range((20.0, 21.0), cells, 2)[0] == 10
 
 
+def test_run_range_excess_that_fits_neither_takes_the_nearer():
+    cells = (3.4, 3.5)
+    assert passes.run_range((-4.85, -0.06), cells, 2) == (0, 2, 2)
+    assert passes.run_range((-np.inf, -0.06), cells, 2) == (0, 2, 2)
+    assert passes.run_range((10.0, 12.0), cells, 2) == (0, 2, 2)
+    assert passes.run_range((17.0, 19.0), cells, 2) == (10, 10, 10)
+
+
 def test_align_follows_slips():
     events = np.arange(6)
     consistent = np.zeros((6, 2 * passes.BAND + 1), bool)

@@ -367,7 +367,8 @@ def run_range(excess, cells, latched):
     """``(run, lo, hi)`` bits at a capable boundary (run 0: no sync; hi -1: unbounded).
 
     ``excess`` bounds the extra cycles before the byte, ``cells`` the cycles
-    per cell. Hidden ones are 0 or reach 10 ones with the latched ones.
+    per cell. Hidden ones are 0 or reach 10 ones with the latched ones; an
+    excess fitting neither takes the nearer, and one below zero is no sync.
     """
     floor = max(1, SYNC_MIN_BITS - int(latched))
     (lo_e, hi_e), (c_lo, c_hi) = excess, cells
@@ -377,12 +378,12 @@ def run_range(excess, cells, latched):
     )
     zero = h_lo <= 0 <= h_hi
     first = max(h_lo, floor)
-    if h_hi < first:
-        if zero:
-            return 0, int(latched), int(latched)
-        h_hi = first
     known = np.isfinite(lo_e) and np.isfinite(hi_e)
     mid = (lo_e + hi_e) / (c_lo + c_hi) if known else (0 if zero else first)
+    if h_hi < first:
+        if zero or not known or abs(mid) <= abs(first - mid):
+            return 0, int(latched), int(latched)
+        h_hi = first
     best = int(min(max(round(mid), first), h_hi))
     if zero and abs(mid) <= abs(best - mid):
         best = 0

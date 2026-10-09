@@ -101,6 +101,26 @@ index on a 1571 (see [disk.md](disk.md)). It never writes:
 docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 8 10 --disk
 ```
 
+Every capture of the step is saved next to the log, in
+`hwcheck-<time>/dev<N>/` (`locate`, `survey` and, on a 1571, `index` records),
+for `Capture.load` and `ramcheck --reference`.
+
+## RAM capture check
+
+`nybulah ramcheck` homes a 1571 through `Nibbler.home` (within `--max-steps`
+outward steps, never bumping) or locates a 1541 from its headers, then per
+`--halftracks` entry streams one revolution (s4, firmware v12) and takes
+`--repeats` RAM captures (BITS, TB and TS passes, started as `--start`, after
+`--settle-ms`). Each RAM capture is compared with the stream and any
+`--reference` records of the same halftrack, sector by sector from the header:
+`differ` counts bytes the drive latched differently, `extra_syncs` the syncs
+(byte offset, bits) the merge found where the reference has none over the same
+bytes. Every capture is saved under `--save`.
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah ramcheck --dev 8 --max-steps N --halftracks 36 50 --save /data/artifacts/ramcheck
+```
+
 The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
 its other subcommands (`nybulah <command> --help`), e.g.
 `nybulah bench --dev 10 --protocol s3`.
