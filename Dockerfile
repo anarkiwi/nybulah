@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # OPENCBM_SOURCE=git builds libopencbm and the xum1541 plugin (bounded waits, X
 # protocol) from OPENCBM_REPO at OPENCBM_REF; OPENCBM_SOURCE=local builds them from
 # the build context named opencbm (--build-context opencbm=<OpenCBM tree>);
@@ -8,13 +7,13 @@ ARG OPENCBM_IMAGE=anarkiwi/opencbm:latest
 ARG OPENCBM_REPO=https://github.com/anarkiwi/OpenCBM
 ARG OPENCBM_REF=ac5c2b1a57bbba35b92224256ec9fc6e8930bd23
 
-FROM ubuntu:26.04 AS drivecode
+FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS drivecode
 RUN apt-get update && apt-get install -y --no-install-recommends cc65 make \
     && rm -rf /var/lib/apt/lists/*
 COPY drive/ /src/drive/
 RUN mkdir -p /out && make -C /src/drive OUT=/out
 
-FROM ubuntu:24.04 AS opencbm-deps
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS opencbm-deps
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cc65 git libncurses-dev libusb-1.0-0-dev \
@@ -36,7 +35,7 @@ WORKDIR /src
 RUN make -f LINUX/Makefile opencbm plugin-xum1541 \
     && make -f LINUX/Makefile DESTDIR=/out install install-plugin-xum1541
 
-FROM ubuntu:24.04 AS opencbm-git
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS opencbm-git
 RUN apt-get update && apt-get install -y --no-install-recommends libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=opencbm-build /out/usr/local/bin/ /usr/local/bin/
@@ -51,7 +50,7 @@ FROM opencbm-git AS opencbm-local
 FROM ${OPENCBM_IMAGE} AS opencbm-image
 
 # Python dependencies are resolved on plain Ubuntu so an OpenCBM change keeps them cached.
-FROM ubuntu:24.04 AS pydeps
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS pydeps
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /venv
