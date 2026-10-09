@@ -64,28 +64,48 @@ def disk_step(cbm, dev, proto, model, allow_bump=False):
         return disk.survey(nib)
 
 
+FAST = ("s3", "s4")  # protocols that can run a 1571 at 2 MHz
+
+
+def bench_skip(cbm, proto, model, base, size):
+    """Why proto cannot be benched here, else None."""
+    if base is None:
+        return f"no unaliased RAM run of {size} bytes"
+    if proto == "s4" and model != "1571":
+        return "s4 needs a 1571"
+    if not supported(cbm, proto):
+        return f"{proto} not supported here"
+    return None
+
+
 def check_dev(  # pylint: disable=too-many-arguments
-    session, dev, protos, size, reps, disk_check=False, allow_bump=False
+    session, dev, protos, size, reps, disk_check=False, allow_bump=False, fast=False
 ):
-    """All steps for one drive."""
+    """All steps for one drive; fast adds 2 MHz benches of s3/s4 on a 1571."""
     cbm = session.cbm
     session.step("identify", dev, lambda: list(cbm.identify(dev)))
     probe = session.step("ramprobe", dev, lambda: ramprobe.probe(cbm, dev))
     base = probe and ramprobe.expansion_base(probe, size)
+    model = probe and probe["model"]
     for proto in protos:
-        if base is None:
-            session.skip(f"bench_{proto}", dev, f"no unaliased RAM run of {size} bytes")
-        elif not supported(cbm, proto):
-            session.skip(f"bench_{proto}", dev, f"{proto} not supported here")
-        else:
-            pattern = os.urandom(size)
+        reason = bench_skip(cbm, proto, model, base, size)
+        if reason:
+            session.skip(f"bench_{proto}", dev, reason)
+            continue
+        clocks = (
+            (False, True) if fast and model == "1571" and proto in FAST else (False,)
+        )
+        for clock in clocks:
+            name, pattern = proto + ("_2mhz" if clock else ""), os.urandom(size)
             session.step(
-                f"bench_{proto}",
+                f"bench_{name}",
                 dev,
-                lambda p=proto, d=pattern: bench.run(cbm, dev, base, size, reps, p, d),
+                lambda p=proto, d=pattern, c=clock: bench.run(
+                    cbm, dev, base, size, reps, p, d, fast=c
+                ),
             )
             session.step(
-                f"alias_{proto}",
+                f"alias_{name}",
                 dev,
                 lambda d=pattern: ramprobe.verify(cbm, dev, base, d),
             )
@@ -133,6 +153,9 @@ def add_arguments(ap):
     ap.add_argument("--devs", type=int, nargs="+", default=[8, 10])
     ap.add_argument("--s2", action="store_true", help="bench S2 instead of S1")
     ap.add_argument("--proto", action="append", default=[], help="extra protocol")
+    ap.add_argument(
+        "--fast", action="store_true", help="also bench s3/s4 on a 1571 at 2 MHz"
+    )
     ap.add_argument("--size", type=int, default=8192)
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("artifacts"))
@@ -163,6 +186,7 @@ def execute(args, cbm):
                 args.reps,
                 args.disk,
                 args.allow_bump,
+                args.fast,
             )
         summary = summarize(session.records)
         session.emit({"summary": summary, "log": str(path)})

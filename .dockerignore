@@ -1,0 +1,6 @@
+.git
+.claude
+artifacts
+**/__pycache__
+.pytest_cache
+.coverage

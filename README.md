@@ -20,7 +20,8 @@ them back.
 - **Fast, recoverable transport.** Drive-resident 6502 code works with the
   stock S1/S2 protocols. With the modified xum1541 firmware it uses the X
   protocol: CLK/DATA only, two bits per edge, one handshake per 64-byte burst
-  (firmware v10), and a 16-bit block check with retry. Watchdogs on the drive, in the firmware and on the host return
+  (firmware v10), and a 16-bit block check with retry. A 1571 can use its
+  CIA shift register on SRQ instead (s4, firmware v11). Watchdogs on the drive, in the firmware and on the host return
   everything to a usable state after a stall, with no power cycling.
 - **Analysis on the host:**
   - vectorised GCR codec;
@@ -65,7 +66,8 @@ them back.
 - A ZoomFloppy or another xum1541 adapter. Firmware v9 from
   [anarkiwi/OpenCBM](https://github.com/anarkiwi/OpenCBM/tree/xum1541-timeouts)
   is needed for the X protocol and for stall recovery (v10, branch
-  `xum1541-xfast`, for burst X); stock firmware works with S1/S2.
+  `xum1541-xfast`, for burst X; v11, branch `xum1541-srq`, for 1571 SRQ fast
+  serial); stock firmware works with S1/S2.
 - A 1541 or 1571 with an 8 KB RAM expansion, which is a drive modification.
   It holds a little more than one revolution of any track, and nybulah finds
   it automatically. Stock drives work only with M-R/M-W and sector-level
@@ -95,13 +97,14 @@ nybulah map disk.nib -o disk.html  # .png disk, .apng animation, .svg/.html stri
 ```
 
 `nybulah <command> --help` lists the options, for example `--transport
-s1|s2|s3` and `--retries`.
+s1|s2|s3|s4` and `--retries`.
 
 ## Documentation
 
 - [docs/hardware.md](docs/hardware.md): hardware setup, firmware flashing and
   the hardware check
-- [docs/protocol.md](docs/protocol.md): X wire protocol and timing
+- [docs/protocol.md](docs/protocol.md): X, burst X and SRQ wire protocols and
+  timing
 - [docs/protocol-review.md](docs/protocol-review.md): X cycle budgets, burst
   design and predicted rates
 - [docs/disk.md](docs/disk.md): D64/D71 reading and writing

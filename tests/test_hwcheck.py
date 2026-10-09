@@ -96,3 +96,21 @@ def test_disk_survey_step(tmp_path, monkeypatch):
     zones = summary["10"]["disk"]["zones"]
     assert [z["sectors_ok"] for z in zones] == [21, 19, 18, 17]
     assert summary["10"]["disk"]["rpm"] is None
+
+
+def test_s4_session_benches_1571_at_both_clocks(tmp_path):
+    from nybulah import simsrq
+    from nybulah.sim import IdleDOSDrive
+
+    cbm = simsrq.make(dev=8, rise=1.0)
+    IdleDOSDrive(cbm.bus)
+    summary, _ = run(cbm, tmp_path, "--devs", "8", "--proto", "s4", "--fast")
+    s = summary["8"]
+    assert not {"bench_s4", "bench_s4_2mhz"} & set(s["failed"] + s["skipped"])
+    for step in ("bench_s4", "bench_s4_2mhz"):
+        assert s[step]["errors"] == 0 and s[step.replace("bench", "alias")] == []
+
+
+def test_s4_skipped_on_a_1541(tmp_path):
+    summary, _ = run(two_drives(), tmp_path, "--devs", "10", "--proto", "s4")
+    assert summary["10"]["skipped"] == ["bench_s4"]

@@ -3,12 +3,11 @@
 import struct
 
 import pytest
-from xsim import assert_returned, rand, session, steady_cycles, trace
+from xsim import vanish_mid_block, assert_returned, rand, session, steady_cycles, trace
 
 from nybulah import simx
 from nybulah.fastx import XB_CHUNK, xbsum
 from nybulah.monitor import CLOCK_HZ, WATCHDOG_S
-from nybulah.sim import HostGone
 
 MODELS = [("1541", 1.0, 0x8000), ("1571", 0.5, 0x6000)]
 
@@ -139,21 +138,12 @@ def test_crystal_drift(model, cyc, base, op):
     assert not skewed(cbm, mon, op, base, 0.0, beyond / (last / 16) * 1e6)
 
 
-@pytest.mark.parametrize("op", ["read", "write"])
+@pytest.mark.parametrize("op", [b"R", b"W"])
 def test_host_vanishes_drive_times_out(op):
     cbm, mon = session(fw=10)
-    cbm.vanish_at = cbm.ordinal + 5 + 130
-    with pytest.raises(HostGone) as e:
-        if op == "read":
-            mon.link.send(b"R" + struct.pack("<HH", 0x8000, 200))
-            mon.link.rx(200)
-        else:
-            mon.link.send(b"W" + struct.pack("<HH", 0x8000, 200))
-            mon.link.tx(bytes(200))
-    assert len(e.value.partial) == 2 * simx.XB_BURST
-    t0 = cbm.drive.cycles
-    cbm.settle()
-    assert cbm.drive.cycles - t0 <= CLOCK_HZ * WATCHDOG_S + 500
+    partial, cycles = vanish_mid_block(cbm, mon, op, 0x8000)
+    assert len(partial) == 2 * simx.XB_BURST
+    assert cycles <= CLOCK_HZ * WATCHDOG_S + 500
     assert_returned(cbm)
 
 

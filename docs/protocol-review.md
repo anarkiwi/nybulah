@@ -46,12 +46,19 @@ hardware measurements within 1 %.
    `b = r0<<5 ^ r1<<4 ^ r2<<1 ^ r3` with `lda`/`eor $1800` (26 cycles instead
    of 43). The device-number inputs add a constant that an `eor #` in the
    loop's otherwise idle slot cancels.
-4. **1571 CIA shift register on SRQ/DATA.** Not implemented. The SR shifts at
-   up to phi2/4, 16 us per byte at 2 MHz, with about 29 CPU cycles per byte
-   for fetch, `sta $400C`, check and loop: about 60 KB/s each way, roughly 2x
-   burst X at 2 MHz. It is ATN-free and 1541s ignore SRQ, but it only helps
-   the 1571, needs the fast-serial direction switch (VIA1 PA1) and a CIA SR
-   model in the simulator before it can be verified; worth a second step.
+4. **1571 CIA shift register on SRQ/DATA.** Implemented as s4 (firmware
+   v11, [protocol.md](protocol.md#1571-srq-fast-serial-s4-firmware-v11)).
+   The estimate above ignored line release times. Reads: phi2/4 (timer A
+   latch 1) keeps each CNT phase one cycle, which at 2 MHz equals the 1 us
+   release budget R, so the adapter cannot see SRQ high between back-to-back
+   bytes; the drive therefore writes each byte only after the previous one
+   is out (38 cycles per byte instead of 32) and the adapter times every
+   byte from its own first fall: 49 KB/s at 2 MHz, 1.7x burst X. Writes: a
+   bit needs DATA settled before SRQ can be sampled high and held until it
+   surely has, 2R plus a cycle per bit, so at 2 MHz writes run at 38 KB/s,
+   about burst X's rate; they gain at 1 MHz (22 vs 18 KB/s), where the
+   drive's 39-cycle receive loop sets the pace. A faster bus (smaller R)
+   would raise both.
 5. **USB.** A block is three plugin calls (command, data, 3-byte reply), each a
    command packet, data and status block. With 8 KiB blocks (v9: 4 KiB plus
    16 monitor bytes) this is under 1.5 % of a block at 2 MHz. Merging command

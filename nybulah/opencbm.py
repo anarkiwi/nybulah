@@ -191,14 +191,19 @@ class OpenCBM:
     x2_read, x2_write = _transfers("x2", "X timed for a 1571 at 2 MHz")
     xb_read, xb_write = _transfers("xb", "burst X (xum1541 firmware v10+)")
     xb2_read, xb2_write = _transfers("xb2", "burst X timed for a 1571 at 2 MHz")
+    srq_read, srq_write = _transfers("srq", "SRQ fast serial (1571, firmware v11+)")
+    srq2_read, srq2_write = _transfers("srq2", "SRQ fast serial, 1571 at 2 MHz")
+    s4_read, s4_write = srq_read, srq_write
+
+    PROBES = {"s3": "x", "xb": "xb", "s4": "srq", "srq": "srq"}
 
     def supports(self, protocol):
-        """Whether plugin and firmware speak protocol; s3 (X) and xb (burst X) are
-        probed with an empty read."""
-        if protocol not in ("s3", "xb"):
+        """Whether plugin and firmware speak protocol; s3 (X), xb (burst X) and
+        s4/srq (SRQ) are probed with an empty read."""
+        if protocol not in self.PROBES:
             return hasattr(self, f"{protocol}_read")
         try:
-            self.read_n("x" if protocol == "s3" else "xb", 0)
+            self.read_n(self.PROBES[protocol], 0)
         except OpenCBMError:
             return False
         return True

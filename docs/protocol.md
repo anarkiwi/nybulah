@@ -1,4 +1,4 @@
-# X transport: drive-timed two-bit IEC transfers
+# X and SRQ transports: drive-timed IEC transfers
 
 X moves bytes between a ZoomFloppy (xum1541 firmware v9+) and drive code in a
 1541/1571 over CLK and DATA only. Firmware v10 adds burst X (below), which the
@@ -249,7 +249,134 @@ repeated on a mismatch. Zero page `$30-$36` is saved and restored.
 Co-simulation, drive-bound; the same model gives the v9 rates within 1 % of
 the hardware measurements.
 
-## 1571 SRQ fast serial
+## 1571 SRQ fast serial (s4, firmware v11)
 
-Not implemented; see [protocol-review.md](protocol-review.md) for the
-estimate (about 2x burst X on a 1571 at 2 MHz) and what it needs.
+s4 moves the burst X commands and blocks over the 1571's 6526 shift register
+instead of CLK/DATA pairs. It needs a 1571 (a 1541 has no CIA; `Monitor`
+refuses s4 there) and firmware v11; with older firmware `Monitor(..., "s4")`
+warns and falls back to s3.
+
+Sources: drive side `drive/proto_srq.inc` (`monitor_s4.bin`, command loop
+`drive/burst.inc` shared with burst X), adapter model `nybulah/simsrq.py`
+(`SrqTiming`, `SimSRQ`), host link `fastx.SrqLink`; adapter `xum1541/x.c`
+(`srq_rx`/`srq_tx`), schedule `xum1541/x_timing.h`, plugin
+`opencbm_plugin_srq[2]_read_n/_write_n` (`XUM1541_X | XUM_X_SRQ`, capability
+`XUM1541_CAP_SRQ`, -1 below firmware 11).
+
+### Hardware
+
+- Memory map (1571 service manual PN-314002-04, Oct 1986, p. 3): VIA1 (U9)
+  `$1800`, WD1770 `$2000`, 6526 CIA (U20) `$4000-$7FFF`. Only the base
+  registers are used: timer A `$4004/5`, SDR `$400C`, ICR `$400D`, CRA `$400E`.
+- Bus drivers (same manual, schematic p. 19): CIA CNT and SP reach the bus
+  through a 74LS241 (U19) and a 7407 open-collector buffer (U14) onto SRQ
+  ("FAST CLK", DIN pin 1) and DATA; the 241's enables come from VIA1 PA1
+  ("SER DIR"). The 1571 DOS source (310654-05 `var.src`) names `$180F` bits:
+  PA1 fast serial direction (1 = out), PA2 side, PA5 1/2 MHz, PA6 ATN out.
+  Its `spout` sets PA1 before CRA bit 6 and `spinp` clears CRA bit 6 before
+  PA1, so CNT/SP never drive the bus in input mode; proto_srq.inc keeps that
+  order. Levels are non-inverting: SP = 1 leaves DATA released, CNT low pulls
+  SRQ (as the xum1541's `iec_srq_read/write` read and drive them).
+- 6526 (MOS datasheet, serial port, ICR and CRA): in output mode timer A
+  clocks the port, one bit per two underflows, at most phi2/4; an SDR byte
+  loads into the shift register at the next CNT pulse and goes out MSB
+  first, each bit valid from a falling CNT edge to the next; after 8 pulses
+  ICR bit 3 is set, CNT returns high and SP holds the last bit; a byte
+  written before that interrupt follows without a gap. In input mode SP is
+  shifted in on each rising CNT and the 8th fills SDR and sets the same
+  flag. CRA bit 4 force-loads the latch into the counter, which is how the
+  drive reads the write-only latch to restore it.
+- Idle drives: DOS enters its bus code only on an ATN interrupt (VIA1 CA1,
+  `irq.src`/`irq1571.src`), so DATA or CLK activity without ATN is ignored,
+  as X already relies on. A 1541 has no CIA and nothing on SRQ. An idle
+  1571, however, keeps its CIA in input mode, and where its ROM enables the
+  SP interrupt (`spinp` in 310654-05, ICR mask `$88`) every 8 SRQ rises it
+  sees make `irq1571.src` set the "fast host" flag (`fastsr` bit 6), which
+  DOS clears only on UNLISTEN/UNTALK. A second powered 1571 on the bus therefore needs an
+  UNLISTEN (any OpenCBM command sequence ends with one) before it is
+  talked to; drives under s4 clear their own ICR before returning to DOS.
+
+### Session and commands
+
+Open/close and the 5-byte command bursts are those of burst X
+([Burst X](#burst-x-firmware-v10)); the block check is `fastx.xsum` over
+command and data in both directions. On entry the drive saves CRA, the timer A
+latch and VIA1 port A, stops timer A, sets latch 1 and runs it in input mode;
+every exit (`Q`, watchdog, host gone) restores them, PA1 and PA5 included, and
+reads ICR so DOS sees no stale serial byte.
+
+### Drive -> host
+
+| step | drive | adapter |
+|---|---|---|
+| go | output mode (PA1, then CRA bit 6); polls CLK | asserts CLK with interrupts masked |
+| byte 0 | writes SDR; CNT falls at the next underflow | sees SRQ released then asserted (6-clock poll, slices, grace as X), releases CLK |
+| byte i | writes SDR 6 cycles after the ICR poll that sees byte i-1 out | first poll for SRQ high, then low (5 clocks each), bounded |
+| end | waits for the last byte, input mode before the reply | |
+
+The drive's first ICR poll comes 32 cycles after each SDR write, the latest
+possible end of a byte (start at most 2 cycles after the write, 30 to the 8th
+rise), so a byte follows the previous one's last rise by 7..14 cycles plus up
+to 2 for the next underflow: 38 cycles per byte with no CIA start delay. The
+adapter times every byte from its own first fall, so drift and the CIA's
+unspecified start pipeline do not accumulate.
+
+Adapter clocks from the detecting poll (`SRQ_SAMPLE`, `SRQ_START`,
+`SRQ_POLLS`):
+
+| | 1 MHz (f = 16) | 2 MHz (f = 8) |
+|---|---|---|
+| DATA samples, bits 7..0 | 37 101 165 229 293 357 421 485 | 21 53 85 117 149 181 213 245 |
+| window per bit | [64j + 16, 64j + 64) | [32j + 16, 32j + 32) |
+| next byte's first poll | 541, window [496, 592) | 273, window [256, 296) |
+| polls before giving up | 137 | 69 |
+| smallest slack | 1.31 us | 0.31 us |
+
+### Host -> drive
+
+| step | drive | adapter |
+|---|---|---|
+| go | input mode, ICR read (no stale flag), polls DATA | asserts DATA |
+| SYNC | CLK asserted t=0, released t=6 | detects as burst X |
+| bits | CIA shifts DATA in on each SRQ rise | 8 bits MSB first: SRQ asserted with DATA = bit, released after `SRQ_LOW`, next bit `SRQ_BIT` later |
+| bytes | polls ICR every 11 cycles (39 once behind), reads SDR 7 after the hit; leaves for DOS after 255 empty polls | next byte at 8 `SRQ_BIT`, from the USB FIFO between bits |
+
+A bit needs DATA settled before the CIA can sample SRQ high (SRQ low >= R)
+and held until it certainly has (SRQ high >= R + one drive cycle of sampling):
+2R + f clocks. The schedule adds sigma, the tightest 2 MHz read slack
+(5 clocks), to both sides, and the byte period must cover the drive's 39-cycle
+loop plus a rise and sigma:
+
+| | 1 MHz | 2 MHz |
+|---|---|---|
+| bit, SRQ low / high (clocks) | 83, 33 / 50 | 50, 21 / 29 |
+| byte period | 664 clocks, 41.5 us (drive loop) | 400 clocks, 25 us (bit timing) |
+| set-up / hold / loop slack | 1.06 / 1.13 / 0.5 us | 0.31 / 0.31 / 4.0 us |
+
+`misc/x_timing.py` steps the compiled `srq_rx`/`srq_tx` (samples, next-byte
+poll, every port write over three bytes and a bank switch) against these
+formulas, and `misc/srq_timing_test.c` checks every window on the host.
+`python -m nybulah.simsrq` prints the same table.
+
+### Margins in co-simulation
+
+`tests/test_proto_srq.py` runs the firmware's clocks against the timed 1571
+(R = 1 us, CIA start delays of 0 and 3 cycles, idle 1541 peers): reads pass
+at 0.95x the smallest slack either way and fail beyond the largest slack plus
+P, R and a cycle; writes pass with DATA moved 0.95x the set-up or hold slack
+against SRQ and fail beyond it plus 2R and a cycle; both pass at +-200 ppm.
+A flipped bit is caught by the check and the block repeated; a host that
+vanishes leaves the drive in DOS within the watchdog, one that stops
+mid-burst within 255 polls; a drive that stops leaves the adapter with an
+error and the bytes so far, lines released.
+
+### Throughput
+
+| path | cycles/byte | 1 MHz | 2 MHz | burst X measured (v10) |
+|---|---|---|---|---|
+| s4 read (38 + per burst) | 40.5 | 24.6 KB/s | 49.3 KB/s | 14.3 / 28.3 KB/s |
+| s4 write (bit timing or drive loop) | 44.6 / 53 | 22.4 KB/s | 37.7 KB/s | 18.2 / 35.9 KB/s |
+
+Co-simulation of 8 KiB blocks, drive-bound as for burst X. Reads gain 1.7x;
+writes are bounded by the line release budget (2R per bit) at 2 MHz and gain
+little there.

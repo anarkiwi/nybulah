@@ -5,7 +5,9 @@
 ;   2  proto_s2.inc  S2: ATN-strobed, only this drive may be listening
 ;   3  proto_x.inc   firmware-assisted protocol, built only when present
 ;   4  proto_xb.inc  its burst form (firmware v10); supplies its own command
-;                    loop (5-byte command bursts, checked blocks)
+;                    loop (5-byte command bursts, checked blocks, burst.inc)
+;   5  proto_srq.inc 1571 CIA shift register on SRQ/DATA (firmware v11), the
+;                    same command loop; built as monitor_s4
 ; A transport defines open, close, tosend, torecv, getbyte (returns A) and
 ; sendbyte (sends A). getbyte/sendbyte may use A, X and tmp/tmp+1 but must
 ; preserve Y; each starts with WDRESET and spins only through WAIT. close
@@ -60,7 +62,7 @@ WD_IDLE_TICKS = CLOCK_HZ / 1000 * WD_IDLE_MS / WD_PERIOD
 ptr     = $30
 len     = $32
 tmp     = $34
-.if PROTO = 4
+.if PROTO >= 4
 zpsize  = 7
 .else
 zpsize  = 6
@@ -92,7 +94,7 @@ done:
 .endmacro
 
         .segment "CODE"
-.if PROTO = 4
+.if PROTO >= 4
         .org $0500                      ; absolute, so loops can be page-fitted
 .endif
 
@@ -126,7 +128,7 @@ start:  sei
         sta wdload
         WDRESET
         jsr open
-.if PROTO = 4
+.if PROTO >= 4
         jmp loop
 .else
 
@@ -162,6 +164,9 @@ exit:   ldx savesp
         lda viasave
         sta ACR
         bit T1CL                ; clear T1 flag
+.if PROTO = 5
+        jsr ciarest
+.endif
         lda viasave+1
         sta IER                 ; re-enables what was enabled (bit 7 reads 1)
         lda VIA1PA              ; clear CA1 (ATN) flag
@@ -175,7 +180,7 @@ wdtick: bit T1CL
         beq exit
         rts
 
-.if PROTO <> 4
+.if PROTO < 4
 
 cmd_read:
         jsr getargs
@@ -251,16 +256,21 @@ declen: lda len
         .include "proto_x.inc"
 .elseif PROTO = 4
         .include "proto_xb.inc"
+.elseif PROTO = 5
+        .include "proto_srq.inc"
 .else
-        .error "PROTO must be 1, 2, 3 or 4"
+        .error "PROTO must be 1 to 5"
 .endif
 
 zpsave: .res zpsize
 viasave: .res 4                 ; ACR, IER, T1 latch lo/hi
 regs:   .res 3
-.if PROTO = 4
+.if PROTO >= 4
 .assert regs & (XB_BURST - 1) <= XB_BURST - 3, error, "regs crosses a burst"
 .endif
 savesp: .res 1
 wdcnt:  .res 1
 wdload: .res 1
+.if PROTO = 5
+ciasave: .res 4                 ; CRA, timer A latch lo/hi, VIA1 port A
+.endif

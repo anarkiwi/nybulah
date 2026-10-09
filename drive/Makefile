@@ -5,7 +5,8 @@ TRACK_BASE := 0300
 PASSPG_1541 := 9F
 PASSPG_1571 := 7F
 BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
-	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin)
+	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
+	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin)
 
 all: $(BINS)
 
@@ -14,10 +15,15 @@ $(OUT)/monitor_s%.bin: monitor.s drive.cfg $(wildcard proto_*.inc)
 	ld65 -C drive.cfg -o $@ $(OUT)/monitor_s$*.o
 	rm -f $(OUT)/monitor_s$*.o
 
-$(OUT)/monitor_xb.bin: monitor.s drive.cfg $(wildcard proto_*.inc)
+$(OUT)/monitor_xb.bin: monitor.s drive.cfg $(wildcard proto_*.inc) burst.inc
 	ca65 -t none -D PROTO=4 -o $(OUT)/monitor_xb.o $<
 	ld65 -C drive.cfg -o $@ $(OUT)/monitor_xb.o
 	rm -f $(OUT)/monitor_xb.o
+
+$(OUT)/monitor_s4.bin: monitor.s drive.cfg $(wildcard proto_*.inc) burst.inc
+	ca65 -t none -D PROTO=5 -o $(OUT)/monitor_s4.o $<
+	ld65 -C drive.cfg -o $@ $(OUT)/monitor_s4.o
+	rm -f $(OUT)/monitor_s4.o
 
 $(OUT)/track_%.bin: track.s track.cfg
 	ca65 -t none -D MODEL=$* -o $(OUT)/track_$*.o $<

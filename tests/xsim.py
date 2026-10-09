@@ -1,11 +1,14 @@
 """Shared helpers for the X transport co-simulation tests."""
 
+import struct
 from itertools import groupby
 
 import numpy as np
+import pytest
 
 from nybulah import simx
 from nybulah.monitor import Monitor
+from nybulah.sim import HostGone
 
 FIRMWARE = (9, 10)
 ZP = bytes(range(0x11, 0x18))
@@ -68,3 +71,18 @@ def steady_cycles(cbm, op, n):
     start = cbm.drive.cycles
     op(2 * n)
     return (cbm.drive.cycles - start - a) / n
+
+
+def vanish_mid_block(cbm, mon, op, base, at=135):
+    """Adapter gone `at` transfer bytes after a 200-byte block's command; returns the
+    partial bytes and the drive cycles until it is back in DOS."""
+    cbm.vanish_at = cbm.ordinal + at
+    with pytest.raises(HostGone) as e:
+        mon.link.send(op + struct.pack("<HH", base, 200))
+        if op == b"R":
+            mon.link.rx(200)
+        else:
+            mon.link.tx(bytes(200))
+    t0 = cbm.drive.cycles
+    cbm.settle()
+    return e.value.partial, cbm.drive.cycles - t0

@@ -1,7 +1,8 @@
-"""S3 links for Monitor: the X transport with checked block transfers.
+"""S3/S4 links for Monitor: the X and SRQ transports with checked block transfers.
 
 XLink speaks firmware v9 X (per-byte go/SYNC, drive/proto_x.inc); XBLink the v10
-burst form (drive/proto_xb.inc), chosen whenever the adapter supports it.
+burst form (drive/proto_xb.inc), chosen whenever the adapter supports it; SrqLink the
+v11 1571 SRQ fast serial (drive/proto_srq.inc) with the same commands and bursts.
 """
 
 import struct
@@ -10,9 +11,11 @@ import numpy as np
 
 from .link import BASE, WATCHDOG_IDLE_S, BusError, HandshakeTimeout, S1Link
 from .opencbm import IEC_CLOCK, IEC_DATA, OpenCBMError
+from .ramprobe import identify_model
 
 TAG = b"NYBX"
 XB_TAG = b"NYXB"
+SRQ_TAG = b"NYSR"
 CHUNK = 0x1000
 XB_CHUNK = 0x2000
 XB_BURST = 64
@@ -182,14 +185,22 @@ class XBLink(XLink):
     code_name = "monitor_xb"
     speeds = {False: "xb", True: "xb2"}
     chunk = XB_CHUNK
+    tag = XB_TAG
 
     def __init__(self, mon):
-        if XB_TAG not in mon.code:
-            raise ValueError("monitor code lacks the NYXB tag")
+        if self.tag not in mon.code:
+            raise ValueError(f"monitor code lacks the {self.tag.decode()} tag")
         super(XLink, self).__init__(mon)  # pylint: disable=bad-super-call
-        self.rx, self.tx = self.cbm.xb_read, self.cbm.xb_write
+        speed = self.speeds[False]
+        self.rx = getattr(self.cbm, f"{speed}_read")
+        self.tx = getattr(self.cbm, f"{speed}_write")
         self.rejects = 0
         self.fast = False
+
+    @staticmethod
+    def check(cmd, received=b"", sent=b""):
+        """Expected (s1, s2) over a command and its data."""
+        return xbsum(cmd + received, sent)
 
     @staticmethod
     def packet(payload):
@@ -208,14 +219,14 @@ class XBLink(XLink):
         self.mon.transact(op + struct.pack("<HH", addr, n))
         if data is None:
             got = b"".join(self.rx(m) for m in self._split(addr, n))
-            check = xbsum(cmd, got)
+            check = self.check(cmd, sent=got)
         else:
             got = None
             at = 0
             for m in self._split(addr, n):
                 self.tx(data[at : at + m])
                 at += m
-            check = xbsum(cmd + data)
+            check = self.check(cmd, data)
         reply = self.rx(3)
         self.mon.touch()
         return check == tuple(reply[:2]), got
@@ -233,3 +244,21 @@ class XBLink(XLink):
         for i in range(0, len(data), self.chunk):
             block = bytes(data[i : i + self.chunk])
             self._checked(lambda a=addr + i, b=block: self._block(b"W", a, len(b), b))
+
+
+class SrqLink(XBLink):
+    """Firmware v11 SRQ fast serial on a 1571: XBLink's commands, bursts and chunks over
+    the CIA shift register; checks are xsum in both directions."""
+
+    code_name = "monitor_s4"
+    speeds = {False: "srq", True: "srq2"}
+    tag = SRQ_TAG
+
+    def __init__(self, mon):
+        if identify_model(mon.cbm, mon.dev) != "1571":
+            raise ValueError(f"device {mon.dev}: s4 (SRQ fast serial) needs a 1571")
+        super().__init__(mon)
+
+    @staticmethod
+    def check(cmd, received=b"", sent=b""):
+        return xsum(cmd + received + sent)
