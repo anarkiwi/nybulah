@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+/nybulah/drivecode/*.bin
+/.claude/worktrees/
+/artifacts/
+.coverage
+.pytest_cache/
