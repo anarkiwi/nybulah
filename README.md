@@ -2,8 +2,8 @@
 
 Raw-track ("nibbler") imaging and writing for Commodore 1541 and 1571 disk
 drives over the standard serial IEC bus. It uses OpenCBM with a ZoomFloppy or
-another xum1541 adapter. You don't need a parallel cable or any drive
-modification.
+another xum1541 adapter. You don't need a parallel cable; the drive needs an
+8 KB RAM expansion.
 
 It is for preserving copy-protected and non-standard disks, and for writing
 them back.
@@ -42,8 +42,8 @@ them back.
 
 | | nybulah | nibtools | OpenCBM d64copy/cbmcopy | Flux boards (KryoFlux, Greaseweazle, SCP) |
 |---|---|---|---|---|
-| Raw tracks from a 1541 | serial IEC + RAM expansion | parallel cable required | no (sectors only) | flux, with a PC drive or modified hardware |
-| Raw tracks from a 1571 | serial IEC | SRQ or parallel | no | flux |
+| Raw tracks from a 1541 | serial IEC + 8 KB RAM expansion | parallel cable required | no (sectors only) | flux, with a PC drive or modified hardware |
+| Raw tracks from a 1571 | serial IEC + 8 KB RAM expansion | SRQ or parallel | no | flux |
 | Other drives powered on the bus | yes | depends on transport | with S1 or original transfer | n/a |
 | Recovers from stalls without power cycling | yes (firmware v9) | no | no | n/a |
 | Exact sync lengths | timed from the SYNC line | no | no | yes |
@@ -57,8 +57,10 @@ them back.
   [anarkiwi/OpenCBM](https://github.com/anarkiwi/OpenCBM/tree/xum1541-timeouts)
   is needed for the X protocol and for stall recovery; stock firmware works
   with S1/S2.
-- A 1541 or 1571 with a RAM expansion. 8 KB is enough for a little more than
-  one revolution of any track.
+- A 1541 or 1571 with an 8 KB RAM expansion, which is a drive modification.
+  It holds a little more than one revolution of any track, and nybulah finds
+  it automatically. Stock drives work only with M-R/M-W and sector-level
+  tools.
 - Docker. The image bundles OpenCBM, the assembled drive code and Python.
 
 ## Usage
