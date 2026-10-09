@@ -29,6 +29,7 @@ max-positional-arguments = 8
 max-attributes = 12
 min-public-methods = 1
 max-public-methods = 24
+max-locals = 20
 
 [tool.pylint."messages control"]
 disable = ["missing-module-docstring", "missing-function-docstring", "import-outside-toplevel"]
