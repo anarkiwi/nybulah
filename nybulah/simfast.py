@@ -20,13 +20,15 @@ from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA
 from .sim import ACR_T1_FREERUN, FDC, IO_ACCESS_CYCLE, IRQ_T1, IRQ_T2, OPEN, RAM
 from .sim import CIA, PA_FSDIR, RETURN_TRAP, ROM, VIA1, VIA2, Bus, SimTimeout
 from .sim import PB_ATN_IN, PB_ATNA, PB_CLK_IN, PB_CLK_OUT, PB_DATA_IN, PB_DATA_OUT
-from .sim import Drive1541, Drive1571
+from .sim import Drive1541, Drive1571, Drive1581
+from .sim import HOST_LENGTHS, HOST_PROGRAMS, PUT, REL, SAMPLE, SET, SHL, WAIT
 from .simdisk import CA1_FLAG, CELL_EPS, CPU_HZ, HT_MAX, HT_STOP
 from .simdisk import INDEX_FRACTION, PB_INPUTS, PB_MOTOR, PB_PHASE, PB_SYNC, PB_WE
 from .simdisk import PCR_MODE, PCR_SOE, PCR_WRITE, PHASE_OFFSET, SYNC_ONES, V_FLAG
 from .simdisk import WANDER_NEWTON, WD_INDEX, Mechanism, Media, disk_drive
-from .simcia import CCRA, END, cia_lines, cia_read, cia_write, kernel
-from .simcia import pack_cia, unpack_cia
+from .simcia import CCRA, END, cia81_lines, cia81_read, cia81_write, cia_atn
+from .simcia import cia_lines, cia_read, cia_write, kernel, pack_cia, unpack_cia
+from .simwd import W0, WEND, wd_read, wd_write
 
 A, X, Y, SP, P, PC, CYC, PCYC, HALT, STEPS = range(10)
 ACR, IER, LATCH, T1START, T1ACK, T2LATCH, T2START, T2ACK = range(10, 18)
@@ -36,7 +38,8 @@ ONES, COUNT, SHREG, PENDING, CA1, WRITTEN, ARMED, OVER, UNDER = range(34, 43)
 WD, WPROT, LOGGING, NEV, HT, BUMPS, KSIDE, KHT, CSIDE, CHT = range(43, 53)
 FRESH, CORRUPT, DEFER, RESAMPLE = range(53, 57)
 VREGS, MREGS, HOSTL = 57, 73, 89
-SENSOR, INNER, STATE = END, END + 1, END + 2
+SENSOR, INNER, M81, OPPC = range(END, END + 4)
+STATE = WEND
 DUE, SYNC_START, RPM, AMP, PERIOD = range(5)
 
 MPU_FIELDS = {A: "a", X: "x", Y: "y", SP: "sp", P: "p", PC: "pc"}
@@ -50,11 +53,10 @@ MECH_FIELDS |= {SHREG: "_shreg", PENDING: "_pending", CA1: "_ca1", WRITTEN: "_wr
 MECH_FIELDS |= {ARMED: "_armed", OVER: "overruns", UNDER: "underruns"}
 MECH_FIELDS |= {HT: "halftrack", BUMPS: "bumps", WPROT: "write_protect"}
 MECH_FIELDS |= {SENSOR: "sensor_edge", INNER: "inner_stops"}
-assert HOSTL < CCRA
+assert HOSTL < CCRA and OPPC < W0
 
 OK, HALTED, LIMIT, PYTHON, FULL, DEFERRED, MOVED = range(7)
 PROTO, PLEN, HOP, HBYTE, HC, HB, HWAIT, BUDGET = range(8)
-WAIT, SET, REL, PUT, SAMPLE, SHL, SHR = range(7)
 BYTE_EVENT, SYNC_EVENT = 0, 1
 KIND_BITS = 3
 EVENTS, EVENT_MARGIN = 1 << 12, 64
@@ -107,31 +109,6 @@ def tables():
 
 
 OPS = tables()
-D, C, T = IEC_DATA, IEC_CLOCK, IEC_ATN
-HOST = {
-    "s1_read": [(WAIT, D, 0), (REL, C, 0), (SAMPLE, C, 0), (SET, D, 0), (WAIT, C, 2)]
-    + [(REL, D, 0), (WAIT, D, 1), (SET, C, 0)],
-    "s1_write": [(PUT, D, 0), (REL, C, 0), (WAIT, C, 1), (PUT, D, 1), (WAIT, C, 0)]
-    + [(SET, C, 0), (REL, D, 0), (WAIT, D, 1), (SHL, 0, 0)],
-    "s2_read": [(WAIT, C, 1), (SAMPLE, D, 0), (REL, T, 0), (WAIT, C, 0), (SAMPLE, D, 0)]
-    + [(SET, T, 0)],
-    "s2_write": [(PUT, D, 2), (SHR, 0, 0), (REL, T, 0), (WAIT, C, 0), (PUT, D, 2)]
-    + [(SHR, 0, 0), (SET, T, 0), (WAIT, C, 1)],
-}
-HOST_BITS = {"s1_read": 8, "s1_write": 8, "s2_read": 4, "s2_write": 4}
-HOST_TAIL = {"s2_write": [(REL, D, 0)]}
-
-
-def host_programs():
-    """Per-byte xum1541 programs (protocol, step, op/line/arg); name -> (index, length)."""
-    progs = {n: ops * HOST_BITS[n] + HOST_TAIL.get(n, []) for n, ops in HOST.items()}
-    out = np.zeros((len(progs), max(map(len, progs.values())), 3), np.int64)
-    for i, ops in enumerate(progs.values()):
-        out[i, : len(ops)] = ops
-    return out, {n: (i, len(ops)) for i, (n, ops) in enumerate(progs.items())}
-
-
-HOST_PROGRAMS, HOST_LENGTHS = host_programs()
 
 
 @kernel
@@ -276,10 +253,12 @@ def t1_events(s):
 
 @kernel
 def drive_lines(s):
-    """Drive1541.drive_lines."""
-    pb = s[PBOUT]
+    """Drive1541.drive_lines with Drive1581.via_lines and fsdir."""
+    pb, atn = s[PBOUT], s[HOSTL] & IEC_ATN != 0
+    if s[M81]:
+        return cia81_lines(s, pb, atn, s[CYC])
     lines = IEC_CLOCK if pb & PB_CLK_OUT else 0
-    if pb & PB_DATA_OUT or (s[HOSTL] & IEC_ATN != 0) != (pb & PB_ATNA != 0):
+    if pb & PB_DATA_OUT or atn != (pb & PB_ATNA != 0):
         lines |= IEC_DATA
     return lines | cia_lines(s, s[CYC], s[VREGS + 1] & PA_FSDIR)
 
@@ -427,7 +406,7 @@ def mech_write(s, f, cells, ev, fdc, reg, value):
 def readable(s, amap, addr):
     """Drive1541.read at addr needs nothing from Python."""
     k, phys = amap[addr] & 7, amap[addr] >> KIND_BITS
-    if k == VIA1 and phys & 0xF == 0:
+    if k == VIA1 and phys & 0xF == 0 or s[M81] and k == CIA and phys == 1:
         return s[EXT] >= 0
     if k in (VIA2, FDC) and s[MECH] and phys < 16:
         return can_update(s)
@@ -440,7 +419,7 @@ def writable(s, amap, addr):
     k, phys = amap[addr] & 7, amap[addr] >> KIND_BITS
     if k == VIA1:
         return phys < 16
-    if k == CIA:
+    if k == CIA or s[M81] and k == FDC:
         return True
     if s[MECH] and k in (VIA2, FDC) and phys < (16 if k == VIA2 else 1):
         return can_update(s)
@@ -455,8 +434,15 @@ def rd(s, f, amap, store, cells, ev, addr):
         return np.int64(store[phys])
     if k == VIA1:
         return via_read(s, phys & 0xF)
+    c = s[CYC] + IO_ACCESS_CYCLE
+    if s[M81] and k == CIA:
+        return cia81_read(
+            s, cells, phys, c, s[DEVICE], via_read(s, 0) if phys == 1 else 0
+        )
+    if s[M81] and k == FDC:
+        return wd_read(s, cells, phys, c, s[OPPC])
     if k == CIA:
-        return cia_read(s, phys, s[CYC] + IO_ACCESS_CYCLE)
+        return cia_read(s, phys, c)
     if k in (VIA2, FDC) and s[MECH] and phys < 16:
         return mech_read(s, f, cells, ev, k == FDC, phys)
     return np.int64(addr >> 8 if k == OPEN else 0)
@@ -470,6 +456,10 @@ def wr(s, f, amap, store, cells, ev, addr, value):
         store[phys] = value
     elif k == VIA1:
         via_write(s, phys, value)
+    elif s[M81] and k == CIA:
+        s[PBOUT] = cia81_write(s, cells, phys, value, s[CYC] + IO_ACCESS_CYCLE)
+    elif s[M81] and k == FDC:
+        wd_write(s, cells, phys, value, s[CYC] + IO_ACCESS_CYCLE, s[OPPC])
     elif k == CIA:
         cia_write(s, phys, value, s[CYC] + IO_ACCESS_CYCLE)
     elif k in (VIA2, FDC):
@@ -718,6 +708,9 @@ def step(s, f, amap, store, cells, ev):
     pc = s[PC]
     if not plain(amap, pc):
         return PYTHON
+    if s[M81]:
+        cia_atn(s, s[HOSTL] & IEC_ATN)
+        s[OPPC] = pc
     s[PC] = (pc + 1) & 0xFFFF
     n = execute(s, f, amap, store, cells, ev, peek(amap, store, pc))
     if n < 0:
@@ -800,7 +793,7 @@ def fields(table):
 MPU_GROUP, VIA_GROUP, MECH_GROUP = map(fields, (MPU_FIELDS, VIA_FIELDS, MECH_FIELDS))
 MEMORY = weakref.WeakKeyDictionary()
 BUFFERS = np.zeros(STATE, np.int64), np.zeros(5), np.empty((EVENTS, 4))
-STOCK = ("step", "read", "write", "port_b", "drive_lines")
+STOCK = "step read write port_b drive_lines via_lines fsdir port_pins"
 
 
 def memory(drive):
@@ -814,11 +807,11 @@ def memory(drive):
 
 @functools.cache
 def stock(cls):
-    """cls computes as Drive1541 (or Drive1571 for port A) does."""
+    """cls computes as Drive1541 (Drive1571 for port A, Drive1581) does."""
     port_a = (Drive1571 if cls.MODEL == "1571" else Drive1541).port_a
-    return cls.port_a is port_a and all(
-        getattr(cls, n) is getattr(Drive1541, n) for n in STOCK
-    )
+    ref = Drive1581 if cls.MODEL == "1581" else Drive1541
+    same = (getattr(cls, n, None) is getattr(ref, n, None) for n in STOCK.split())
+    return cls.port_a is port_a and all(same)
 
 
 def eligible(drive):
@@ -900,6 +893,10 @@ def pack(drive, steps, lines):
     )
     s[VREGS : VREGS + 16] = memoryview(drive.via1.regs)
     pack_cia(drive.cia, s)
+    if drive.MODEL == "1581":
+        s[M81], s[OPPC] = 1, -1
+        s[W0:WEND] = drive.wd.w[W0:WEND]
+        return (s, f, *memory(drive), drive.wd.flat, ev)
     cells = np.zeros(1, np.uint8) if drive.mech is None else pack_mech(drive.mech, s, f)
     return (s, f, *memory(drive), cells, ev)
 
@@ -916,6 +913,8 @@ def unpack(drive, s, f, cells, ev):
         drive.bus.host_lines = int(s[HOSTL])
     if s[HALT] and not drive.halted:
         drive.halted, drive._pending = True, 0  # pylint: disable=protected-access
+    if s[M81]:
+        drive.wd.w[W0:WEND] = s[W0:WEND]
     if mech is None:
         return
     idx, _, names = MECH_GROUP
@@ -991,10 +990,10 @@ def run_drive(drive, limit, steps=-1, lines=False):
 
 
 def warm():
-    """Compile (or load) the kernels: a short run and a transfer to a halted drive."""
-    drive = disk_drive("1541", Media())
-    drive.load(0x300, b"\x60")
-    drive.call(0x300)
-    run_drive(drive, drive.cycles + 100)
-    with contextlib.suppress(SimTimeout):
-        run_transfer(drive, "s1_read", np.zeros(1, np.uint8), 0)
+    """Compile (or load) the kernels: short runs and transfers to halted drives."""
+    for drive in (disk_drive("1541", Media()), Drive1581()):
+        drive.load(0x300, b"\x60")
+        drive.call(0x300)
+        run_drive(drive, drive.cycles + 100)
+        with contextlib.suppress(SimTimeout):
+            run_transfer(drive, "s1_read", np.zeros(1, np.uint8), 0)

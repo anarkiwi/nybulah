@@ -11,7 +11,8 @@ import numpy as np
 
 from .analysis.gcr import NOMINAL_RPM, bit_rate, bits_per_revolution, speed_zone
 from .analysis.gcr import encode_bits, to_bits
-from .sim import IO_ACCESS_CYCLE, Drive1541, Drive1571
+from .sim import IO_ACCESS_CYCLE, Drive1541, Drive1571, Drive1581
+from .simwd import INDEX_FRACTION
 
 CPU_HZ = 1_000_000
 HT_STOP, HT_MAX, HT_TRACK1 = 0, 84, 2
@@ -21,7 +22,6 @@ SENSOR_EDGES = range(HT_TRACK1, HT_TRACK1 + PHASES)
 SENSOR_STUCK_ON, SENSOR_STUCK_OFF = HT_MAX, HT_STOP - 1
 DOS_TRACK = 0x22
 SYNC_ONES = 10
-INDEX_FRACTION = 0.02
 WANDER_NEWTON = 4
 CELL_EPS = 1e-6
 V_FLAG = 0x40
@@ -350,10 +350,13 @@ def sync_track(runs, cells, seed=0, gaps=(1, 40)):
 
 
 def disk_drive(model, media, device=8, **kw):
-    """A simulated 1541 or 1571 with expansion RAM and a mechanism holding media.
+    """A simulated 1541 or 1571 with expansion RAM and a mechanism holding media, or a
+    1581 holding simwd.MfmMedia (kw for simwd.Wd).
 
     DOS's current track for drive 0 is set as if DOS had left the head there.
     """
+    if model == "1581":
+        return Drive1581(device=device, media=media, **kw)
     drive = {"1541": Drive1541, "1571": Drive1571}[model](device=device)
     mech = Mechanism(drive, media, **kw)
     drive.write(DOS_TRACK, mech.halftrack // 2)

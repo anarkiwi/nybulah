@@ -11,9 +11,9 @@ from functools import cached_property
 
 from . import stream as fmt
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ
-from .sim import IdleDOSDrive
+from .sim import IdleDOSDrive, IdleFastDrive
 from .simx import AVR_FOUND, AVR_HZ, AVR_POLL, AVR_RISE, AVR_SYNC
-from .simx import SimX, TimedBus, TimedDrive1571, XError
+from .simx import MODELS, SimX, TimedBus, XError
 
 SRQ_U = 2  # cycles per CNT phase: timer A latch 1
 SRQ_LAST = 15 * SRQ_U  # first fall of a byte to its last rise
@@ -339,11 +339,16 @@ class UsbIn:
 
 
 def make(cyc=1.0, rise=0.5, peers=0, dev=8, delay=0, **kw):
-    """SimSRQ around a timed 1571 (CIA start delay in cycles) and idle DOS peers."""
+    """SimSRQ around a timed 1571 (model="1581": a 1581 at 2 MHz; CIA start delay in
+    cycles) and idle DOS peers (fast_peers: IdleFastDrive)."""
     bus = TimedBus(rise)
-    drive = TimedDrive1571(
+    model = kw.pop("model", "1571")
+    cyc = 0.5 if model == "1581" else cyc
+    drive = MODELS[model](
         device=dev, bus=bus, cyc=cyc, read_jitter=kw.pop("read_jitter", 0.0)
     )
+    for _ in range(kw.pop("fast_peers", 0)):
+        IdleFastDrive(bus)
     drive.cia.delay = delay
     for _ in range(peers):
         IdleDOSDrive(bus)
