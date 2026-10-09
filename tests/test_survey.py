@@ -245,7 +245,11 @@ def test_scan_resume_summary_and_cli(corpus, tmp_path, monkeypatch, capsys):
     assert summary["images"]["distinct"] == 2 and summary["images"]["failed"] == 1
     assert summary["disk_ids"] == {"track18_read": 2, "bam_id_differs": 2}
     found = {k: v["prevalence"]["tracks"] for k, v in summary["scenarios"].items()}
-    assert found["killer"] == 2 and found["no_sync"] == 2 and found["unformatted"] >= 1
+    assert (
+        found["killer"] == 2
+        and found["no_sync"] == 2
+        and found["unformatted_36_42"] == 1
+    )
     assert found["fat_track"] >= 2 and found["header_track_mismatch"] >= 2
     assert found["half_track_crosstalk"] == 4
     assert summary["scenarios"]["dos_with_errors"]["errors"] == {

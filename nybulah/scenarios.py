@@ -210,6 +210,7 @@ def scenarios(tracks, d, thr):
     upper = (t["halftrack"] // 2 > DOS_TRACKS) & (t["side"] == 0)
     crosstalk = np.fmax(neighbour(t, -1, "sim_half"), t["sim_half"]) > fam["similar"]
     present = t["kind"] != TrackKind.UNFORMATTED
+    noise = (t["kind"] == TrackKind.UNFORMATTED) & (t["n_hdr"] == 0)
     fill = present & ILLEGAL_FILL[t["gap_top"]] & (t["gap_top_frac"] > 0.5)
     lower = upper & (t["n_hdr"] > 0) & (t["hdr_track"] < d["track"])
     own = formatted & ~fill
@@ -226,7 +227,8 @@ def scenarios(tracks, d, thr):
         & (t["sim_next"] > fam["similar"])
         & (t["halftrack"] < 2 * DOS_TRACKS),
         "killer": t["kind"] == TrackKind.KILLER,
-        "unformatted": (t["kind"] == TrackKind.UNFORMATTED) & (t["n_hdr"] == 0),
+        "unformatted_1_35": ~upper & noise,
+        "unformatted_36_42": upper & noise,
         "no_flux_fill": fill,
         "no_sync": own & (t["n_sync"] == 0),
         "long_sync": present & (t["sync_max"] > fam["sync_long"]),
