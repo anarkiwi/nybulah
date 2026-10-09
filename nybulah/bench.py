@@ -10,7 +10,7 @@ import numpy as np
 from tqdm import tqdm
 
 from . import tool
-from .monitor import Monitor, drivecode, protocols
+from .monitor import Monitor, code_suffix, drivecode, protocols
 
 CIAPROBE = 0x0300
 CIA_K0, CIA_NK = 26, 18
@@ -50,10 +50,10 @@ def run(cbm, dev, addr, size, reps, protocol="s1", pattern=None, fast=False):
 def cia_flag(mon):
     """Drive cycles from an SDR write to the first ICR read showing SP, per timer phase.
 
-    Runs drive/ciaprobe.s on a 1571 under a monitor that leaves SRQ alone (s1, s3).
+    Runs drive/ciaprobe.s on a 1571 or 1581 under a monitor that leaves SRQ alone.
     ``table`` holds ICR & SP per write phase (rows) and read offset from CIA_K0.
     """
-    code = drivecode("ciaprobe")
+    code = drivecode("ciaprobe" + code_suffix(getattr(mon, "model", None)))
     mon.write(CIAPROBE, code)
     first = mon.jsr(CIAPROBE)[:2]
     res = mon.read(CIAPROBE + len(code) - 2 * CIA_NK, 2 * CIA_NK)

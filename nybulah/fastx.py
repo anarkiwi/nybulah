@@ -191,11 +191,11 @@ class XBLink(XLink):
         if self.tag not in mon.code:
             raise ValueError(f"monitor code lacks the {self.tag.decode()} tag")
         super(XLink, self).__init__(mon)  # pylint: disable=bad-super-call
-        speed = self.speeds[False]
+        self.fast = getattr(mon, "model", None) == "1581"
+        speed = self.speeds[self.fast]
         self.rx = getattr(self.cbm, f"{speed}_read")
         self.tx = getattr(self.cbm, f"{speed}_write")
         self.rejects = 0
-        self.fast = False
 
     @staticmethod
     def check(cmd, received=b"", sent=b""):
@@ -247,16 +247,19 @@ class XBLink(XLink):
 
 
 class SrqLink(XBLink):
-    """Firmware v11 SRQ fast serial on a 1571: XBLink's commands, bursts and chunks over
-    the CIA shift register; checks are xsum in both directions."""
+    """Firmware v11 SRQ fast serial on a 1571 or 1581: XBLink's commands, bursts and
+    chunks over the CIA shift register; checks are xsum in both directions."""
 
     code_name = "monitor_s4"
     speeds = {False: "srq", True: "srq2"}
     tag = SRQ_TAG
 
     def __init__(self, mon):
-        if identify_model(mon.cbm, mon.dev) != "1571":
-            raise ValueError(f"device {mon.dev}: s4 (SRQ fast serial) needs a 1571")
+        model = getattr(mon, "model", None) or identify_model(mon.cbm, mon.dev)
+        if model not in ("1571", "1581"):
+            raise ValueError(
+                f"device {mon.dev}: s4 (SRQ fast serial) needs a 1571 or 1581"
+            )
         super().__init__(mon)
 
     @staticmethod

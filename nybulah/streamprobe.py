@@ -1,4 +1,4 @@
-"""1571 single-track stream probe (s4, xum1541 firmware v12); never bumps.
+"""1571 or 1581 single-track stream probe (s4, xum1541 firmware v12); never bumps.
 
 Homes through Nibbler.home within --max-steps outward steps (homeprobe's plan),
 streams one track and prints how it ended, its bytes, index edges and syncs.
@@ -9,7 +9,8 @@ import pathlib
 
 import numpy as np
 
-from . import homeprobe
+from . import disk1581, homeprobe, r1581
+from .formats.mfmcap import save_captures
 from .monitor import Monitor
 from .nibbler import MAX_HALFTRACK, STREAM_REVS, Nibbler
 from .ramprobe import identify_model
@@ -29,6 +30,8 @@ def add_arguments(ap):
         help="refuse when homing needs more outward steps",
     )
     ap.add_argument("--save", type=pathlib.Path, help="write the capture (.npz)")
+    ap.add_argument("--cylinder", type=int, default=40, help="1581 cylinder")
+    ap.add_argument("--ids", type=int, default=24, help="1581 Read Address commands")
 
 
 def summary(cap):
@@ -47,9 +50,44 @@ def summary(cap):
     }
 
 
+def summary_1581(track, ids):
+    """JSON-ready digest of a 1581 Read Track and ID capture."""
+    revs = [len(r) for r in track.revolutions()]
+    return {
+        "adapter": [track.meta["adapter"], ids.meta["adapter"]],
+        "drive": [track.meta["drive_end"], ids.meta["drive_end"]],
+        "revolution_bytes": revs,
+        "revolution_us": (track.rev_end_us - track.rev_start_us).tolist(),
+        "rev_status": track.rev_status.tolist(),
+        "ids": ids.ids[:, :4].tolist(),
+        "id_crc_errors": int((ids.id_status & 0x08 > 0).sum()),
+        "index_us": ids.index_us.tolist(),
+    }
+
+
+def execute_1581(args, cbm):
+    """Home within --max-steps, then a Read Track stream and a Read Address stream."""
+    with r1581.session(cbm, args.dev, "s4") as drive:
+        drive.motor(True)
+        report = {"home": disk1581.dry(drive, args.headers)}
+        disk1581.home(drive, report["home"], args.max_steps)
+        drive.seek(args.cylinder)
+        drive.side(args.side)
+        track = drive.read_track(args.revolutions)
+        ids = drive.read_ids(args.ids)
+        report |= summary_1581(track, ids)
+        if args.save:
+            save_captures(args.save, [track, ids])
+            report["saved"] = str(args.save)
+    print(json.dumps(report))
+    return report
+
+
 def execute(args, cbm):
     """Home, stream and print the report as JSON."""
     model = identify_model(cbm, args.dev)
+    if model == "1581":
+        return execute_1581(args, cbm)
     if model != "1571":
         raise ValueError(f"device {args.dev} is a {model}: streaming needs a 1571")
     with (

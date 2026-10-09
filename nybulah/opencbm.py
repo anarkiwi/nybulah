@@ -49,6 +49,7 @@ _PROTOS = {
     "cbm_raw_read": (ctypes.c_int, [_FD, ctypes.c_void_p, ctypes.c_size_t]),
     "cbm_get_eoi": (ctypes.c_int, [_FD]),
     "cbm_iec_poll": (ctypes.c_int, [_FD]),
+    "cbm_unlisten": (ctypes.c_int, [_FD]),
     "cbm_iec_get": (ctypes.c_int, [_FD, ctypes.c_int]),
     "cbm_iec_set": (None, [_FD, ctypes.c_int]),
     "cbm_iec_release": (None, [_FD, ctypes.c_int]),
@@ -120,6 +121,10 @@ class OpenCBM:
     def reset(self):
         """Pulse IEC RESET."""
         self._check(self.lib.cbm_reset(self.fd), "cbm_reset")
+
+    def unlisten(self):
+        """UNLISTEN under ATN to every device (clears a 1571/1581 fast host flag)."""
+        self._check(self.lib.cbm_unlisten(self.fd), "cbm_unlisten")
 
     def identify(self, dev):
         """Return (device type code, description) for a drive."""

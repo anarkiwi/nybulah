@@ -28,15 +28,17 @@
 ; the command and its data: per byte s1 += b (carry c out), s2 += s1 + c,
 ; mod 256, cleared per command (fastx.xsum).
 
+.ifndef M1581
 CIA_TALO = $4004
 CIA_TAHI = $4005
-CIA_SDR  = $400C
 CIA_ICR  = $400D
 CIA_CRA  = $400E
 VIA1_ORA = $180F                ; port A, no handshake
 PA_FSDIR = $02
 PA_2MHZ  = $20
 CRA_START = $01
+.endif
+CIA_SDR  = $400C
 CRA_LOAD = $10
 CRA_SPOUT = $40
 ICR_SP   = $08
@@ -45,11 +47,23 @@ SR_PERIOD = 40                  ; send: cycles from one SDR write to the next
 SBURST   = 51                   ; sburst .. end of its loop
 RBURST   = 58                   ; rburst .. end of its loop
 
-; Drivers out first, then the CIA: CNT and SP reach the bus released.
+; Drivers out first, then the CIA: CNT and SP reach the bus released. A 1581
+; turns its drivers with PB5 and, as its DOS's spout does (patch.src
+; spout_patch), enters output mode through output, input, output.
 .macro SEND_ENTER
+.ifdef M1581
+        lda IEC
+        ora #FSDIR
+        sta IEC
+        lda #CRA_START | CRA_SPOUT
+        sta CIA_CRA
+        lda #CRA_START
+        sta CIA_CRA
+.else
         lda VIA1_ORA
         ora #PA_FSDIR
         sta VIA1_ORA
+.endif
         lda #CRA_START | CRA_SPOUT
         sta CIA_CRA
 .endmacro
@@ -116,8 +130,13 @@ rcp:    cpy #$00
         rts
 
 ; Save CRA, the timer A latch (force-loaded into the stopped counter) and
-; port A, then run timer A at SR_LATCH in input mode.
-open:   lda CIA_CRA
+; port A, then run timer A at SR_LATCH in input mode. A 1581's monitor entry
+; has already done both (ciasave).
+open:
+.ifdef M1581
+        .assert SR_LATCH = 1, error, "ciasave runs timer A at latch 1"
+.else
+        lda CIA_CRA
         sta ciasave
         lda #CRA_LOAD
         sta CIA_CRA
@@ -131,6 +150,7 @@ open:   lda CIA_CRA
         sta CIA_TALO
         lda #$00
         sta CIA_TAHI                    ; stopped: loads the counter
+.endif
         jsr spin
         lda #CLK_OUT                    ; alive: CLK alone
         sta IEC
@@ -143,11 +163,18 @@ open:   lda CIA_CRA
 ; Serial input first (CNT/SP released), then the drivers in.
 spin:   lda #CRA_START
         sta CIA_CRA
+.ifdef M1581
+        lda IEC
+        and #<~FSDIR
+        sta IEC
+.else
         lda VIA1_ORA
         and #<~PA_FSDIR
         sta VIA1_ORA
+.endif
         rts
 
+.ifndef M1581
 ; Undo open (and any 2 MHz switch) on every exit.
 ciarest:
         lda #$00
@@ -165,3 +192,4 @@ ciarest:
         sta CIA_CRA
         bit CIA_ICR                     ; DOS sees no stale serial byte
         rts
+.endif

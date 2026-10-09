@@ -95,6 +95,9 @@ class Kind(IntEnum):
     FAT_TRACK = 37
     EMPTY = 38
     CAPTURE_FAULT = 39
+    ID_NO_DATA = 40
+    DATA_SIZE = 41
+    DATA_DELETED = 42
 
 
 KIND_CLASS = np.array(
@@ -105,7 +108,8 @@ KIND_CLASS = np.array(
     + [Cls.GAP] * 4
     + [Cls.WEAK] * 4
     + [Cls.DENSITY] * 7
-    + [Cls.NONE, Cls.FAULT],
+    + [Cls.NONE, Cls.FAULT]
+    + [Cls.HEADER, Cls.DATA, Cls.DATA],
     np.uint8,
 )
 TRACK_SCENARIOS = {

@@ -21,6 +21,7 @@ from .link import (
     S2Link,
 )
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
+from .ramprobe import identify_model
 
 __all__ = [
     "BASE",
@@ -92,12 +93,29 @@ def supported(cbm, protocol):
 LINKS = {"s1": S1Link, "s2": S2Link, "s3": XLink, "s4": SrqLink}
 
 
-def link_class(cbm, protocol):
-    """The link for protocol: s3 uses burst X when adapter and drive code allow."""
-    if protocol == "s3" and f"{XBLink.code_name}.bin" in _drivecode_names():
+def model_of(cbm, dev):
+    """The drive model, or None when the adapter cannot identify it."""
+    try:
+        return identify_model(cbm, dev)
+    except (AttributeError, ValueError, OpenCBMError):
+        return None
+
+
+def code_suffix(model):
+    """Drive code built for model (monitor.s -D M1581)."""
+    return "_1581" if model == "1581" else ""
+
+
+def link_class(cbm, protocol, model=None):
+    """The link for protocol: s3 uses burst X when adapter and drive code allow; a
+    1581 has burst X only (its per-byte X monitor does not fit beside its CIA code)."""
+    suffix = code_suffix(model)
+    if protocol == "s3" and f"{XBLink.code_name}{suffix}.bin" in _drivecode_names():
         probe = getattr(cbm, "supports", None)
         if probe("xb") if probe else hasattr(cbm, "xb_read"):
             return XBLink
+    if protocol == "s3" and suffix:
+        raise ValueError("s3 on a 1581 needs burst X (xum1541 firmware v10)")
     return LINKS[protocol]
 
 
@@ -117,7 +135,8 @@ class Monitor:
     off the bus or parked. A per-protocol link does handshakes and blocks. The drive
     returns to DOS after WATCHDOG_S stalled mid-command or WATCHDOG_IDLE_S
     between commands; a command after idle_s idle restarts the monitor first
-    (a 1571 at 2 MHz halves the drive's windows, so halve idle_s there).
+    (a 1571 at 2 MHz halves the drive's windows, so halve idle_s there). The
+    identified model picks the drive code; a 1581's runs at 2 MHz throughout.
     """
 
     def __init__(
@@ -134,8 +153,10 @@ class Monitor:
         if not supported(cbm, protocol):
             raise ValueError(f"protocol must be one of {protocols()}")
         self.cbm, self.dev, self.protocol = cbm, dev, protocol
-        cls = link_class(cbm, protocol)
+        self.model = model_of(cbm, dev)
+        cls = link_class(cbm, protocol, self.model)
         name = getattr(cls, "code_name", f"monitor_{protocol}")
+        name += code_suffix(self.model)
         self.code = code if code is not None else drivecode(name)
         self.link = cls(self)
         self.running = False
@@ -198,16 +219,22 @@ class Monitor:
         self._last = self.clock()
 
     def set_fast(self, fast):
-        """Run a 1571 at 2 MHz (True) or 1 MHz; only the s3 and s4 links support it."""
+        """Run a 1571 at 2 MHz (True) or 1 MHz; only the s3 and s4 links support it.
+        A 1581 always runs at 2 MHz: True is accepted, False refused."""
+        if self.model == "1581":
+            if not fast:
+                raise ValueError("a 1581 runs at 2 MHz only")
+            return
         if not hasattr(self.link, "set_fast"):
             raise ValueError(f"{self.protocol} cannot change the drive clock")
         self.link.set_fast(fast)
 
     def stop(self):
-        """Return the drive to DOS."""
+        """Return the drive to DOS; after s4, UNLISTEN clears the fast host flag SRQ
+        traffic leaves in idle 1571s and 1581s (docs/protocol.md)."""
         if not self.running:
             return
-        if getattr(self.link, "fast", False):
+        if getattr(self.link, "fast", False) and self.model != "1581":
             self.set_fast(False)
         self.running = False
         if not self.alive():
@@ -219,6 +246,8 @@ class Monitor:
             self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)
             return
         self.link.close()
+        if self.protocol == "s4" and hasattr(self.cbm, "unlisten"):
+            self.cbm.unlisten()
 
     def recover(self):
         """Abandon the session and bring the drive back to DOS."""

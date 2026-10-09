@@ -12,6 +12,7 @@ import numpy as np
 from py65.devices.mpu6502 import MPU
 
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
+from .simwd import Wd
 
 PB_DATA_IN, PB_DATA_OUT, PB_CLK_IN, PB_CLK_OUT, PB_ATNA, PB_ATN_IN = (
     0x01,
@@ -28,6 +29,39 @@ IO_ACCESS_CYCLE = 3
 CIA_BASE, PA_FSDIR = 0x4000, 0x02
 CRA_START, CRA_LOAD, CRA_SPOUT = 0x01, 0x10, 0x40
 ICR_TA, ICR_SP, ICR_IR = 0x01, 0x08, 0x80
+ICR_TB, ICR_FLAG = 0x02, 0x10
+CRB_START, CRB_ONESHOT, CRB_LOAD, CRB_INMODE = 0x01, 0x08, 0x10, 0x60
+INMODE_PHI2, INMODE_TA = 0x00, 0x40
+PB_FSDIR, PB_WPRT = 0x20, 0x40
+
+
+WAIT, SET, REL, PUT, SAMPLE, SHL, SHR = range(7)
+
+D, C, T = IEC_DATA, IEC_CLOCK, IEC_ATN
+HOST = {
+    "s1_read": [(WAIT, D, 0), (REL, C, 0), (SAMPLE, C, 0), (SET, D, 0), (WAIT, C, 2)]
+    + [(REL, D, 0), (WAIT, D, 1), (SET, C, 0)],
+    "s1_write": [(PUT, D, 0), (REL, C, 0), (WAIT, C, 1), (PUT, D, 1), (WAIT, C, 0)]
+    + [(SET, C, 0), (REL, D, 0), (WAIT, D, 1), (SHL, 0, 0)],
+    "s2_read": [(WAIT, C, 1), (SAMPLE, D, 0), (REL, T, 0), (WAIT, C, 0), (SAMPLE, D, 0)]
+    + [(SET, T, 0)],
+    "s2_write": [(PUT, D, 2), (SHR, 0, 0), (REL, T, 0), (WAIT, C, 0), (PUT, D, 2)]
+    + [(SHR, 0, 0), (SET, T, 0), (WAIT, C, 1)],
+}
+HOST_BITS = {"s1_read": 8, "s1_write": 8, "s2_read": 4, "s2_write": 4}
+HOST_TAIL = {"s2_write": [(REL, D, 0)]}
+
+
+def host_programs():
+    """Per-byte xum1541 programs (protocol, step, op/line/arg); name -> (index, length)."""
+    progs = {n: ops * HOST_BITS[n] + HOST_TAIL.get(n, []) for n, ops in HOST.items()}
+    out = np.zeros((len(progs), max(map(len, progs.values())), 3), np.int64)
+    for i, ops in enumerate(progs.values()):
+        out[i, : len(ops)] = ops
+    return out, {n: (i, len(ops)) for i, (n, ops) in enumerate(progs.items())}
+
+
+HOST_PROGRAMS, HOST_LENGTHS = host_programs()
 
 
 class SimTimeout(OpenCBMError):
@@ -51,6 +85,8 @@ def memory_map(model, expansion):
     low = a < 0x8000
     kind = np.full(0x10000, IO, np.uint8)
     phys = np.zeros(0x10000, np.int64)
+    if model == "1581":
+        return _map_1581(a, kind, phys)
     if model == "1541":
         ram, rom_size = low & (a & 0x1800 == 0), 0x4000
         io = {VIA1: low & (a & 0x1C00 == 0x1800), VIA2: low & (a & 0x1C00 == 0x1C00)}
@@ -72,6 +108,19 @@ def memory_map(model, expansion):
     kind[~low], phys[~low] = ROM, rom_at + (a[~low] & (rom_size - 1))
     _place_expansion(kind, phys, expansion)
     return kind.tolist(), phys.tolist(), rom_at, rom_at + rom_size
+
+
+def _map_1581(a, kind, phys):
+    """1581 decoding (sm sheet 1, 74LS139 U6): 8K RAM, open $2000-$3FFF, 8520 every
+    16 bytes from $4000, WD177x every 4 from $6000, 32K ROM."""
+    ram, cia, fdc = a < 0x2000, (a >> 13) == 2, (a >> 13) == 3
+    kind[ram], phys[ram] = RAM, a[ram]
+    kind[(a >> 13) == 1] = OPEN
+    kind[cia], phys[cia] = CIA, a[cia] & 0xF
+    kind[fdc], phys[fdc] = FDC, a[fdc] & 3
+    rom = a >= 0x8000
+    kind[rom], phys[rom] = ROM, 0x2000 + (a[rom] & 0x7FFF)
+    return kind.tolist(), phys.tolist(), 0x2000, 0xA000
 
 
 def _place_expansion(kind, phys, expansion):
@@ -342,6 +391,84 @@ class Cia:  # pylint: disable=too-many-instance-attributes
             self.pend = -1
 
 
+class Cia8520(Cia):
+    """The 1581's 8520: Cia plus timer B, CRB and the FLAG input (MOS 6526 register map).
+
+    Timer B counts phi2 cycles or timer A underflows (CRB INMODE), continuous or one-shot,
+    with force load; underflows set ICR bit 1. Counting CNT edges is not modelled.
+    """
+
+    FIELDS81 = ("crb", "tb_latch", "tb_t0", "tb_c0", "atn")
+
+    def reset(self):
+        """RES: timer B stopped at $FFFF too."""
+        super().reset()
+        self.crb = self.tb_t0 = self.atn = 0
+        self.tb_latch = self.tb_c0 = 0xFFFF
+
+    def ta_underflows(self, a, c):
+        """Timer A underflows in (a, c]."""
+        if not self.cra & CRA_START:
+            return 0
+        first, p = self.t0 + self.c0 + 1, self.latch + 1
+        a, c = (0 if x < first else (x - first) // p + 1 for x in (a, c))
+        return c - a
+
+    def tb_settle(self, c):
+        """Run timer B to cycle c."""
+        if self.crb & CRB_START:
+            mode = self.crb & CRB_INMODE
+            m = c - self.tb_t0 if mode == INMODE_PHI2 else 0
+            m = self.ta_underflows(self.tb_t0, c) if mode == INMODE_TA else m
+            if m > self.tb_c0:
+                self.flags |= ICR_TB
+                if self.crb & CRB_ONESHOT:
+                    self.crb &= ~CRB_START
+                    self.tb_c0 = self.tb_latch
+                else:
+                    self.tb_c0 = self.tb_latch - (m - self.tb_c0 - 1) % (
+                        self.tb_latch + 1
+                    )
+            else:
+                self.tb_c0 -= m
+        self.tb_t0 = c
+
+    def settle(self, c):
+        """Run both timers and the shifter to cycle c."""
+        self.tb_settle(c)
+        super().settle(c)
+
+    def atn_edge(self, atn):
+        """FLAG = bus ATN level (sm sheet 3): ICR bit 4 when ATN is asserted."""
+        if atn and not self.atn:
+            self.flags |= ICR_FLAG
+        self.atn = atn
+
+    def read(self, reg, c):
+        """Register read at cycle c."""
+        if reg in (6, 7, 15):
+            self.tb_settle(c)
+            return self.crb if reg == 15 else self.tb_c0 >> 8 * (reg - 6) & 0xFF
+        return super().read(reg, c)
+
+    def write(self, reg, value, c):
+        """Register write at cycle c."""
+        if reg in (4, 5, 6, 7, 15):
+            self.tb_settle(c)
+        if reg == 6:
+            self.tb_latch = self.tb_latch & 0xFF00 | value
+        elif reg == 7:
+            self.tb_latch = self.tb_latch & 0xFF | value << 8
+            if not self.crb & CRB_START:
+                self.tb_c0 = self.tb_latch
+        elif reg == 15:
+            if value & CRB_LOAD:
+                self.tb_c0 = self.tb_latch
+            self.crb = value & ~CRB_LOAD
+        else:
+            super().write(reg, value, c)
+
+
 class Drive1541:  # pylint: disable=too-many-instance-attributes
     """A drive CPU with its model's memory map, VIA1 and optional expansion RAM."""
 
@@ -414,11 +541,15 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
             lines |= IEC_CLOCK
         return lines
 
+    def fsdir(self):
+        """Fast serial direction: CIA CNT/SP drive SRQ/DATA (1571 VIA1 PA1)."""
+        return self.via1.regs[1] & PA_FSDIR
+
     def drive_lines(self):
         """IEC lines this drive is asserting."""
         lines = self.via_lines()
         if self.cia is not None:
-            lines |= self.cia.lines(self.cycles, self.via1.regs[1] & PA_FSDIR)
+            lines |= self.cia.lines(self.cycles, self.fsdir())
         return lines
 
     def port_b(self):
@@ -486,6 +617,127 @@ class Drive1571(Drive1541):
         if self.mech is None:
             return latch
         return latch & ~self.PA_TRK0 | (0 if self.mech.track0 else self.PA_TRK0)
+
+
+class Drive1581(Drive1541):  # pylint: disable=too-many-instance-attributes
+    """1581: 8K RAM, 8520 CIA (ports, both timers, serial port, FLAG), WD177x and 32K ROM
+    at 2 MHz; built in the state DOS leaves the CIA in, holding ``media`` (simwd)."""
+
+    MODEL = "1581"
+    EXPANSION = ()
+    # iodef.src init_prt_pa/init_dd_pa/init_prt_pb/init_dd_pb, dskint.src TA/CRA/ICR,
+    # mrout.src reset_ctl + msub.src resetim TB latch $4E20 and CRB $11
+    DOS_CIA = {0: 0xFE, 1: 0xD5, 2: 0x65, 3: 0x3A, 4: 6, 5: 0, 13: 0x9A, 14: CRA_START}
+    DOS_CIA |= {6: 0x20, 7: 0x4E, 15: CRB_START | CRB_LOAD}
+
+    def __init__(self, device=8, bus=None, media=None, seed=0, **wd):
+        self._pc = -1
+        self.wd = Wd(media, **wd)
+        super().__init__(device=device, expansion=(), bus=bus, seed=seed)
+        self.cia = Cia8520()
+        self.dos_cia()
+
+    def dos_cia(self):
+        """Program the CIA as DOS initialises it."""
+        for reg, value in self.DOS_CIA.items():
+            self.write(CIA_BASE + reg, value)
+
+    def fsdir(self):
+        """PB5 FSDIR (iodef.src, sm sheet 3: 74LS241 U13 direction)."""
+        return self.port_pins(1) & PB_FSDIR
+
+    def port_pins(self, port):
+        """Output pin levels of port A (0) or B (1); input pins read high (pull-ups)."""
+        regs = self.cia.regs
+        return regs[port] & regs[port + 2] | ~regs[port + 2] & 0xFF
+
+    def via_lines(self):
+        """DATA from PB1, or from the ATN acknowledge gate (PB4 and ATN, sm sheet 3
+        74LS00 U7); CLK from PB3."""
+        atn = self.bus.host_lines & IEC_ATN
+        lines = IEC_CLOCK if self.pb_out & PB_CLK_OUT else 0
+        if self.pb_out & PB_DATA_OUT or self.pb_out & PB_ATNA and atn:
+            lines |= IEC_DATA
+        return lines
+
+    def read(self, addr):
+        """CPU read: port A pins PA3/PA4 device switches (dskint.src), /RDY and /DISK
+        CHNG; port B pins DATA, CLK, ATN in (1 = asserted) and /WPRT; the WD."""
+        k, reg, c = self._kind[addr], self._phys[addr], self.cycles + IO_ACCESS_CYCLE
+        if k == CIA and reg == 0:
+            pins = self.wd.inputs(c, 0xE7 | ((self.device - 8) & 3) << 3)
+        elif k == CIA and reg == 1:
+            pins = self.port_b() & (PB_DATA_IN | PB_CLK_IN | PB_ATN_IN) | 0x3A
+            pins |= 0 if self.wd.write_protect else PB_WPRT
+        elif k == FDC:
+            return self.wd.read(reg, c, self._pc)
+        else:
+            return super().read(addr)
+        regs = self.cia.regs
+        return regs[reg] & regs[reg + 2] | pins & ~regs[reg + 2] & 0xFF
+
+    def write(self, addr, value):
+        """CPU write: port A drives the mechanism, port B the bus."""
+        k, reg = self._kind[addr], self._phys[addr]
+        if k == FDC:
+            self.wd.write(reg, value & 0xFF, self.cycles + IO_ACCESS_CYCLE, self._pc)
+            return
+        super().write(addr, value)
+        if k == CIA and reg in (0, 2):
+            self.wd.control(self.cycles + IO_ACCESS_CYCLE, self.port_pins(0))
+        elif k == CIA and reg in (1, 3):
+            self.pb_out = self.port_pins(1) & (PB_DATA_OUT | PB_CLK_OUT | PB_ATNA)
+
+    def step(self):
+        """One instruction; the CIA's FLAG sees ATN first."""
+        if self.halted:
+            return 0
+        self.cia.atn_edge(bool(self.bus.host_lines & IEC_ATN))
+        self._pc = self.mpu.pc
+        n = super().step()
+        self._pc = -1
+        return n
+
+    def reset(self):
+        """RESET: the WD's master reset ends any command; DOS reinitialises the CIA."""
+        super().reset()
+        self.wd.write(0, 0xD0, self.cycles)
+        self.dos_cia()
+
+    def sync(self):
+        """Run the WD to the current cycle."""
+        self.wd.sync(self.cycles)
+
+
+class IdleFastDrive(IdleDOSDrive):
+    """A 1571/1581 idle in DOS: ATN acknowledge and the fast serial "fast host" flag its
+    SP interrupt latches after 8 SRQ rises (irq.src), cleared only by UNLISTEN or UNTALK
+    under ATN (sieee.src); SRQ rises are those the host makes."""
+
+    UNLISTEN, UNTALK = 0x3F, 0x5F
+
+    def __init__(self, bus):
+        super().__init__(bus)
+        self.fast_host, self.bits, self._srq = False, 0, False
+        if hasattr(bus, "listeners"):
+            bus.listeners.append(self._host)
+
+    def _host(self, lines, _t):
+        srq = bool(lines & IEC_SRQ)
+        if self._srq and not srq:
+            self.srq_rise()
+        self._srq = srq
+
+    def srq_rise(self):
+        """SRQ released: one bit into the CIA's serial port."""
+        self.bits += 1
+        if self.bits == 8:
+            self.bits, self.fast_host = 0, True
+
+    def atn_command(self, byte):
+        """A command byte under ATN."""
+        if byte in (self.UNLISTEN, self.UNTALK):
+            self.fast_host = False
 
 
 class _Memory(list):

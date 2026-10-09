@@ -6,7 +6,7 @@ DOSBus (DOS-level drives with boot and command times, for bus scripts).
 import numpy as np
 
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
-from .sim import PA_FSDIR, Bus, Drive1541, HostGone, SimTimeout
+from .sim import Bus, Drive1541, HostGone, SimTimeout
 from .simfast import NEVER, eligible, run_drive, run_transfer
 
 INF = float("inf")
@@ -15,6 +15,7 @@ IDENTITY = {
     "1571": (2, "1571", "CBM DOS V3.0 1571"),
     "1581": (3, "1581", "COPYRIGHT CBM DOS V10 1581"),
 }
+LISTEN, TALK, SECOND, UNLISTEN, UNTALK = 0x20, 0x40, 0x60, 0x3F, 0x5F
 
 
 class SimCBM:
@@ -120,12 +121,28 @@ class SimCBM:
         run_transfer(d, protocol, buf, self.budget)
         return buf.tobytes()
 
+    def _atn(self, dev, talk=False):
+        """Command bytes OpenCBM sends under ATN around a DOS call, as the bus devices
+        that decode them (IdleFastDrive) see them."""
+        seq = [LISTEN | dev, SECOND | 15, UNLISTEN]
+        seq += [TALK | dev, SECOND | 15, UNTALK] if talk else []
+        for d in self.bus.devices:
+            for b in seq if hasattr(d, "atn_command") else ():
+                d.atn_command(b)
+
+    def unlisten(self):
+        """cbm_unlisten: UNLISTEN under ATN to every device."""
+        for d in self.bus.devices:
+            if hasattr(d, "atn_command"):
+                d.atn_command(UNLISTEN)
+
     def _asserted(self, line):
         return bool(self.bus.lines() & line)
 
     def identify(self, dev):
         """cbm_identify: (device type code, description)."""
         code, desc, _ = IDENTITY[self._dos(dev).MODEL]
+        self._atn(dev, True)
         return code, desc
 
     def status(self, dev):
@@ -133,6 +150,7 @@ class SimCBM:
         d = self._answering(dev)
         if d is None:
             return "99, DRIVER ERROR,00,00"
+        self._atn(dev, True)
         return f"73,{IDENTITY[d.MODEL][2]},00,00"
 
     def reset(self):
@@ -144,15 +162,19 @@ class SimCBM:
     def upload(self, dev, addr, data):
         """M-W."""
         self._dos(dev).load(addr, data)
+        self._atn(dev)
 
     def download(self, dev, addr, size):
         """M-R."""
-        return self._dos(dev).dump(addr, size)
+        out = self._dos(dev).dump(addr, size)
+        self._atn(dev, True)
+        return out
 
     def command(self, dev, cmd):
         """Only M-E is modelled; like the xum1541, the host keeps CLK afterwards."""
         assert cmd[:3] == b"M-E"
         self._dos(dev).call(cmd[3] | cmd[4] << 8)
+        self._atn(dev)
         self.bus.host_lines |= IEC_CLOCK
 
     def iec_poll(self):
@@ -176,9 +198,12 @@ class SimCBM:
         rising = self.bus.lines() & IEC_SRQ & lines
         self.bus.host_lines &= ~lines
         if rising and not self.bus.lines() & IEC_SRQ:
+            for d in self.bus.devices:
+                if hasattr(d, "srq_rise") and not hasattr(self.bus, "listeners"):
+                    d.srq_rise()
             sp = 0 if self.bus.lines() & IEC_DATA else 1
             for d in self.drives.values():
-                if d.cia is not None and not (d.TIMED or d.via1.regs[1] & PA_FSDIR):
+                if d.cia is not None and not (d.TIMED or d.fsdir()):
                     d.cia.edge(sp)
 
     def iec_wait(self, line, state):

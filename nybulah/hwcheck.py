@@ -10,7 +10,7 @@ import pathlib
 import sys
 import time
 
-from . import bench, disk, ramprobe, tool
+from . import bench, disk, disk1581, r1581, ramprobe, tool
 from .bus import recover
 from .monitor import Monitor, supported
 from .nibbler import Nibbler
@@ -67,6 +67,12 @@ def disk_step(cbm, dev, proto, model, allow_bump=False, archive=None):
         return disk.survey(nib, archive=archive)
 
 
+def disk_1581(cbm, dev, proto):
+    """The 1581 dry probe with headers: status, index period, an ID; no stepping."""
+    with r1581.session(cbm, dev, proto) as drive:
+        return disk1581.dry(drive, headers=True)
+
+
 FAST = ("s3", "s4")  # protocols that can run a 1571 at 2 MHz
 
 
@@ -74,8 +80,8 @@ def bench_skip(cbm, proto, model, base, size):
     """Why proto cannot be benched here, else None."""
     if base is None:
         return f"no unaliased RAM run of {size} bytes"
-    if proto == "s4" and model != "1571":
-        return "s4 needs a 1571"
+    if proto == "s4" and model not in ("1571", "1581"):
+        return "s4 needs a 1571 or 1581"
     if not supported(cbm, proto):
         return f"{proto} not supported here"
     return None
@@ -88,8 +94,10 @@ def check_dev(  # pylint: disable=too-many-arguments
     cbm = session.cbm
     session.step("identify", dev, lambda: list(cbm.identify(dev)))
     probe = session.step("ramprobe", dev, lambda: ramprobe.probe(cbm, dev))
-    base = probe and ramprobe.expansion_base(probe, size)
     model = probe and probe["model"]
+    if model == "1581":
+        size = min(size, ramprobe.CACHE_1581[1] - ramprobe.CACHE_1581[0])
+    base = probe and ramprobe.expansion_base(probe, size)
     for proto in protos:
         reason = bench_skip(cbm, proto, model, base, size)
         if reason:
@@ -112,6 +120,11 @@ def check_dev(  # pylint: disable=too-many-arguments
                 dev,
                 lambda d=pattern: ramprobe.verify(cbm, dev, base, d),
             )
+    if model == "1581":
+        session.step("dos_cache", dev, lambda: r1581.invalidate(cbm, dev))
+        if disk_check:
+            session.step("disk", dev, lambda: disk_1581(cbm, dev, protos[0]))
+        return
     if not disk_check:
         return
     if base is None:

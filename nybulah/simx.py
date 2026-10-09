@@ -18,7 +18,6 @@ from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
 from .sim import (
     CIA,
     IO_ACCESS_CYCLE,
-    PA_FSDIR,
     PB_ATN_IN,
     PB_CLK_IN,
     PB_DATA_IN,
@@ -26,6 +25,7 @@ from .sim import (
     Bus,
     Drive1541,
     Drive1571,
+    Drive1581,
     HostGone,
     IdleDOSDrive,
 )
@@ -434,7 +434,7 @@ class TimedDrive1571(TimedDrive1541):
                 del q[1:3]  # no sample sees SRQ high before the next fall
                 continue
             del q[:2]
-            if low < high and not self.via1.regs[1] & PA_FSDIR:
+            if low < high and not self.fsdir():
                 level = self.bus.level(self.time(high + 0.5))
                 self.cia.edge(0 if level & IEC_DATA else 1)
         if q and not q[0][1]:
@@ -462,7 +462,7 @@ class TimedDrive1571(TimedDrive1541):
             self._cia_schedule(self.cycles + IO_ACCESS_CYCLE)
 
     def _cia_schedule(self, c):
-        cia, fsdir = self.cia, self.via1.regs[1] & PA_FSDIR
+        cia, fsdir = self.cia, self.fsdir()
         u1, _, pend, *_ = cia.advance(c)
         p = cia.latch + 1
         steps = range(0 if u1 < 0 else 16 * (2 if pend >= 0 else 1))
@@ -753,7 +753,20 @@ class SimX(SimCBM):
         self.xb_write(data, 8)
 
 
+class TimedDrive1581(TimedDrive1571, Drive1581):
+    """1581 on a TimedBus: always 2 MHz, port B and FSDIR in the CIA."""
+
+    MODEL, EXPANSION = Drive1581.MODEL, Drive1581.EXPANSION
+    port_a = Drive1581.port_a
+
+    def __init__(self, *args, cyc=0.5, **kw):
+        self._srq = []
+        super().__init__(*args, cyc=cyc, **kw)
+
+
 TIMED = {Drive1541: TimedDrive1541, Drive1571: TimedDrive1571}
+TIMED[Drive1581] = TimedDrive1581
+MODELS = {"1541": TimedDrive1541, "1571": TimedDrive1571, "1581": TimedDrive1581}
 
 
 def adapter(protocol, cls=Drive1541, device=8, bus=None, **drive_kw):
@@ -767,7 +780,8 @@ def adapter(protocol, cls=Drive1541, device=8, bus=None, **drive_kw):
 def make(model="1541", cyc=1.0, rise=0.5, peers=0, dev=8, **kw):
     """SimX with a timed drive (and idle DOS peers) on a fresh bus."""
     bus = TimedBus(rise)
-    cls = TimedDrive1571 if model == "1571" else TimedDrive1541
+    cls = MODELS[model]
+    cyc = 0.5 if model == "1581" else cyc
     drive = cls(device=dev, bus=bus, cyc=cyc, read_jitter=kw.pop("read_jitter", 0.0))
     for _ in range(peers):
         IdleDOSDrive(bus)

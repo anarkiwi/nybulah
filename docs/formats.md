@@ -44,6 +44,58 @@ From the command line:
 | SCP | yes | yes | every revolution of flux, index times, WRSP write splices | — |
 | KryoFlux stream | yes | yes | every revolution of flux, index sample positions | — |
 | D64 | yes | yes | sector data, error bytes | everything below the sector level |
+| D81 | yes | yes | 1581 sector data, error bytes | everything below the sector level |
+| IMD | yes | yes | per-track sector IDs (order, C/H maps), sizes, deleted marks, data errors | gaps, ID CRC errors, data without ID |
+| 1581 capture npz | yes | yes | Read Track revolutions, Read Address ID lists, times, index edges | sub-byte timing |
+
+## 1581 MFM images
+
+`nybulah.formats.mfmcap.load_disk(path)` loads D81, IMD and 1581 capture npz
+files, or a directory of capture npz files, into an `MfmDisk`. It returns None
+for other files. `MfmDisk.tracks` maps `(cylinder, physical head)` to
+`analysis.mfm.MfmTrack` decodes of Read Track output or media. `MfmDisk.ids`
+holds the Read Address lists. `nybulah info`, `info --map`, `map` and
+`convert` (to `.d81`, `.imd` or `.npz`) accept these files.
+
+**D81** (`formats.d81`). The image is 80 tracks × 40 sectors × 256 bytes,
+in (track, sector) order, with 3200 optional error bytes. `D81.info()` reads:
+
+- the header 40/0 (`newdsk.src`): directory link at 0, format byte at 2, name
+  at 4–19, ID at 22–23, DOS version at 25;
+- the BAM 40/1–2 (`mapit.src`): 40 tracks per block, 6 bytes per track from
+  offset 16 (free count, then a bitmap with 1 = free).
+
+`to_tracks` formats every side with `analysis.mfm.standard_layout`. The two
+halves of a physical sector take the more severe error byte. `from_decodes`
+keeps the best read of each physical sector over all revolutions.
+
+**IMD** (`formats.imd`). Written from chapter 6 of Dave Dunfield's ImageDisk
+`IMD.TXT` (1.18): the ASCII header ends with $1A; each track then has mode,
+cylinder, head (bit 7: cylinder map, bit 6: head map), count and size code; the
+sector numbering map; the optional maps; and records 0–8 (unavailable, normal,
+compressed, deleted and data-error variants). The suggested size code $FF
+(a table of 16-bit sizes) handles mixed sizes. Tracks are mode 5 (250 kbps
+MFM). The head byte is the physical head; a 1581 writes H = 1 − head, so every
+1581 track carries a head map. Export keeps each good ID's best read in
+rotational order. Sectors with ID CRC errors are left out, as ImageDisk cannot
+read them. Import encodes the sectors with 1581 gaps; gap 3 shrinks, down to
+the WD1772 minimum of 2 bytes, when they overflow 6250 bytes.
+
+**Capture record** (`formats.mfmcap.MfmCapture`, npz version 1):
+
+| field | meaning |
+|---|---|
+| `kind` | `track` (Read Track) or `ids` (Read Address) |
+| `cylinder`, `head`, `side_select` | physical head = 1 − PA0; `side_select` is PA0 |
+| `data`, `rev_offsets` | Read Track bytes of every revolution, cut by offsets |
+| `rev_start_us`, `rev_end_us`, `rev_status` | per revolution: times and WD status |
+| `ids`, `id_status`, `id_us` | per ID: six bytes, WD status, time |
+| `index_us` | measured index edges |
+| `meta` | JSON: adapter/drive end, rpm, firmware, notes |
+
+`save_captures(path, captures)` writes any number of records into one npz,
+tagged `nybulah_mfm` = (version, count). `load_captures` reads such an npz, or
+every one in a directory.
 
 ## Flux to bits
 
@@ -81,6 +133,8 @@ spans as weak pulses.
   exists; the PyPI package `bcl` is an unrelated cryptography library. The
   codec was written from the BCL stream format. Its output decodes with BCL,
   and BCL's output decodes here. No nibtools (GPL) code was used.
+- **IMD.** Implemented from the format chapter of `IMD.TXT` (ImageDisk 1.18,
+  Dave Dunfield); no ImageDisk code was used.
 - **P64.** Implemented from the specification in the VICE manual. The
   reference `p64.c` by Benjamin Rosseaux is under the zlib licence. The writer
   produces byte-identical output to it.

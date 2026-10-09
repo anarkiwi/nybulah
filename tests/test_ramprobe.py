@@ -82,11 +82,22 @@ def test_identify_model(code, desc, model):
     assert ramprobe.identify_model(Ident(code, desc), 8) == model
 
 
+def test_1581_identifies_and_has_no_expansion():
+    assert ramprobe.identify_model(Ident(3, "1581"), 9) == "1581"
+    assert ramprobe.identify_model(Ident(-1, "jiffydos 6.0 1581"), 9) == "1581"
+    mask = ramprobe.io_mask("1581")
+    assert not mask[:0x2000].any() and mask[0x2000:0x8000].all()
+    assert not mask[0x8000:].any()
+    probe = ramprobe.probe(Ident(3, "1581"), 9)
+    assert ramprobe.expansion_base(probe, 0x1400) == 0x0C00
+    assert ramprobe.expansion_base(probe, 0x1401) is None
+
+
 def test_rejects_bad_arguments():
     with pytest.raises(ValueError, match="unsupported"):
-        ramprobe.identify_model(Ident(3, "1581"), 8)
+        ramprobe.identify_model(Ident(4, "2031"), 8)
     with pytest.raises(ValueError, match="unknown model"):
-        ramprobe.io_mask("1581")
+        ramprobe.io_mask("1551")
     cbm = SimCBM()
     for kw in (
         {"block": 0x300},

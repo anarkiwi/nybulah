@@ -321,9 +321,10 @@ Sources: drive side `drive/proto_srq.inc` (`monitor_s4.bin`, command loop
   1571, however, keeps its CIA in input mode, and where its ROM enables the
   SP interrupt (`spinp` in 310654-05, ICR mask `$88`) every 8 SRQ rises it
   sees make `irq1571.src` set the "fast host" flag (`fastsr` bit 6), which
-  DOS clears only on UNLISTEN/UNTALK. A second powered 1571 on the bus therefore needs an
-  UNLISTEN (any OpenCBM command sequence ends with one) before it is
-  talked to; drives under s4 clear their own ICR before returning to DOS.
+  DOS clears only on UNLISTEN/UNTALK; an idle 1581 does the same (`irq.src`,
+  `sieee.src`) and while the flag is set answers a TALK over its shift register.
+  `Monitor.stop` therefore sends UNLISTEN after every s4 session; drives under s4
+  clear their own ICR before returning to DOS.
 
 ### Session and commands
 
@@ -543,3 +544,141 @@ lies inside its bounds, writes are 40 or more cycles apart, and no stream read
 hits either stop (`Mechanism.bumps`, `inner_stops`). A throttled host drain
 gives overrun, a silent drive a timeout with ATN, and multi-revolution streams
 merge on their index edges.
+
+## 1581 (monitor_*_1581, firmware v10-v12 unchanged)
+
+The 1581 speaks the same transports at 2 MHz with the adapter's 2 MHz timings (`x2`
+is not built: burst X `xb2`, `srq2`, `srq2_stream`), so no firmware change is
+needed. Its serial bus sits on the 8520 CIA's port B at `$4001` with the 1541's bit
+values (PB0 DATA in, PB1 DATA out, PB2 CLK in, PB3 CLK out, PB4 ATN acknowledge,
+PB7 ATN in), and the shift register reaches SRQ/DATA through a 74LS241 and 7407s
+turned by PB5 (1581 service manual PN-314982-01, schematic 252380 sheet 3; DOS
+`iodef.src`). Every timed loop keeps its instruction sequence, so the drive
+schedules above hold cycle for cycle.
+
+Sources: `drive/monitor.s` and the `proto_*.inc` files built with `-D M1581=1`
+(`monitor_s1_1581`, `monitor_s2_1581`, `monitor_xb_1581`, `monitor_s4_1581`),
+`drive/ciaprobe.s` (`ciaprobe_1581`), host `Monitor` (model from `cbm_identify`, type
+3), `fastx.XBLink`/`SrqLink`.
+
+| | 1571 | 1581 |
+|---|---|---|
+| IEC port | VIA1 PB `$1800` | CIA PB `$4001` |
+| ATN acknowledge | XOR: pulls DATA unless PB4 = ATN in | NAND (U7): pulls DATA iff PB4 = 1 and ATN asserted |
+| S2's ATNA under ATN | PB4 = 1 | PB4 = 0 (`ACK_HELD`) |
+| fast serial drivers | VIA1 PA1 | CIA PB5 |
+| entering output mode | CRA bit 6 | CRA out, in, out (DOS `patch.src` spout_patch) |
+| watchdog | VIA1 T1 free-run, IFR bit 6 | CIA timer B counting timer A underflows, ICR bit 7 |
+| clock | 1 or 2 MHz (PA5) | 2 MHz (16 MHz / 8, U10) |
+
+Timer A runs at latch 1 (an underflow every 2 cycles) for the whole session; timer B
+counts its underflows from `$FFFF`, so it falls by one every microsecond and wraps
+every 65.536 ms. The watchdog takes 16 wraps (1.05 s) inside a command and 152
+(9.96 s) between commands. WAIT polls `bit $400D / bpl`: ICR bit 7 is set by any
+source in the mask, which the DOS sets to FLAG, SP and timer B (`dskint.src` `$9A`)
+and the monitor ensures holds timer B (`$82`); an ATN edge or a shift register byte
+during a WAIT therefore also counts a wrap, shortening the window by one sixteenth.
+Entry saves CRA, CRB and both timer latches (stopped and force-loaded counters read
+back); every exit puts the shift register in input mode before the drivers turn in,
+restores the timers and reads ICR.
+
+The per-byte X monitor does not fit beside the CIA code (`$0500-$07FF`); on a 1581
+`s3` is burst X (firmware v10). The monitor is at most `$0290` bytes, so the 1581
+drive code can use `$0790-$09FF` as well as `$0300-$04FF`.
+
+`ciaprobe_1581` measures the 8520's SDR-write-to-ICR-flag latency exactly as on the
+1571 (`tools/xprobe.py --cia`); the 40-cycle send period needs it at 39 or less, as
+the 1571's 6526 shows (34).
+
+## 1581 capture and streaming (drive/mfm.s, drive/mfmstream.s)
+
+The WD177x at `$6000-$6003` runs from 8 MHz, exactly four of its clocks per CPU
+cycle (both divided from Y1 by U10). DRQ and INTRQ are not wired to the CPU; the code
+polls the status register (bit 0 BUSY; bit 1 DRQ, or in the type I status after a
+force interrupt, the live index pulse; bit 2 TR00 in type I status). Index and TR00
+reach the CPU only through that status. Every instruction that touches the WD sits
+at an address whose low two bits are not 00, as the DOS places its own
+(`mfmmacro.src` WDTEST); the assembler checks it. After a command write the code
+waits 67 cycles before reading status (datasheet: BUSY valid after 24 us, the other
+bits after 32 us, a new command 16 us after a force interrupt).
+
+### Homing and seeks
+
+`restore` issues Restore with h = 1 and the 12 ms rate (r1r0 = 01: 12 ms on both the
+WD1770 and the WD1772). The WD pulses STEP at 0, T, 2T, ... and samples TR00 T after
+each pulse, so the c-th pulse comes at (c - 1)T and the (c + 1)-th at cT. The drive
+force-interrupts at (c - 1/2)T after its timestamp just after the command (the
+timestamp is at most 60 us late), between the two, and then reads the type I status:
+TR00 sensed means the track register is set to 0; otherwise the call fails with
+`$80 | status`. c comes from the host (`Mfm1581.estimate`: a good ID's C, else the WD
+track register through which the DOS seeks, at most 80) and is never exceeded: a
+head further out than c stops short of TR00 and errs; nothing steps blindly.
+Seek moves from the homed track register to 0..80 (DOS formats 0..79; Wheels writes
+cylinder 80).
+
+### Stream engine
+
+`mfmstream_1581` runs a list of up to seven entries (`op trk sec rep`): Read
+Address, Read Sector or Read Track, or an index edge wait, each up to 127 times
+(Read Sector optionally advancing the sector). Every byte the WD delivers goes
+straight to the shift register; metadata (CLK asserted) carries a record per command
+(`$0C`: two stamps, the WD status, a timeout flag and the byte count, packed into
+six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, whenever timer
+B bits 15-13 change while waiting, 8.2 ms, under the adapter's 20 ms) and the v12
+END family. `nybulah.mfmstream.MfmStream` parses it.
+
+Cycle tables (t = 0 at an SDR write, from the code):
+
+| path | status reads | data register read | next SDR write |
+|---|---|---|---|
+| `dl` data loop | 24 (28 with a count carry), then every 21 | 37 | 41 (45) |
+| `w0` before the first DRQ | every 30 or less | 11 or less after the read that sees DRQ | 11 after the read |
+| `send` (one metadata byte, w0) | -14, 4, 28 | 13 (DRQ at 4), 37 (at 28) | metadata at 0, data at 40 or 48 |
+| `plain` (WD idle) | | | 40 |
+
+Bounds (the shifter flags a byte within 39 cycles; a byte waits in the data
+register for at most 64 cycles before the next one overwrites it, 32 us at 250
+kbit/s):
+
+| quantity | worst case | budget | margin |
+|---|---|---|---|
+| SDR write spacing | 40 (`send` s4 path), 41 (`dl`) | > 39 | 1 cycle |
+| byte waiting in `dl` | 34 (21 + 13) | 64 | 30 |
+| first byte, from `w0` | read 41 after arrival; second byte read 106 after the first's arrival | 128 (third arrival) | 22 |
+| first byte during a metadata write | arrival after -14; second byte read at 94 | > 114 | 20 |
+| backlog | writes 40 apart against bytes 64 apart | | drains 24 cycles a byte |
+| CLK for metadata | asserted at -4, released at 16 to 24 | adapter samples 4-14 | 2 cycles |
+| ATN seen | every byte in `dl`, every pass of `w0` | adapter holds ATN 8622 us | |
+
+A stamp reads ICR 4 cycles and timer B low 22 cycles after its reference (the
+first byte's SDR write, the status read that saw the command end, or the one that
+saw the index): its microsecond time is the wrap count, plus one when ICR showed a
+wrap, plus one when it did not and the elapsed count is at most 9 (a wrap between
+the two reads). Every other ICR read is at least 32 cycles before a stamp's, so that
+case cannot come from a wrap already counted.
+
+Every read loop takes a pending DRQ before BUSY: Read Address and Read Sector clear
+BUSY with their last byte still in the data register.
+
+Read Track starts at the leading edge of an index pulse and ends at the next
+(datasheet); the engine reissues it as soon as BUSY clears, and the records' t_first
+show whether the WD caught the next edge or waited a revolution. A command that
+outlasts TMO wraps (six revolutions at the measured period: the WD gives up Read
+Sector and Read Address after five) is force-interrupted and ends the stream with
+END_TIMEOUT.
+
+### Without streaming
+
+`mfm_1581` reads one ID or one sector into the DOS track cache (`$0C00-$1FFF`) and
+writes there from: Write Track from a run-length image (token 0 ends, 1-127 repeat
+the next byte, 128-255 copy t - 127 bytes; the last byte repeats until the WD stops
+at the index) and runs of Write Sector, back to back. Each byte is loaded into X
+before its DRQ wait, so it is written within one status poll of the DRQ; a token is
+read between runs, inside the byte time the WD shifts the last one. The first byte
+is ready before the Write Track command goes out (the WD gives up unless it is
+written within three of its byte clocks). Read loops read the data register within
+one poll plus 13 cycles. Write commands carry the DOS's precompensation
+bit (`msub.src` precmp: set from cylinder 44 on). Afterwards the host runs DOS job
+`$82` (controller reset: cache invalidated, no head movement) through the job queue
+at `$0002`, and waits 0.32 s before a session that writes the cache (DOS writes a
+dirty cache back after 32 controller ticks of bus silence, `idle.src`).

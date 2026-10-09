@@ -1,7 +1,8 @@
-; 6526 shift register timing probe for a 1571, called through the J command
+; 6526 shift register timing probe for a 1571 (or, with -D M1581=1, the 1581's
+; 8520, whose drivers turn with port B bit 5), called through the J command
 ; of a monitor that leaves SRQ alone (s1, s3): the adapter of an s4 session
 ; would take the probe's SRQ pulses for its reply. It saves CRA, the timer A
-; latch and VIA1 port A, runs timer A at latch 1 (an underflow every 2
+; latch and the driver port, runs timer A at latch 1 (an underflow every 2
 ; cycles) with the shift register in output mode, and restores all three.
 ; Shifting $FF keeps DATA released; only SRQ pulses.
 ;
@@ -23,8 +24,13 @@ CIA_TAHI = $4005
 CIA_SDR  = $400C
 CIA_ICR  = $400D
 CIA_CRA  = $400E
-VIA1_ORA = $180F
-PA_FSDIR = $02
+.ifdef M1581
+FSDIR_PORT = $4001              ; 8520 port B, PB5 (1581)
+FSDIR    = $20
+.else
+FSDIR_PORT = $180F              ; VIA1 port A without handshake, PA1 (1571)
+FSDIR    = $02
+.endif
 CRA_START = $01
 CRA_LOAD = $10
 CRA_SPOUT = $40
@@ -46,15 +52,15 @@ probe:  lda CIA_CRA
         sta save + 1
         lda CIA_TAHI
         sta save + 2
-        lda VIA1_ORA
+        lda FSDIR_PORT
         sta save + 3
         lda #1
         sta CIA_TALO
         lda #0
         sta CIA_TAHI
         lda save + 3
-        ora #PA_FSDIR
-        sta VIA1_ORA
+        ora #FSDIR
+        sta FSDIR_PORT
         lda #CRA_START | CRA_SPOUT
         sta CIA_CRA
         lda #2 * NK - 1
@@ -103,7 +109,7 @@ slide:  .res NOPS, OP_NOP
         lda #0
         sta CIA_CRA
         lda save + 3
-        sta VIA1_ORA
+        sta FSDIR_PORT
         lda save + 1
         sta CIA_TALO
         lda save + 2

@@ -17,6 +17,12 @@ from . import tool
 BASE_RAM = 0x0800
 
 
+# 1581 (service manual memory map): 8 KB RAM, nothing from $2000 to the CIA
+# ($4000-$5FFF) and the WD177x ($6000-$7FFF); its free RAM is the DOS track cache.
+RAM_1581 = 0x2000
+CACHE_1581 = (0x0C00, 0x2000)
+
+
 def io_mask(model):
     """Per-address True where the model decodes I/O (or undocumented space)."""
     a = np.arange(0x10000)
@@ -24,12 +30,17 @@ def io_mask(model):
         return (a < 0x8000) & (a & 0x1800 != 0)
     if model == "1571":
         return (a >= BASE_RAM) & (a < 0x6000)
+    if model == "1581":
+        return (a >= RAM_1581) & (a < 0x8000)
     raise ValueError(f"unknown model {model}")
 
 
 def identify_model(cbm, dev):
-    """1541 or 1571 from cbm_identify (type codes 0 = 1541, 1/2 = 1570/1571)."""
+    """1541, 1571 or 1581 from cbm_identify (type codes 0 = 1541, 1/2 = 1570/1571,
+    3 = 1581; OpenCBM cbm_device_type_e)."""
     code, desc = cbm.identify(dev)
+    if code == 3 or "1581" in desc:
+        return "1581"
     if code in (1, 2) or "157" in desc:
         return "1571"
     if code == 0 or "1541" in desc:
@@ -89,7 +100,8 @@ def _homes(markers, back, probes, bases, offset):
 
 
 def probe(cbm, dev, model=None, start=BASE_RAM, end=0x10000, block=0x400, offset=0x3F0):
-    """Map RAM in [start, end) for dev, restoring every byte it changes.
+    """Map RAM in [start, end) for dev, restoring every byte it changes. A 1581 has
+    no expansion: its free run is the DOS track cache, which is not probed.
 
     Returns {"dev", "model", "blocks": [{"addr", "kind", "alias"}], "ram": [[lo, hi]]}
     where kind is io (never touched), ram or none, and ram lists unaliased runs.
@@ -99,6 +111,8 @@ def probe(cbm, dev, model=None, start=BASE_RAM, end=0x10000, block=0x400, offset
     if not 0 <= offset <= block - 2:
         raise ValueError("offset must leave two bytes inside a block")
     model = model or identify_model(cbm, dev)
+    if model == "1581":
+        return {"dev": dev, "model": model, "blocks": [], "ram": [list(CACHE_1581)]}
     starts = np.arange(start, end, block)
     if len(starts) > 256:
         raise ValueError("at most 256 blocks")
@@ -139,7 +153,7 @@ def add_arguments(ap):
     """Command line options."""
     num = functools.partial(int, base=0)
     ap.add_argument("--dev", type=int, default=8)
-    ap.add_argument("--model", choices=("1541", "1571"))
+    ap.add_argument("--model", choices=("1541", "1571", "1581"))
     ap.add_argument("--start", type=num, default=BASE_RAM)
     ap.add_argument("--end", type=num, default=0x10000)
     ap.add_argument("--block", type=num, default=0x400)

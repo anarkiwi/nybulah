@@ -1,7 +1,8 @@
-"""1571 track 00 sensor and stepper phase probe; steps only with --step.
+"""1571 track 00 sensor and stepper phase probe, or a 1581's WD177x type I status
+and track register; steps only with --step.
 
-The dry run reads PA0 (raw and debounced), the phase and DOS's track, and the
-homing plan. --step homes within --max-steps outward steps, then steps back.
+The dry run reads the sensor, position and homing plan; --step homes within --max-steps
+(1571 outward steps, 1581 Restore pulses), then returns to the estimate.
 """
 
 import json
@@ -9,7 +10,7 @@ import sys
 
 from tqdm import tqdm
 
-from . import tool
+from . import disk1581, r1581, tool
 from .monitor import Monitor, protocols
 from .nibbler import HOME_HALFTRACK, MAX_HALFTRACK, SENSOR_EDGE, SENSOR_WALK
 from .nibbler import Nibbler
@@ -91,8 +92,15 @@ def add_arguments(ap):
 def execute(args, cbm):
     """Probe and print the report as JSON."""
     model = identify_model(cbm, args.dev)
+    if model == "1581":
+        with r1581.session(cbm, args.dev, args.transport) as drive:
+            report = disk1581.dry(drive, args.headers)
+            if args.step:
+                disk1581.home(drive, report, args.max_steps)
+        print(json.dumps(report))
+        return report
     if model != "1571":
-        raise ValueError(f"device {args.dev} is a {model}: the probe needs a 1571")
+        raise ValueError(f"device {args.dev} is a {model}: the probe needs a 1571/1581")
     with Monitor(cbm, args.dev, args.transport) as mon, Nibbler(mon, model) as nib:
         report = dry(nib, args.headers)
         if args.step:

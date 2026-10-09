@@ -2,7 +2,7 @@
 
 Default: reads, writes and a jsr of growing size, stopping at the first failure.
 --rate: read rate of repeated blocks. --sweep: host-clock read time per block size
-and its per-byte/per-block fit. --cia: 1571 6526 SDR-to-ICR flag latency (under s3).
+and its per-byte/per-block fit. --cia: 1571 6526 or 1581 8520 SDR-to-ICR flag latency (under s3).
 """
 
 import argparse
@@ -65,7 +65,9 @@ def main():
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--rate", action="store_true", help="only measure read rate")
     ap.add_argument("--sweep", action="store_true", help="read time per block size")
-    ap.add_argument("--cia", action="store_true", help="1571 CIA flag latency (s3)")
+    ap.add_argument(
+        "--cia", action="store_true", help="1571/1581 CIA flag latency (s3)"
+    )
     ap.add_argument("--reps", type=int, default=10)
     args = ap.parse_args()
     with OpenCBM() as cbm:
