@@ -18,6 +18,7 @@ import zipfile
 import numpy as np
 from tqdm import tqdm
 
+from .analysis.capture import segments
 from .analysis.cycle import TrackKind, lag_window
 from .analysis.gcr import (
     SYNC_MIN_BITS,
@@ -37,7 +38,13 @@ from .analysis.sector import (
     decode_track,
 )
 from .formats.g64 import SIDE1
-from .formats.image import SIDE1_TRACK_BASE, DiskImage, best_revolution, loads
+from .formats.image import (
+    SIDE1_TRACK_BASE,
+    Capture,
+    DiskImage,
+    best_revolution,
+    loads,
+)
 from .formats.nib import write_nib
 
 SUFFIXES = {".nib", ".nbz", ".nb2", ".g64", ".g71", ".p64", ".scp"}
@@ -649,27 +656,23 @@ def scan(root, out, workers=18, limit=None, progress=True):
 
 
 def survey_captures(captures):
-    """Survey bit captures keyed by halftrack: ``{key: (bits, zone)}`` lists."""
-    from .formats.image import Capture
-
-    image = DiskImage(
-        "capture",
-        {
-            k: [Capture(np.asarray(b, np.uint8), z) for b, z in v]
-            for k, v in captures.items()
-        },
-    )
-    return survey_image(image)
+    """Survey captures keyed by halftrack: ``{key: [formats.image.Capture]}``."""
+    return survey_image(DiskImage("capture", captures))
 
 
 def load_captures(folder):
-    """``{halftrack | side: [(bits, zone)]}`` from saved nibbler capture records."""
+    """``{halftrack | side: [Capture]}`` from saved nibbler capture records.
+
+    Each keeps its record as ``framed``, so revolutions are found per segment.
+    """
     nibbler = importlib.import_module(f"{__package__}.nibbler")
     captures = {}
     for path in sorted(pathlib.Path(folder).glob("read-*.npz")):
         cap = nibbler.Capture.load(path)
         key = cap.halftrack | (SIDE1 if cap.side else 0)
-        captures.setdefault(key, []).append((cap.bits(), cap.density))
+        captures.setdefault(key, []).append(
+            Capture(segments(cap).bits, cap.density, framed=cap)
+        )
     return captures
 
 

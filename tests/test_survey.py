@@ -19,7 +19,7 @@ from nybulah.analysis.sector import (
     SectorError,
     format_track,
 )
-from nybulah.analysis.synth import simulate_capture
+from nybulah.analysis.synth import byte_capture, simulate_capture
 from nybulah.formats import Nib, NibEntry, loads, to_g64, write_g64, write_nib
 from nybulah.formats.nib import NIB_TRACK
 
@@ -213,8 +213,13 @@ def test_scan_resume_summary_and_cli(corpus, tmp_path, monkeypatch, capsys):
     nib = np.flatnonzero(data["image_fmt"] == "nib")[0]
     assert data["image_pair"][nib].endswith("disk.g64")
 
+    stream = np.tile(gcr.to_bits(_gcr(18)), 2)
+    latched = byte_capture(stream, 7936, rng=0)
     record = types.SimpleNamespace(
-        halftrack=36, side=0, density=2, bits=lambda: gcr.to_bits(_gcr(18))
+        **vars(latched),
+        halftrack=36,
+        side=0,
+        density=2,
     )
     module = types.SimpleNamespace(
         Capture=types.SimpleNamespace(load=lambda path: record)
