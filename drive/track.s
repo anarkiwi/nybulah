@@ -11,6 +11,10 @@
 ;   base+3  read   one capture pass of npages pages into the buffer
 ;   PASS    write  write npages pages from the buffer, then read mode
 ;
+; -D SEEK=1 (1571) assembles prep (and its delay) alone, in base RAM, for
+; drives streaming without expansion RAM (drive/stream.s takes the same page
+; to stream); prep is the same code either way.
+;
 ; Parameters and state live in zero page at ZP (the host saves and restores
 ; that range around a session). The host also saves PCR (and on the 1571
 ; VIA1 PA, clearing PA5 for 1 MHz) before the first call and restores them
@@ -75,6 +79,10 @@
 ; after the read that saw SYNC.
 
         .setcpu "6502"
+
+.ifndef SEEK
+SEEK = 0
+.endif
 
 .if MODEL = 1541
 BUFPG    = $80
@@ -175,10 +183,26 @@ w:      BR bvs, ok
         jmp fail
 .endmacro
 
+; Wait A milliseconds, 1000 cycles each at 1 MHz.
+.macro DELAY_ROUTINE
+delay:  tay
+        beq dd
+d1:     ldx #198
+d2:     dex
+        bne d2
+        nop
+        nop
+        dey
+        bne d1
+dd:     rts
+.endmacro
+
         .segment "CODE"
 
         jmp prep
+.if !SEEK
         jmp read
+
 
 ; Start mode 3: wait for the anchor, abandoning the pass if it never comes.
 anchor3:
@@ -213,6 +237,8 @@ mx:     ldx #0
         BR bne, mw
 mfail:  sec
         rts
+
+.endif
 
 soeoff: lda PCR2
         and #PCR_SOE_MASK
@@ -261,6 +287,7 @@ stp:    txa
 :       lda status
         rts
 
+.if !SEEK
 ; Wait until SYNC (PB7) equals bit 7 of A; C set on timeout.
 pb7:    sta tmp
 :       lda VIA2PB
@@ -438,6 +465,11 @@ tsrel:  txa
 full:   lda #ST_FULL
         jmp fail
 
+.endif
+
+.if SEEK
+        DELAY_ROUTINE
+.else
         .segment "PASS"
 write:  lda #ST_WPROT
         sta status
@@ -498,18 +530,8 @@ wend:   lda PCR2
         sta VIA2DDRA
         jmp soeoff
 
-; Wait A milliseconds, 1000 cycles each at 1 MHz.
-delay:  tay
-        beq dd
-d1:     ldx #198
-d2:     dex
-        bne d2
-        nop
-        nop
-        dey
-        bne d1
-dd:     rts
 
+        DELAY_ROUTINE
 
 bw:     VWAIT bg, timeout, x
 bg:     clv
@@ -548,4 +570,4 @@ tov:    BR bvs, tg
         BR bvs, tg
         BR bne, tl
         jmp timeout
-
+.endif

@@ -3,15 +3,17 @@
 import struct
 import warnings
 
+import numpy as np
 import pytest
 from xsim import vanish_mid_block, ZP, rand
 
-from nybulah import simsrq, simx
-from nybulah.fastx import SrqLink, XBLink, xsum
+from nybulah import bench, simsrq, simx
+from nybulah.fastx import ChecksumError, SrqLink, XBLink, xsum
 from nybulah.monitor import CLOCK_HZ, WATCHDOG_S, Monitor
 from nybulah.opencbm import IEC_CLOCK, IEC_DATA, IEC_SRQ
 from nybulah.sim import CRA_START, PA_FSDIR
-from nybulah.simsrq import SRQ_GMAX, SRQ_GMIN, SRQ_LAST, SRQ_RLOOP, SRQ_SEND, SrqTiming
+from nybulah.simsrq import CIA_FLAG_MAX, SRQ_GMAX, SRQ_GMIN, SRQ_LAST, SRQ_RLOOP
+from nybulah.simsrq import SRQ_SEND, SrqTiming
 
 BASE = 0x6000
 DOS_CIA = {"latch": 6, "cra": CRA_START, "mask": 0x08}
@@ -133,6 +135,54 @@ def test_block_throughput(fast):
     wr = per_byte(lambda n: mon.write(BASE, bytes(n)))
     assert SRQ_SEND * cyc <= rd <= SRQ_SEND * cyc * 1.1
     assert t.period / 16 <= wr <= t.period / 16 * 1.1
+
+
+@pytest.mark.parametrize("delay", range(CIA_FLAG_MAX - SRQ_LAST))
+def test_send_period_covers_every_cia_delay_the_hardware_allows(delay):
+    """Flags up to CIA_FLAG_MAX cycles after a write (start delay plus phase) leave
+    the shifter idle at the next write, so bytes never run together."""
+    cbm, mon = session(True, delay=delay)
+    data = rand(256, delay)
+    cbm.drive.load(BASE, data)
+    assert mon.read(BASE, 256) == data and mon.link.rejects == 0
+
+
+def test_send_period_too_short_for_the_cia_is_caught():
+    """A shifter still busy at the next write runs bytes together; the check fails."""
+    with pytest.raises(ChecksumError):
+        session(True, delay=SRQ_SEND - SRQ_LAST + 1)
+
+
+@pytest.mark.parametrize("delay", [0, 3, 8])
+def test_cia_probe_finds_the_flag(delay):
+    """drive/ciaprobe.s: the flag shows one underflow after the start delay plus the
+    eight bits, at either timer phase."""
+    cbm = simx.make("1571", rise=1.0, dev=9)
+    cia = cbm.drive.cia
+    cia.delay, before = delay, (cia.cra, cia.latch)
+    mon = Monitor(cbm, 9, "s3")
+    mon.start()
+    out = bench.cia_flag(mon)
+    mon.stop()
+    cbm.settle()
+    assert (cia.cra, cia.latch) == before
+    flag = SRQ_LAST + delay + np.array([1, 2])
+    assert sorted(out["first"]) == flag.tolist()
+    for phase, row in enumerate(out["table"]):
+        assert row == [
+            int(out["k0"] + k >= out["first"][phase]) for k in range(len(row))
+        ]
+
+
+@pytest.mark.parametrize("fast", CLOCKS)
+def test_sweep_fits_the_drive_bound_rate(fast):
+    """On the adapter's clock, the per-byte slope is the send period plus the burst
+    overhead and the intercept the per-block command and reply."""
+    cbm, mon = session(fast)
+    cyc = 0.5 if fast else 1.0
+    out = bench.sweep(mon, BASE, (256, 512, 1024), 1, lambda: cbm.now * 1e-6)
+    assert SRQ_SEND * cyc < out["per_byte_us"] < (SRQ_SEND + 3) * cyc
+    assert out["per_block_us"] > 0 and out["residual_us"] < SRQ_SEND * cyc
 
 
 def skewed(cbm, mon, op, skew=0.0, ppm=0.0, data_skew=0.0):

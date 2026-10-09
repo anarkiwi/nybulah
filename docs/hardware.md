@@ -72,6 +72,24 @@ docker run --rm --device=/dev/bus/usb nybulah bench --dev 8 --protocol s4 --size
 for `errors` 0 and `rejects` (block retries) 0. To probe the USB bank
 boundaries, repeat with `--size` 31, 32, 33, 63, 64, 65.
 
+### s4 timing probes
+
+`tools/xprobe.py` is not installed in the image; mount it. `--cia` runs
+`drive/ciaprobe.s` under s3 (its SRQ pulses would confuse an s4 reply) and
+prints, per timer phase, the first cycle after an SDR write at which ICR
+shows the byte done (`first`) and the full hit table; s4's send period must
+exceed both (protocol.md, 1571 SRQ). `--sweep` times reads of 64..8192 bytes
+on the host clock and fits per-byte and per-block costs:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 8 --cia
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 8 --protocol s4 --base 0x6000 --sweep
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 8 --protocol s4 --base 0x6000 --sweep --fast
+```
+
+Expected: `first` between 33 and 39 for both phases; `per_byte_us` near
+42.8 (1 MHz) and 21.5 (2 MHz), `per_block_us` near 840.
+
 ## Disk survey (read-only)
 
 With a formatted disk in each drive, `--disk` adds one read-only step per
@@ -119,12 +137,67 @@ with drive 8 the 1571 and a formatted disk inserted:
    reading contradicted the position and the head stayed where it was read;
    every outward step started from halftrack 3 or more by the estimate.
 
+## 1571 streaming (firmware v12)
+
+Measured on drive 8 (1571, 2 MHz), firmware v12:
+
+| probe | result |
+|---|---|
+| `xprobe.py --cia` | CIA flag 34 cycles after SDR on both timer phases |
+| `xprobe.py --sweep --fast` | 21.40 µs per byte, 1.08 ms per block |
+| `streamprobe --halftrack 36` | adapter and drive `done`; 2 index edges, 6982 bytes per revolution; 76 syncs; 19/19 sectors |
+| `streamprobe --halftrack 2 --revolutions 3` | adapter and drive `done`; 4 index edges, 7522 bytes per revolution each; 164 syncs; 21/21 sectors |
+| `read --transport s4` (D64) | 683 sectors, 0 errors, one capture per track, 25.5 s; identical to the 1541-II's RAM-path read of the same disk |
+
+Streaming needs firmware v12 and the plugin from the same tree (branch
+`xum1541-stream`). Build the image from the local checkout:
+
+```sh
+docker build --build-arg OPENCBM_SOURCE=local --build-context opencbm=../opencbm-srq --target runtime -t nybulah .
+```
+
+Flash `xum1541-ZOOMFLOPPY-v12.hex` as below (`info` must print
+`model 2 version 12`, `devinfo` firmware version 12). Then, in order, with
+drive 8 the 1571 and a formatted disk inserted:
+
+1. Memory only, no head movement: the s4 benches and timing probes above
+   (`bench --protocol s4 --addr 0x6000`, with and without `--fast`;
+   `xprobe.py --cia` and `--sweep`). v12 must give the same results as v11.
+2. Homing dry run (`homeprobe --dev 8 --transport s4 --headers`, no steps).
+3. One track, one revolution, homed through `Nibbler.home` within the dry
+   run's `outward_steps` (N); the probe refuses a larger plan and never
+   bumps:
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 8 --headers --max-steps N --halftrack 36 --save /data/artifacts/stream-36.npz
+   ```
+
+   Expect `adapter` and `drive` "done", 2 `index` positions about 7140
+   bytes apart (`revolution_bytes`, zone 2) and `syncs` near 38 (19 sectors).
+4. Zone 3 (the tightest byte period) and several revolutions:
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 8 --max-steps N --halftrack 2 --revolutions 3 --save /data/artifacts/stream-2.npz
+   ```
+
+   (N again from the plan; 34 with the head left on track 18). Expect about
+   7690 bytes per revolution and 4 `index` positions.
+   `adapter` "overrun" means the host did not drain the stream in time;
+   "framing" or "timeout" a drive or line fault (the drive stops on ATN).
+5. A whole disk without expansion RAM; every track streams on a 1571 with
+   v12 (`.d71` reads both sides):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah read --dev 8 --transport s4 /data/artifacts/disk.d64
+   ```
+
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin: commit
 `07a95bdf` (branch `xum1541-xfast`) for v10, commit `89920a0d`
 (branch `xum1541-srq`) for v11
-(SRQ fast serial; also builds v10's protocols):
+(SRQ fast serial; also builds v10's protocols), branch `xum1541-stream` for
+v12 (streaming; also builds v11's):
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
@@ -171,7 +244,8 @@ no checksum retries; s4 also at 1–4096 bytes across the USB bank boundaries:
 | X read / write | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
 | burst X read / write | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
 | s4 read / write | v11 | | 20960 / 22258 | 41460 / 37053 |
-| s4 read / write, simulated | v11 | | 24600 / 22400 | 49300 / 37700 |
+| s4 read / write, 40-cycle send | v12 | | 23420 / 22261 | 46372 / 37052 |
+| s4 read / write, simulated | v12 | | 23600 / 22400 | 47200 / 37700 |
 
 `nybulah bench --protocol s3 --fast` (or s4) runs a 1571 at 2 MHz for the
 transfer (VIA1 PA5) and returns it to 1 MHz before handing back to DOS; an s4

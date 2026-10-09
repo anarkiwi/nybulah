@@ -269,15 +269,16 @@ then reads one track in each zone (1, 18, 25, 31). It never writes. It reports t
 
 These are not yet confirmed on hardware:
 
-- the 1571 track 00 sensor's edge and homing on hardware (`nybulah
-  homeprobe`, [hardware.md](hardware.md#1571-head-homing-probe)); the
-  polarity and phase rule are from the DOS ROM;
+- the 1571 track 00 sensor's exact edge (`nybulah homeprobe --step`); homing
+  from a header estimate is confirmed on hardware (68 and 34 checked steps,
+  sensor on at halftrack 2, phase rule held);
 - the step and settle delays;
 - the 1571 side bit polarity and WD1770 index after `$D0`;
 - whether SYNC asserts on the tenth one (TS's SYNC low time against TB's
   hidden ones tests it);
 - the TB sample windows: the cycle offset between SO setting V and a branch
   testing it, and SO behaviour when byte ready and `clv` coincide;
-- the zone 3 margin on a fast motor;
+- the zone 3 margin on a fast motor (streaming zone 3 is confirmed at the
+  test drive's speed);
 - the motor speed change between the TB and TS passes (`DRIFT`, 2%);
 - TS's late release on its wrap path and the byte readies it merges.

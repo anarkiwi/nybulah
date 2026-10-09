@@ -310,16 +310,24 @@ reads ICR so DOS sees no stale serial byte.
 | step | drive | adapter |
 |---|---|---|
 | go | output mode (PA1, then CRA bit 6); polls CLK | asserts CLK with interrupts masked |
-| byte 0 | writes SDR; CNT falls at the next underflow | sees SRQ released then asserted (6-clock poll, slices, grace as X), releases CLK |
-| byte i | writes SDR 6 cycles after the ICR poll that sees byte i-1 out | first poll for SRQ high, then low (5 clocks each), bounded |
-| end | waits for the last byte, input mode before the reply | |
+| byte 0 | writes SDR; CNT falls at the next underflow plus the 6526's start delay | sees SRQ released then asserted (6-clock poll, slices, grace as X), releases CLK |
+| byte i | writes SDR 40 cycles (`SR_PERIOD`) after byte i-1, open loop | first poll for SRQ high, then low (5 clocks each), bounded |
+| end | clears ICR 4 cycles after the last write, waits for its flag, input mode before the reply | |
 
-The drive's first ICR poll comes 32 cycles after each SDR write, the latest
-possible end of a byte (start at most 2 cycles after the write, 30 to the 8th
-rise), so a byte follows the previous one's last rise by 7..14 cycles plus up
-to 2 for the next underflow: 38 cycles per byte with no CIA start delay. The
-adapter times every byte from its own first fall, so drift and the CIA's
-unspecified start pipeline do not accumulate.
+A byte written to SDR before the shifter has finished follows the previous
+one without a gap, which the adapter cannot frame, so the period must exceed
+the time F from a write to the end of its byte. The 6526 datasheet does not
+give F; the CIA model puts it at 31 + d cycles (an underflow, the start delay
+d, 30 to the 8th rise) and the hardware bounds it: v11 polled ICR first at
+t=32 and then every 7 cycles, and its measured rates (below) match exactly
+45 cycles per byte, the second poll (52, the third, would give 36.8 KB/s at
+2 MHz). So 32 < F <= 39 on a 1571, and `SR_PERIOD` = 40. With an even period
+every byte starts on the same timer phase, so the gap from a byte's last rise
+to the next first fall is `SR_PERIOD` - 30 = 10 cycles whatever d is, inside
+the adapter's [7, 14]. The adapter times every byte from its own first fall,
+so drift does not accumulate. `drive/ciaprobe.s` measures F to the cycle per
+timer phase (`tools/xprobe.py --cia`); `tests/test_proto_srq.py` runs every
+d the bound allows and shows the next d failing the block check.
 
 Adapter clocks from the detecting poll (`SRQ_SAMPLE`, `SRQ_START`,
 `SRQ_POLLS`):
@@ -374,9 +382,152 @@ error and the bytes so far, lines released.
 
 | path | cycles/byte | 1 MHz | 2 MHz | burst X measured (v10) |
 |---|---|---|---|---|
-| s4 read (38 + per burst) | 40.5 | 24.6 KB/s | 49.3 KB/s | 14.3 / 28.3 KB/s |
+| s4 read (40 + per burst) | 42.4 | 23.6 KB/s | 47.2 KB/s | 14.3 / 28.3 KB/s |
 | s4 write (bit timing or drive loop) | 44.6 / 53 | 22.4 KB/s | 37.7 KB/s | 18.2 / 35.9 KB/s |
 
-Co-simulation of 8 KiB blocks, drive-bound as for burst X. Reads gain 1.7x;
-writes are bounded by the line release budget (2R per bit) at 2 MHz and gain
-little there.
+Co-simulation of 8 KiB blocks, drive-bound as for burst X (`tools/srq_rate.py`
+prints the read column per CIA start delay). Writes are bounded by the line
+release budget (2R per bit) at 2 MHz and gain little there.
+
+### Read time on the host clock
+
+A checked block of N bytes takes C + N t on the host: t is the drive's period
+plus its per-burst overhead plus the adapter's per-burst wait, C the command
+burst, the reply and their USB round trips. The v11 drive polled ICR as
+described above; with F > 32 every byte took 45 cycles plus 2.3 per byte of
+burst overhead, 47.34 cycles, which the co-simulation reproduces for every
+start delay from 2 to 7 cycles (`tools/srq_rate.py`). Against the v11
+measurements at 2 MHz (128, 256 and 8192-byte blocks; 4096 was a single
+timing):
+
+| term | value | source |
+|---|---|---|
+| drive per byte | 23.67 us (47.34 cycles) | co-simulation, d in 2..7 |
+| adapter per burst | 22 us (0.35 us/byte) | least-squares slope 24.02 us/byte minus the drive term |
+| per block | 0.84 ms | least-squares intercept |
+| 8 KiB at 2 MHz | 24.12 us/byte, 41.5 KB/s | measured 41.46 KB/s |
+| 8 KiB at 1 MHz | 47.86 us/byte, 20.9 KB/s | measured 20.96 KB/s |
+
+Of the 49.3 vs 41.5 KB/s gap (3.87 us per byte), the missed first poll was
+3.42 us (88 %), fixed by the open-loop period; the adapter's per-burst wait
+(0.35 us, 9 %) (before a
+burst both IN banks must be empty, so the burst's second 32-byte packet,
+about 30 us of full-speed bus time, has to reach the host first, partly
+overlapping the adapter's turnaround) and the per-block round trips (0.10 us,
+3 %) remain.
+The same terms predict 46.2 KB/s at 2 MHz and 23.3 KB/s at 1 MHz for the
+fixed loop. `tools/xprobe.py --sweep` measures t and C on the host clock;
+`bench.sweep` fitted to the adapter's clock in co-simulation gives the
+drive-bound t (`test_sweep_fits_the_drive_bound_rate`).
+
+## 1571 streaming capture (firmware v12)
+
+A stream reads a track continuously for whole revolutions with no expansion
+RAM: every byte the drive latches goes out through the CIA shift register as
+it arrives and the adapter forwards it to USB with no handshake. Only a 1571
+at 2 MHz under s4 streams; `Nibbler(stream=None)` picks it when the adapter
+reports `XUM1541_CAP_STREAM`, and D64/D71 reads then use it. Firmware v9-v11
+commands are unchanged.
+
+Sources: drive `drive/stream.s` (`stream_1571.bin`, loaded at `$0300` over
+`seek_1571.bin`, the `SEEK` build of `track.s`, whose prep placed the head),
+host `Nibbler.stream`, decoding `nybulah/stream.py`, adapter model
+`SimSRQ.srq2_stream`; adapter `srq_stream_loop`/`srq_stream8` in
+`xum1541/x.c`, plugin `opencbm_plugin_srq2_stream` (asynchronous IN
+transfers, `lib/plugin/xum1541/stream.c`). The head moves only through
+`Nibbler.seek`, `locate` and `home`.
+
+### Bytes on the wire
+
+The adapter samples CLK at each byte's bit 7: released is a data byte,
+asserted a metadata byte. Metadata is never `$00`:
+
+| value | name | meaning |
+|---|---|---|
+| `%tttttt01` | SYNC_START | t = T2 bits 7-2 when SYNC was seen low |
+| `%tttttt10` | SYNC_CONT | inside a sync, timestamps under 256 cycles apart |
+| `%tttttt11` | SYNC_END | t when SYNC was seen high; ends the oldest open sync |
+| `$04` / `$08` | START / INDEX | stream start; rising index edge |
+| `$40` / `$44` / `$48` | END / END_NOINDEX / END_ATN | how the drive stopped |
+
+USB carries a data byte as itself, data `$00` as `ESC $00`, metadata m as
+`ESC m`, and ends with `ESC` and an adapter code: `$80` done (END seen), `$84`
+overrun (both IN banks full when a byte arrived), `$88` framing (a byte
+began before SRQ rose), `$8C` timeout (no SRQ fall within 20 ms), `$90`
+truncated (requested length reached); a short packet or ZLP ends the
+transfer, with no status block. The requested length counts 64-byte units.
+On any code but done the adapter holds ATN at least 8622 us (256 bytes at
+32 us, at 285 rpm: the drive's longest interval between ATN checks), then
+until SRQ has been quiet for 1 ms, at most 50 ms; the drive sends END_ATN,
+restores the CIA (CRA, timer A latch), PA1, PA5 and clears ICR, as on every
+exit. The drive refuses with `ST_SLOW` at 1 MHz and `ST_NOGO` when the host
+never asserts CLK; `Nibbler` refuses a 1541 or older firmware.
+
+### Drive rules
+
+t = 0 at an SDR write; the shifter needs 32 cycles per byte and the ICR flag
+shows within 39 (see s4 above), so:
+
+- a write follows the previous one by 40 or more cycles, or follows the ICR
+  flag;
+- a waiting byte is read at the first V sample after a write and held in X;
+  X and the VIA latch are the only buffers;
+- data goes first: metadata waits for an idle shifter and no waiting byte,
+  except SYNC_START and SYNC_CONT, which no byte can be waiting behind; a
+  metadata slot is given up when V appears by t = 22 (24 after a timed
+  write) and the byte goes out at 41 (45);
+- CLK changes 14 or more cycles after a write and 2 or more before the next:
+  the adapter samples it 4 to 14 cycles after a write;
+- inside a sync only SYNC_CONT is sent; metadata due then waits for the
+  bytes after the sync, so timestamps unwrap and SYNC_ENDs keep their order.
+
+### Drive schedule (cycles after the write)
+
+| path | entered | V samples | write of the next byte | otherwise |
+|---|---|---|---|---|
+| `nw` idle poll | 28+ | 0 and 6 of 15, SYNC at 5 | 12 after the `bvs` | ATN, T1 every 256 polls |
+| `pwo` after a write from `nw` | 0 | | (due metadata at 40) | `nw` at 29 |
+| `pwm` metadata slot | 12 | 12, 18, 22 | 41 / 45 (`pv`) | metadata at 40 |
+| `pwb` after a timed write | 1 | 1, 28 | 43 | `nw` at 33 |
+| `mpw` after metadata | 4 | 4, 28 | 46 / 43 | `nw` at 33 |
+| `ee` byte already waiting | 1-24 | | 42 after the read | |
+| sync loop `sp` | | SYNC every 11 | | ATN, T1, index, SYNC_CONT |
+| `se` sync end | 7-8 after the read | each poll until ICR | at the ICR flag | |
+
+### Margins
+
+The shortest byte period is zone 3 at 310 rpm, 52 x 300 / 310 = 50.3 cycles.
+
+| quantity | worst case | budget | margin |
+|---|---|---|---|
+| write spacing | 40 (`pwm`), 43 (`tv`) | ICR flag at 39 or less | 1 cycle |
+| byte ready to read | 21 (V at 23, read at `mpw` 4) | 50.3 | 29 cycles |
+| back-to-back writes | 43 | 50.3 | backlog drains 7.3 cycles per byte |
+| adapter frame | 264-296 clocks | SRQ_FRAME 256 | 8 clocks |
+| adapter next poll | 303 clocks | SRQ_WAIT 306 | 3 clocks |
+
+A metadata byte goes out only when nothing is waiting, so it delays at most
+the byte that lands during its 40-cycle slot (the slot is abandoned up to t =
+22), and that delay drains by the next metadata slot. INDEX lands within 4
+bytes of the edge. `misc/x_timing.py` steps the compiled `srq_stream8` (6-clock
+fall wait) against these bounds and `misc/srq_timing_test.c` checks them.
+
+### Host decoding
+
+`Stream.syncs(cell)` pairs SYNC_START/SYNC_END first in first out, adds
+SYNC_CONT spans and bounds each sync's low time: the SYNC read that saw the
+change takes 12 cycles to its T2 read at the start and 7-8 at the end, a
+SYNC read waits at most 125 cycles at the start (data paths) and 70 at the
+end (sync loop), timestamps lose 3 bits, and the start lag follows the
+latched trailing ones (`start_lag`). Multi-revolution captures carry their
+index positions, which `index_bits`, `passes.stream_syncs`, the cycle finder
+and the disk map use as for RAM captures.
+
+### Tests
+
+`tests/test_stream.py` streams every zone at 300 and 310 rpm on the timed
+1571 with the adapter model: every latched byte arrives in order, every sync
+lies inside its bounds, writes are 40 or more cycles apart, and no stream read
+hits either stop (`Mechanism.bumps`, `inner_stops`). A throttled host drain
+gives overrun, a silent drive a timeout with ATN, and multi-revolution streams
+merge on their index edges.

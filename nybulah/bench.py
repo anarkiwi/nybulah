@@ -10,7 +10,11 @@ import numpy as np
 from tqdm import tqdm
 
 from . import tool
-from .monitor import Monitor, protocols
+from .monitor import Monitor, drivecode, protocols
+
+CIAPROBE = 0x0300
+CIA_K0, CIA_NK = 26, 18
+SWEEP_SIZES = tuple(64 << i for i in range(8))
 
 
 def _rate(fn, size, reps, desc):
@@ -41,6 +45,48 @@ def run(cbm, dev, addr, size, reps, protocol="s1", pattern=None, fast=False):
             int(np.count_nonzero(np.frombuffer(g, np.uint8) != want)) for g in got
         )
     return out
+
+
+def cia_flag(mon):
+    """Drive cycles from an SDR write to the first ICR read showing SP, per timer phase.
+
+    Runs drive/ciaprobe.s on a 1571 under a monitor that leaves SRQ alone (s1, s3).
+    ``table`` holds ICR & SP per write phase (rows) and read offset from CIA_K0.
+    """
+    code = drivecode("ciaprobe")
+    mon.write(CIAPROBE, code)
+    first = mon.jsr(CIAPROBE)[:2]
+    res = mon.read(CIAPROBE + len(code) - 2 * CIA_NK, 2 * CIA_NK)
+    table = np.frombuffer(res, np.uint8).reshape(CIA_NK, 2).T != 0
+    return {
+        "first": [None if k == 0xFF else int(k) for k in first],
+        "k0": CIA_K0,
+        "table": table.astype(int).tolist(),
+    }
+
+
+def sweep(mon, addr, sizes=SWEEP_SIZES, reps=10, clock=time.perf_counter):
+    """Host-clock read times per block size and their least-squares line.
+
+    ``per_byte_us`` is the slope (drive loop, bursts and USB), ``per_block_us`` the
+    intercept (command, reply and USB round trips of one checked block).
+    """
+    rows = []
+    for n in tqdm(sizes, desc="sweep", unit="size"):
+        mon.read(addr, n)
+        t0 = clock()
+        for _ in range(reps):
+            mon.read(addr, n)
+        rows.append((n, (clock() - t0) / reps))
+    n, t = np.array(rows).T
+    slope, icept = np.polyfit(n, t, 1)
+    return {
+        "sizes": [int(x) for x in n],
+        "seconds": t.tolist(),
+        "per_byte_us": slope * 1e6,
+        "per_block_us": icept * 1e6,
+        "residual_us": (np.abs(t - (slope * n + icept)).max() * 1e6),
+    }
 
 
 def add_arguments(ap):

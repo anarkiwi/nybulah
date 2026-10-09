@@ -340,6 +340,16 @@ class TimedDrive1541(Drive1541):
         self._t0, self._c0 = 0.0, 0
         super().__init__(*args, **kw)
         self.bus.clock = lambda: self.time(self.cycles)
+        self._atn = False
+        if isinstance(self.bus, TimedBus):
+            self.bus.listeners.append(self._atn_change)
+
+    def _atn_change(self, lines, t):
+        """ATN acknowledge is combinational: DATA follows the host's ATN at once."""
+        atn = bool(lines & IEC_ATN)
+        if atn != self._atn:
+            self._atn = atn
+            self.bus.record(self, self.via_lines(), t)
 
     def time(self, cycles):
         """Microseconds at a cycle count, across clock-speed changes."""
@@ -348,6 +358,10 @@ class TimedDrive1541(Drive1541):
     def set_cyc(self, cyc):
         """Change the CPU clock period from the current cycle onwards."""
         self._t0, self._c0, self.cyc = self.time(self.cycles), self.cycles, cyc
+
+    def cycle_at(self, t):
+        """Cycle count (fractional) at time t."""
+        return self._c0 + (t - self._t0) / self.cyc
 
     @property
     def pb_out(self):
@@ -391,16 +405,13 @@ class TimedDrive1571(TimedDrive1541):
     """
 
     MODEL, EXPANSION = Drive1571.MODEL, Drive1571.EXPANSION
+    PA_TRK0, port_a = Drive1571.PA_TRK0, Drive1571.port_a
 
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
         self._srq = []
         if isinstance(self.bus, TimedBus):
             self.bus.listeners.append(self._host_change)
-
-    def cycle_at(self, t):
-        """Cycle count (fractional) at time t."""
-        return self._c0 + (t - self._t0) / self.cyc
 
     def _host_change(self, lines, t):
         state = bool(lines & IEC_SRQ)
@@ -445,6 +456,8 @@ class TimedDrive1571(TimedDrive1541):
         porta = k == VIA1 and reg in (1, 15)
         if porta:
             self.set_cyc(0.5 if value & PA_2MHZ else 1.0)
+            if self.mech is not None:
+                self.mech.due = self.cycles
         if porta or k == CIA:
             self._cia_schedule(self.cycles + IO_ACCESS_CYCLE)
 

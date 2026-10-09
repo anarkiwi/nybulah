@@ -10,12 +10,14 @@
 ; ICR bit 3 is set after the 8th rise. In input mode a rising CNT shifts SP
 ; in and the 8th fills SDR and sets the same flag.
 ;
-; send (drive -> host): the host asserts CLK ("go"); the drive writes byte 0
-; to SDR, then each next byte 6 cycles after the poll that sees the previous
-; one complete. The first poll comes 32 cycles after each write, the latest
-; possible completion, so a byte follows the previous one's last rise by
-; 7..14 cycles plus the wait for the next underflow; the host times each byte
-; from its first SRQ fall.
+; send (drive -> host): the host asserts CLK ("go"); the drive writes a byte
+; to SDR every SR_PERIOD cycles, open loop. A write before the shifter has
+; finished would follow the previous byte without a gap, so SR_PERIOD exceeds
+; the latest ICR flag after a write: 39 cycles on a 1571 (a poll at 32 always
+; misses, one at 39 always hits), 30 + the start delay in the model. With an
+; even period every byte starts on the same timer phase, so a byte follows
+; the previous one's last rise by SR_PERIOD - 30 cycles whatever the 6526's
+; start delay; the host times each byte from its first SRQ fall.
 ; recv (host -> drive): the host asserts DATA ("go"), the drive pulses CLK
 ; (SYNC t=0, released at t=6) with flags cleared; the host then clocks bytes
 ; at a fixed period. The drive polls ICR every 11 cycles, every 39 once
@@ -37,10 +39,10 @@ PA_2MHZ  = $20
 CRA_START = $01
 CRA_LOAD = $10
 CRA_SPOUT = $40
-ICR_TA   = $01
 ICR_SP   = $08
 SR_LATCH = 1                    ; phi2/4, the 6526's fastest shift clock
-SBURST   = 56                   ; sburst .. end of its loop
+SR_PERIOD = 40                  ; send: cycles from one SDR write to the next
+SBURST   = 51                   ; sburst .. end of its loop
 RBURST   = 58                   ; rburst .. end of its loop
 
 ; Drivers out first, then the CIA: CNT and SP reach the bus released.
@@ -65,21 +67,21 @@ sburst: WDRESET
         WAIT bne, {lda IEC}, {and #CLK_IN}      ; go
         ldy #$00
         clc
-        lda #ICR_TA                     ; byte 0 waits for any underflow
 sld:    ldx $FFFF,y
-:       bit CIA_ICR
-        beq :-
         stx CIA_SDR                     ; t=0
+        bit CIA_ICR                     ; t=4: clears the previous byte's flag
         txa
         adc s1
         sta s1
         adc s2
-        sta a:s2                        ; absolute: next poll at t=32
-        lda #ICR_SP
+        sta s2
+        pha
+        pla
         iny
 scp:    cpy #$00
-        bne sld
+        bne sld                         ; next write at t=SR_PERIOD
 .assert * - sburst = SBURST, error, "SBURST"
+        lda #ICR_SP
 :       bit CIA_ICR
         beq :-                          ; last byte out
         rts

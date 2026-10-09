@@ -46,6 +46,7 @@ _PROTOS = {
     "cbm_get_plugin_function_address": (ctypes.c_void_p, [ctypes.c_char_p]),
 }
 _XFER = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_void_p, ctypes.c_uint)
+_STREAM = "opencbm_plugin_srq2_stream"
 _SET_TIMEOUT = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_uint)
 
 
@@ -197,9 +198,21 @@ class OpenCBM:
 
     PROBES = {"s3": "x", "xb": "xb", "s4": "srq", "srq": "srq"}
 
+    def srq2_stream(self, size):
+        """Streaming receive from a 1571 at 2 MHz (firmware v12): the adapter's
+        output, at most size bytes, ended by its in-band trailer."""
+        buf = ctypes.create_string_buffer(size)
+        n = self._check(self._xfer(_STREAM)(self.fd, buf, size), "srq2_stream")
+        return buf.raw[:n]
+
     def supports(self, protocol):
         """Whether plugin and firmware speak protocol; s3 (X), xb (burst X) and
-        s4/srq (SRQ) are probed with an empty read."""
+        s4/srq (SRQ) are probed with an empty read, "stream" with an empty stream."""
+        if protocol == "stream":
+            try:
+                return self._xfer(_STREAM)(self.fd, None, 0) == 0
+            except OpenCBMError:
+                return False
         if protocol not in self.PROBES:
             return hasattr(self, f"{protocol}_read")
         try:

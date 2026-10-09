@@ -173,8 +173,14 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         self.media.tracks[self._key] = cells.copy()
         self._retrack(now)
 
-    def update(self, now):
-        """Process every cell that has passed the head by cycle now."""
+    def media_time(self, cycles):
+        """Media time (us at CPU_HZ) of a drive cycle count, across a timed drive's
+        clock changes."""
+        return self.drive.time(cycles) if self.drive.TIMED else cycles
+
+    def update(self, cycles):
+        """Process every cell that has passed the head by drive cycle cycles."""
+        now = self.media_time(cycles)
         if not self.pb & PB_MOTOR:
             self._k, self.due = None, math.inf
             return
@@ -186,6 +192,8 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
             cell(j)
         self._k = max(end, self._k)
         due = self._time(self._k + 8 - self._count)
+        if self.drive.TIMED and math.isfinite(due):
+            due = self.drive.cycle_at(due)
         self.due = math.ceil(due) if math.isfinite(due) else math.inf
 
     def _event(self, j):
@@ -244,7 +252,7 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         now = cycles + IO_ACCESS_CYCLE
         self.update(now)
         if fdc:
-            hole = self.angle(now) % 1.0 < INDEX_FRACTION
+            hole = self.angle(self.media_time(now)) % 1.0 < INDEX_FRACTION
             return WD_INDEX if reg == 0 and hole and self.pb & PB_MOTOR else 0
         if reg == 0:
             return self._port_b()
@@ -276,7 +284,7 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
             entering = not self.writing and value & PCR_MODE == PCR_WRITE
             self.pcr, self._armed = value, False
             if entering and self._k is not None:
-                self._resample(now)
+                self._resample(self.media_time(now))
         else:
             self.regs[reg] = value
         self.update(now)

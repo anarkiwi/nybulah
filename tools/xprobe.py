@@ -1,10 +1,17 @@
-"""Run monitor reads, writes and a jsr of growing size on hardware; stop at the first failure."""
+"""Hardware probes of a monitor transport.
+
+Default: reads, writes and a jsr of growing size, stopping at the first failure.
+--rate: read rate of repeated blocks. --sweep: host-clock read time per block size
+and its per-byte/per-block fit. --cia: 1571 6526 SDR-to-ICR flag latency (under s3).
+"""
 
 import argparse
+import json
 import os
 import time
 import traceback
 
+from nybulah import bench
 from nybulah.monitor import Monitor
 from nybulah.opencbm import OpenCBM
 
@@ -57,8 +64,22 @@ def main():
     ap.add_argument("--protocol", default="s3")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--rate", action="store_true", help="only measure read rate")
+    ap.add_argument("--sweep", action="store_true", help="read time per block size")
+    ap.add_argument("--cia", action="store_true", help="1571 CIA flag latency (s3)")
+    ap.add_argument("--reps", type=int, default=10)
     args = ap.parse_args()
     with OpenCBM() as cbm:
+        if args.sweep or args.cia:
+            with Monitor(cbm, args.dev, "s3" if args.cia else args.protocol) as mon:
+                if args.fast:
+                    mon.set_fast(True)
+                out = (
+                    bench.cia_flag(mon)
+                    if args.cia
+                    else bench.sweep(mon, args.base, reps=args.reps)
+                )
+            print(json.dumps(out, indent=1))
+            return
         if args.rate:
             rate, same = read_rate(cbm, args.dev, args.base, args.protocol, args.fast)
             print(f"read {rate:.0f} B/s consistent={same}")
