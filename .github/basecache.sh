@@ -14,7 +14,7 @@ case $1 in
 key) echo "basecache-$(all | sha256sum | cut -c1-16)" ;;
 fetch)
   for r in $(all); do
-    skopeo copy -q --multi-arch system "$(src "$r")" "oci:$dir:${r##*:}"
+    skopeo copy -q --retry-times 5 --multi-arch system "$(src "$r")" "oci:$dir:${r##*:}"
   done
   ;;
 up)
