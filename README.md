@@ -47,6 +47,11 @@ copy-protected and non-standard disks and writing them back.
 - **Disk map.** Every revolution of every track classified against clean-DOS
   statistics, with stable, weak and capture-fault regions told apart
   ([analysis.md](docs/analysis.md#disk-map)).
+- **Flux view.** The disk as an image of its flux: transitions per cell as
+  lightness, cell length as hue, revolution-to-revolution variance as lost
+  colour, inferred no-flux as dots; interval histograms, timing eye and drift;
+  per-revolution APNG and a zoomable HTML viewer down to single transitions
+  ([analysis.md](docs/analysis.md#flux-view)).
 - **Formats.** Read and write NIB, NB2, NBZ, G64, G71, P64, SCP, KryoFlux and
   D64; flux decoded through a 1541 read-circuit model; conversion to G64, G71,
   D64 and P64 keeps every track ([formats.md](docs/formats.md)).
@@ -107,6 +112,16 @@ nybulah survey CORPUS --out survey/        # corpus statistics and thresholds
 *Disk map of a synthetic disk (`tools/diskmap_example.py`), stepping through
 four revolutions: grey is standard DOS content; hatched regions change between
 revolutions; outlines are capture faults ([static view](docs/img/diskmap.png)).*
+
+![Flux view of a synthetic disk](docs/img/fluxview.png)
+
+*Flux view of a synthetic flux image (`tools/diskmap_example.py`): a speed
+wobble on track 1, a long sync, a no-flux gap, a half-written faster zone
+(blue), a killer track (white), crosstalk on half track 20.5.*
+
+```sh
+nybulah flux disk.scp -o disk.html  # .png disk with panels, .apng by revolution, .html viewer
+```
 
 Hardware probes: `homeprobe` (1571 track 00 sensor and homing plan),
 `streamprobe` (one streamed track), `ramcheck` (RAM captures against a

@@ -668,14 +668,14 @@ def survey_captures(captures):
     return survey_image(DiskImage("capture", captures))
 
 
-def load_captures(folder):
+def load_captures(folder, pattern="read-*.npz"):
     """``{halftrack | side: [Capture]}`` from saved nibbler capture records.
 
     Each keeps its record as ``framed``, so revolutions are found per segment.
     """
     nibbler = importlib.import_module(f"{__package__}.nibbler")
     captures = {}
-    for path in sorted(pathlib.Path(folder).glob("read-*.npz")):
+    for path in sorted(pathlib.Path(folder).glob(pattern)):
         cap = nibbler.Capture.load(path)
         key = cap.halftrack | (SIDE1 if cap.side else 0)
         index = getattr(cap, "index_bits", lambda: None)()

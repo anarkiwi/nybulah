@@ -23,7 +23,7 @@ include = ["nybulah*"]
 
 [tool.setuptools.package-data]
 "nybulah.drivecode" = ["*.bin"]
-"nybulah" = ["thresholds.json"]
+"nybulah" = ["thresholds.json", "fluxview.html"]
 
 [tool.pylint.design]
 max-args = 8
