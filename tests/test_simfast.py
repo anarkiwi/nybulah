@@ -57,7 +57,7 @@ def registers(drive):
 def pair(make):
     """(py65 drive, compiled drive) built alike."""
     ref, fast = make(), make()
-    ref.fast = False
+    ref.fast, fast.fast = False, True
     assert simfast.eligible(fast) and not simfast.eligible(ref)
     return ref, fast
 
@@ -274,6 +274,7 @@ def test_transfer_times_out_like_py65():
 
 def test_ineligible_drives_run_on_py65():
     drive = disk_drive("1541", Media())
+    drive.fast = True
     drive.mech.media.turns = lambda now: 0.0
     assert not simfast.eligible(drive)
     drive.mech.media = Media()

@@ -1,14 +1,16 @@
 """Simulated sync-length accuracy and byte loss of Nibbler captures.
 
-Usage: python tools/sync_accuracy.py [--seeds N] [--models 1541 1571]
+Usage: python tools/sync_accuracy.py [--seeds N] [--models 1541 1571] [--jobs N]
 Each case captures syncs of 10-1000 bits and compares the merged capture
 with the simulator's log: bytes lost, syncs missed or invented, errors.
 """
 
 import argparse
 import collections
+import concurrent.futures
 import itertools
 import json
+import os
 
 import numpy as np
 from tqdm import tqdm
@@ -42,24 +44,36 @@ def capture_case(model, zone, rpm, wander, start, seed):
     return cap, lost, np.asarray(pos), np.asarray(runs)
 
 
-def tally(cases):
-    """Counts, run-length error histogram and bound widths over the cases."""
+def case_tally(args):
+    """Counts, run-length errors and bound widths of one capture case."""
     out, errors, widths = (collections.Counter() for _ in range(3))
-    for args in tqdm(cases, desc="captures", unit="cap"):
-        cap, lost, pos, runs = capture_case(*args)
-        out["captures"] += 1
-        out["lost"] += int(lost)
-        if lost:
-            continue
-        found = np.isin(pos, cap.positions)
-        out["missed"] += int((~found).sum())
-        out["invented"] += int((~np.isin(cap.positions, pos)).sum())
-        idx = np.searchsorted(cap.positions, pos[found])
-        true = runs[found]
-        lo, hi = cap.sync_bounds[0][idx], cap.sync_bounds[1][idx]
-        out["outside"] += int(((true < lo) | ((hi >= 0) & (true > hi))).sum())
-        errors.update((cap.sync_bits[idx] - true).tolist())
-        widths.update(np.where(hi >= 0, hi - lo, -1).tolist())
+    cap, lost, pos, runs = capture_case(*args)
+    out["captures"] += 1
+    out["lost"] += int(lost)
+    if lost:
+        return out, errors, widths
+    found = np.isin(pos, cap.positions)
+    out["missed"] += int((~found).sum())
+    out["invented"] += int((~np.isin(cap.positions, pos)).sum())
+    out["syncs"] += int(found.sum())
+    idx = np.searchsorted(cap.positions, pos[found])
+    true = runs[found]
+    lo, hi = cap.sync_bounds[0][idx], cap.sync_bounds[1][idx]
+    out["outside"] += int(((true < lo) | ((hi >= 0) & (true > hi))).sum())
+    errors.update((cap.sync_bits[idx] - true).tolist())
+    widths.update(np.where(hi >= 0, hi - lo, -1).tolist())
+    return out, errors, widths
+
+
+def tally(cases, jobs=1):
+    """Counts, run-length error histogram and bound widths over the cases."""
+    totals = [collections.Counter() for _ in range(3)]
+    with concurrent.futures.ProcessPoolExecutor(jobs) as pool:
+        results = pool.map(case_tally, cases, chunksize=4)
+        for parts in tqdm(results, total=len(cases), desc="captures", unit="cap"):
+            for total, part in zip(totals, parts):
+                total.update(part)
+    out, errors, widths = totals
     return dict(out), dict(sorted(errors.items())), dict(sorted(widths.items()))
 
 
@@ -70,6 +84,7 @@ def main(argv=None):
     ap.add_argument("--models", nargs="+", default=["1541", "1571"])
     ap.add_argument("--rpm", type=float, nargs="+", default=[297.0, 300.0, 303.0])
     ap.add_argument("--wander", type=float, nargs="+", default=[0.0, 3.0])
+    ap.add_argument("--jobs", type=int, default=os.cpu_count())
     args = ap.parse_args(argv)
     cases = [
         (m, z, r, w, s, seed)
@@ -78,7 +93,7 @@ def main(argv=None):
         )
         for s in (("now", "sync", "index") if m == "1571" else ("now", "sync"))
     ]
-    counts, errors, widths = tally(cases)
+    counts, errors, widths = tally(cases, args.jobs)
     print(json.dumps({"counts": counts, "errors": errors, "widths": widths}))
 
 
