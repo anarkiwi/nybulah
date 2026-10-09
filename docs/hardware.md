@@ -205,11 +205,8 @@ drive 8 the 1571 and a formatted disk inserted:
 
 ## Flashing the ZoomFloppy firmware
 
-The firmware hex is built from the same OpenCBM tree as the plugin: commit
-`07a95bdf` (branch `xum1541-xfast`) for v10, commit `89920a0d`
-(branch `xum1541-srq`) for v11
-(SRQ fast serial; also builds v10's protocols), branch `xum1541-stream` for
-v12 (streaming; also builds v11's):
+The firmware hex is built from the same OpenCBM tree as the plugin, branch
+`xum1541-stream` of the fork (v12; it also serves every older protocol):
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
