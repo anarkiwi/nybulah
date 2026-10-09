@@ -9,6 +9,7 @@ dir=${BASECACHE:-$HOME/basecache}
 root=$(dirname "$0")/..
 pins() { sed -nE 's/^FROM[[:space:]]+([^[:space:]]+@sha256:[0-9a-f]{64}).*/\1/p' "$@" | sort -u; }
 all() { pins "$root/Dockerfile" "$root/.github/buildkit/Dockerfile"; }
+retry() { for i in 1 2 3 4 5 6; do "$@" && return; sleep $((i * 20)); done; return 1; }
 src() { local n=${1%@*}; echo "docker://${n%:*}@${1#*@}"; }
 case $1 in
 key) echo "basecache-$(all | sha256sum | cut -c1-16)" ;;
@@ -17,7 +18,7 @@ fetch)
   for r in $(all); do
     from=$(src "$r")
     grep -qs "\"${r##*:}\"" "$dir.old/index.json" && from=oci:$dir.old:${r##*:}
-    skopeo copy -q --retry-times 8 --multi-arch system "$from" "oci:$dir:${r##*:}"
+    retry skopeo copy -q --multi-arch system "$from" "oci:$dir:${r##*:}"
   done
   rm -rf "$dir.old"
   ;;
