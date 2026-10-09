@@ -33,9 +33,9 @@ BITS, TB, TS = 0, 1, 2
 TIMING = {"full": (TB, TS), "syncs": (TS,), "none": ()}
 CAPTURE_VERSION = 2
 
-VIA1PA, T2CL, ACR1, VIA1PA_NH = 0x1801, 0x1808, 0x180B, 0x180F
+VIA1PA, T2CL, ACR1 = 0x1801, 0x1808, 0x180B
 DOS_TRACK = 0x22
-PA_TRK0 = 0x01
+SENSE_CODE, SN_TRK00 = "sense_1571", 0x04
 VIA2PB, PCR2 = 0x1C00, 0x1C0C
 PA_SIDE, PA_2MHZ, ACR_T2_PULSE = 0x04, 0x20, 0x20
 PCR_SOE_MASK, PCR_SOE_OFF = 0xF1, 0x0C
@@ -46,7 +46,11 @@ T2_HI_DELAY = 4
 STEP_MS, SETTLE_MS, SPINUP_S = 5, 20, 0.5
 HOME_HALFTRACK, HOME_STEPS = 2, 88
 PHASE_OFFSET = 2
-PHASE_NUDGE = (0, 1, 0, -1)
+PHASE_NUDGE = (0, 1, -2, -1)
+SENSOR_EDGE = HOME_HALFTRACK + PB_PHASE  # DOS takes the first phase 0 detent sensed
+SENSOR_CLEAR = HOME_HALFTRACK + 1
+HT_OUTER = HOME_HALFTRACK - PB_PHASE  # DOS takes the stop at phase 0 as track 1
+SENSOR_WALK = SENSOR_EDGE + 1 - HT_OUTER
 MAX_HALFTRACK = 84
 MAX_DOS_TRACK = MAX_HALFTRACK // 2
 
@@ -352,9 +356,9 @@ class Nibbler:
     """Track-level access to one drive through a started monitor.
 
     The head position is tracked on the host and found by ``locate()`` the
-    first time it is needed. Bumping the head against the stop happens only
-    when ``allow_bump`` is set and nothing else can place it. ``sleep`` waits
-    for the spindle after the motor starts.
+    first time it is needed. Only a 1541 is ever bumped against the stop, when
+    ``allow_bump`` is set and nothing else places it. ``sleep`` waits for the
+    spindle after the motor starts.
     """
 
     def __init__(
@@ -378,7 +382,7 @@ class Nibbler:
         )
         self.allow_bump = allow_bump
         self.halftrack = None
-        self.motor = False
+        self.motor = self._sensing = False
         self._saved = None
 
     @property
@@ -405,11 +409,14 @@ class Nibbler:
         return self
 
     def close(self):
-        """Stop the motor and restore what open saved."""
+        """Stop the motor, leave DOS's track ($22) on the head's, restore the rest."""
         if self._saved is None:
             return
-        self._prep(0, 0, 0)
         self.motor = False
+        self._prep(0, 0, (self.halftrack or 0) & 1)
+        if self.halftrack is not None:
+            self.halftrack += self.halftrack & 1
+            self.mon.write(DOS_TRACK, bytes([self.halftrack // 2]))
         for addr, value in self._saved:
             self.mon.write(addr, value)
         self._saved = None
@@ -448,7 +455,9 @@ class Nibbler:
             raise ValueError(f"start must be one of {USER_STARTS}")
 
     def bump(self):
-        """Step outwards past the stop, ending on the phase of track 1."""
+        """1541 only: step outwards past the stop, ending on the phase of track 1."""
+        if self.model != "1541":
+            raise TrackError(f"a {self.model} head is never bumped")
         phase = self.mon.read(VIA2PB, 1)[0] & PB_PHASE
         steps = HOME_STEPS + ((phase - HOME_HALFTRACK - PHASE_OFFSET) & PB_PHASE)
         self._prep(self._pbset(), 0, -steps)
@@ -457,25 +466,74 @@ class Nibbler:
     def _pbset(self, density=0):
         return (PB_MOTOR_LED | (density & 3) << 5) if self.motor else 0
 
-    def _phase_halftrack(self, track):
-        """2 * track, moved to an adjacent halftrack when the stepper phase says so.
+    def _step(self, steps):
+        if steps:
+            self._prep(self._pbset(), 0, steps)
 
-        A phase two halftracks away is ambiguous and leaves 2 * track.
+    def _phase_halftrack(self, track):
+        """2 * track, moved to the nearest halftrack of the stepper's phase.
+
+        A phase two halftracks away takes the outer of the two.
         """
         phase = self.mon.read(VIA2PB, 1)[0] & PB_PHASE
         return 2 * track + PHASE_NUDGE[(phase - 2 * track - PHASE_OFFSET) & PB_PHASE]
 
-    def _track0(self):
-        """1571 track 0 sensor (VIA1 PA0 low), read without clearing the ATN flag."""
-        return not self.mon.read(VIA1PA_NH, 1)[0] & PA_TRK0
+    def sense(self):
+        """1571 ``(track 00 sensed, stepper phase)`` by DOS's debounced test, no step."""
+        if self.model != "1571":
+            raise ValueError("the track 00 sensor needs a 1571")
+        if not self._sensing:
+            self.mon.write(self.buffer, drivecode(SENSE_CODE))
+            self._sensing = True
+        status = self._call(self.buffer)
+        return bool(status & SN_TRK00), status & PB_PHASE
 
-    def _to_sensor(self):
-        """1571: step out one halftrack at a time until the track 0 sensor trips."""
-        for _ in range(MAX_HALFTRACK - HOME_HALFTRACK + 1):
-            if self._track0():
-                return True
-            self._prep(self._pbset(), 0, -1)
-        return False
+    def _sense(self, halftrack, trace):
+        """sense(), refused unless consistent with the head on halftrack (None: unknown)."""
+        on, phase = self.sense()
+        trace.append((halftrack, on, phase))
+        if halftrack is None:
+            return on, phase
+        if phase != (halftrack + PHASE_OFFSET) & PB_PHASE:
+            raise TrackError(f"stepper phase {phase} is not halftrack {halftrack}'s")
+        if (on and halftrack > SENSOR_EDGE) or (not on and halftrack <= HOME_HALFTRACK):
+            state = "on" if on else "clear"
+            raise TrackError(f"track 00 sensor {state} at halftrack {halftrack}")
+        return on, phase
+
+    def home(self, halftrack=None, trace=None):
+        """1571: head to HOME_HALFTRACK by DOS's rule, track 00 sensed at phase 0.
+
+        Steps inwards while the sensor is on (where it clears, the phase places an
+        unknown ``halftrack``), then outwards one checked step at a time; any
+        contradiction raises TrackError. ``trace`` gets each (halftrack, on, phase).
+        """
+        self.halftrack = None
+        trace = [] if trace is None else trace
+        on, phase = self._sense(halftrack, trace)
+        walked = 0
+        while on:
+            if walked == SENSOR_WALK:
+                raise TrackError(f"track 00 sensor still on {walked} steps inwards")
+            self._step(1)
+            walked += 1
+            halftrack = None if halftrack is None else halftrack + 1
+            on, phase = self._sense(halftrack, trace)
+        if halftrack is None:
+            if not walked:
+                raise TrackError("track 00 sensor clear and nothing places the head")
+            halftrack = SENSOR_CLEAR + (
+                (phase - SENSOR_CLEAR - PHASE_OFFSET) & PB_PHASE
+            )
+            trace[-walked - 1 :] = [
+                (halftrack - walked + i, *read[1:])
+                for i, read in enumerate(trace[-walked - 1 :])
+            ]
+        for x in range(halftrack - 1, HOME_HALFTRACK - 1, -1):
+            self._step(-1)
+            self._sense(x, trace)
+        self.halftrack = HOME_HALFTRACK
+        return self.halftrack
 
     def _dos_track(self):
         """Drive 0's current track as DOS last left it, if plausible."""
@@ -496,23 +554,28 @@ class Nibbler:
                 return int(np.bincount(found).argmax())
         return None
 
-    def locate(self):
-        """Find the head position: 1571 track 0 sensor, else headers and DOS's track.
-
-        Raises TrackError when nothing places the head, unless ``allow_bump``.
-        """
-        if self.model == "1571" and self._to_sensor():
-            self.halftrack = HOME_HALFTRACK
-            return self.halftrack
+    def estimate(self, headers=True):
+        """Halftrack under the head from its headers, else DOS's track, and the phase."""
         dos = self._dos_track()
-        track = self._headers_here(dos) or dos
-        if track is not None:
-            self.halftrack = self._phase_halftrack(track)
+        track = (self._headers_here(dos) if headers else None) or dos
+        return None if track is None else self._phase_halftrack(track)
+
+    def locate(self):
+        """Find the head position without touching the stop.
+
+        A 1571 is homed (``home``) from the estimate. A 1541 takes the
+        estimate; with none it raises TrackError, unless ``allow_bump``.
+        """
+        estimate = self.estimate()
+        if self.model == "1571":
+            return self.home(estimate)
+        if estimate is not None:
+            self.halftrack = estimate
         elif self.allow_bump:
             self.bump()
         else:
             raise TrackError(
-                "head position unknown (no track 0 sensor, DOS track or headers);"
+                "head position unknown (no DOS track or headers);"
                 " allow_bump permits a bump against the stop"
             )
         return self.halftrack
@@ -549,6 +612,7 @@ class Nibbler:
         return self._read(density, start, side, timing)
 
     def _pass(self, kind, mode, anchor=b""):
+        self._sensing = False
         self._params(
             mode=mode, npages=NPAGES, kind=kind, alen=len(anchor), anchor=anchor
         )
@@ -621,6 +685,7 @@ class Nibbler:
         if len(data) % 256 or not 0 < len(data) <= NPAGES * 256:
             raise ValueError(f"{len(data)} bytes is not 1..{NPAGES} whole pages")
         density = self.seek(halftrack, density, side)
+        self._sensing = False
         self.mon.write(self.buffer, data)
         self._params(mode=START[start], npages=len(data) // 256)
         status = self._call(self.buffer + NPAGES * 256)

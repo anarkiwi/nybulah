@@ -104,14 +104,6 @@ def test_headers_override_dos_track(make_rig, g64):
     assert nib.locate() == 36 and drive.mech.bumps == 0
 
 
-def test_1571_steps_to_the_track_0_sensor(make_rig):
-    drive, nib = make_rig("1571")
-    drive.write(0x22, 0)
-    assert nib.locate() == 2 == drive.mech.halftrack and drive.mech.bumps == 0
-    nib.seek(40)
-    assert drive.mech.halftrack == 40
-
-
 def test_bump_needs_opt_in(make_rig):
     drive, nib = make_rig("1541")
     drive.write(0x22, 0)

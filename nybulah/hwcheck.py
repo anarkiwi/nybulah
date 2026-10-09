@@ -166,7 +166,7 @@ def add_arguments(ap):
     ap.add_argument(
         "--allow-bump",
         action="store_true",
-        help="bump the head against the stop if nothing else locates it",
+        help="1541: bump the head against the stop if nothing else locates it",
     )
 
 

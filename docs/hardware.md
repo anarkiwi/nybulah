@@ -87,6 +87,38 @@ The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
 its other subcommands (`nybulah <command> --help`), e.g.
 `nybulah bench --dev 10 --protocol s3`.
 
+## 1571 head homing probe
+
+`nybulah homeprobe` reads the 1571's track 00 sensor (VIA1 PA0, 16 raw reads
+and DOS's debounced test), the stepper phase and DOS's track, and prints the
+homing plan as JSON. Without `--step` it never steps. What to run, in order,
+with drive 8 the 1571 and a formatted disk inserted:
+
+1. Dry run; the head does not step (`--headers` spins the disk to read them):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb nybulah homeprobe --dev 8 --headers
+   ```
+
+   Expect `sensed` false and `pa0` all 1 unless the head is within
+   halftracks 2-5;
+   `phase` = (2 × `dos_track` + 2) & 3 when DOS left the head on its track;
+   `estimate` = 2 × the header (or DOS) track; `outward_steps` =
+   `estimate` - 2, `inward_steps` 0 (7 when sensed).
+
+2. Step, capped at the plan from step 1 (it refuses a larger one):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb nybulah homeprobe --dev 8 --headers --step --max-steps N
+   ```
+
+   with N the dry run's `outward_steps` (34 from track 18). Expect `trace`
+   to end `[2, true, 0]`, every phase = (halftrack + 2) & 3, the sensor clear
+   above `sensor_edge` and on from it down, and `sensor_edge` 2-5. The head
+   returns to the estimate, and `$22` names it. A `TrackError` means a
+   reading contradicted the position and the head stayed where it was read;
+   every outward step started from halftrack 3 or more by the estimate.
+
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin: commit
