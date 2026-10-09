@@ -18,7 +18,7 @@ verified.
 | Layer | Module | Role |
 |---|---|---|
 | Drive | `drive/track.s` | Step, select motor, density and side, capture or write raw bytes, time syncs |
-| Nibbler | `nybulah.nibbler` | Talks to `track.s` through any `Monitor` (s1, s2, s3). Returns `Capture` records |
+| Nibbler | `nybulah.nibbler` | Talks to `track.s` through any `Monitor` (s1-s4), or streams (1571, s4, firmware v12). Returns `Capture` records |
 | Passes | `nybulah.passes` | Host model of the capture passes: sample windows, anchors, merge |
 | Disk | `nybulah.disk` | Track jobs: decodes with `nybulah.analysis`, formats tracks, verifies |
 | Simulator | `nybulah.sim`, `simdisk`, `simfast`, `simhost` | py65 drive model with media, stepper, VIA2 and WD1770 index; its compiled mirror; host stand-ins |

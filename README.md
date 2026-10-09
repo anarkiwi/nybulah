@@ -1,78 +1,89 @@
 # nybulah
 
 Raw-track ("nibbler") imaging and writing for Commodore 1541 and 1571 disk
-drives over the standard serial IEC bus. It uses OpenCBM with a ZoomFloppy or
-another xum1541 adapter. You don't need a parallel cable; the drive needs an
-8 KB RAM expansion.
+drives over the standard serial IEC bus, through OpenCBM and a ZoomFloppy or
+another xum1541 adapter. No parallel cable is needed. It is for preserving
+copy-protected and non-standard disks and writing them back.
 
-It is for preserving copy-protected and non-standard disks, and for writing
-them back.
-
-> Status: early development. The transport, the drive code and the analysis
-> are tested against a cycle-stepped 1541/1571 simulator. Testing on real
-> hardware is in progress.
+> Status: early development. Transports, drive code and analysis are tested
+> against a cycle-stepped 1541/1571 simulator; hardware testing is ongoing.
 
 ## Features
 
-- **Serial-only raw capture.** The drive captures each track into its RAM
-  expansion, which is detected automatically. The host then fetches the track
-  over IEC. Other drives can stay powered on the bus.
-- **Fast, recoverable transport.** Drive-resident 6502 code works with the
-  stock S1/S2 protocols. With the modified xum1541 firmware it uses the X
-  protocol: CLK/DATA only, two bits per edge, one handshake per 64-byte burst
-  (firmware v10), and a 16-bit block check with retry. A 1571 can use its
-  CIA shift register on SRQ instead (s4, firmware v11), and with firmware v12 streams whole revolutions without expansion RAM. Watchdogs on the drive, in the firmware and on the host return
-  everything to a usable state after a stall, with no power cycling.
-- **Analysis on the host:**
-  - vectorised GCR codec;
-  - sector decode with D64 error codes;
-  - revolution detection by FFT autocorrelation, with a significance test over
-    the physically possible track lengths;
-  - killer and unformatted track classification;
-  - index alignment.
-- **Disk map:** every revolution of every track classified against clean-DOS
+- **Transports.** Drive-resident 6502 code over the stock S1/S2 protocols
+  or, with the modified xum1541 firmware, over X and SRQ with a 16-bit block
+  check and retry ([protocol.md](docs/protocol.md)):
+
+  | transport | lines | firmware | drives |
+  |---|---|---|---|
+  | s1, s2 | stock serial (s2 strobes ATN: one drive on the bus) | any | 1541, 1571 |
+  | s3 | X: CLK/DATA only, burst X (one handshake per 64 bytes) with v10 | v9, v10 | 1541, 1571 |
+  | s4 | 1571 CIA shift register on SRQ | v11 (v12 streams) | 1571 |
+
+  Watchdogs on the drive, in the firmware and on the host return everything
+  to a usable state after a stall, without power cycling. Other drives can
+  stay powered on the bus except under s2.
+- **Raw capture.** On a 1541, and for writes and RAM capture passes on a 1571,
+  the drive captures a track into an 8 KB RAM expansion (found automatically)
+  and the host fetches it. A 1571 with firmware v12 streams whole revolutions
+  in real time through s4 with no RAM expansion, so D64/D71 reads need none.
+- **Telemetry.** Sync lengths from per-byte arrival times, each within
+  per-sync bounds and within ±1 bit for 99.95% of syncs in simulation; no byte
+  is lost for any sync length. Revolution time from the 1571 index sensor or
+  the track's own repetition ([disk.md](docs/disk.md#capture-passes)).
+- **Head location without bumping.** A 1541 is located from sector headers
+  or DOS's track (bumping needs `--allow-bump`). A 1571 is homed on its
+  track 00 sensor by the DOS rule and is never bumped
+  ([disk.md](docs/disk.md#head-location)).
+- **Disk operations.** Read D64 on both drives and D71 on a 1571, with error
+  bytes and retries that merge the best read of each sector. Write D64/D71,
+  verifying every track by re-capture. `--archive` keeps every raw capture so
+  images can be re-derived.
+- **Analysis.** Vectorised GCR codec; sector decode with D64 error codes;
+  revolution detection with a significance test (segment shifts checked
+  against sector headers for byte-ready captures, FFT autocorrelation for
+  continuous streams); killer and unformatted track classes; index alignment;
+  GCR fault classification ([analysis.md](docs/analysis.md)).
+- **Disk map.** Every revolution of every track classified against clean-DOS
   statistics, with stable, weak and capture-fault regions told apart
-  (`nybulah map`, [docs/analysis.md](docs/analysis.md#disk-map)).
-- **Formats:** G64, NIB, NB2, D64 and D71, with conversion between them. Error
-  bytes are supported.
-- **Compatibility readers:** NBZ, G64/G71 with SPS EXT, P64, SCP and KryoFlux,
-  decoded through a 1541 read-circuit model (`nybulah convert`, `nybulah info`).
-- **Disk operations:** read and write D64 on the 1541 and 1571, and D71 on the
-  1571, through the fast transport. Every write is verified by re-capture.
-  The head is located without bumping it against the stop (1541 sector
-  headers or DOS's track; a 1571 is homed by its DOS's track 00 rule and is
-  never bumped); bumping a 1541 needs `--allow-bump`.
-- **Telemetry:** sync lengths from per-byte arrival times, each within
-  per-sync bounds and within ±1 bit for 99.95% of syncs in simulation
-  ([docs/disk.md](docs/disk.md)); no byte is lost for any sync length. The revolution
-  time comes from the 1571 index sensor or, on a 1541, from the track's own
-  repetition. Every capture can be archived with its raw passes, so images
-  can be re-derived later.
+  ([analysis.md](docs/analysis.md#disk-map)).
+- **Formats.** Read and write NIB, NB2, NBZ, G64, G71, P64, SCP, KryoFlux and
+  D64; flux decoded through a 1541 read-circuit model; conversion to G64, G71,
+  D64 and P64 keeps every track ([formats.md](docs/formats.md)).
+
+Measured transfer rates, ZoomFloppy, 8 KB blocks, bytes/s read / write
+([hardware.md](docs/hardware.md#expected-results)):
+
+| transport | firmware | 1541-II | 1571 1 MHz | 1571 2 MHz |
+|---|---|---|---|---|
+| s1 | any | 1634 / 1493 | 1669 / 1498 | |
+| s3 (X) | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
+| s3 (burst X) | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
+| s4 | v12 | | 23420 / 22261 | 46372 / 37052 |
 
 ## Compared with existing tools
 
 | | nybulah | nibtools | OpenCBM d64copy/cbmcopy | Flux boards (KryoFlux, Greaseweazle, SCP) |
 |---|---|---|---|---|
 | Raw tracks from a 1541 | serial IEC + 8 KB RAM expansion | parallel cable required | no (sectors only) | flux, with a PC drive or modified hardware |
-| Raw tracks from a 1571 | serial IEC + 8 KB RAM expansion | SRQ or parallel | no | flux |
+| Raw tracks from a 1571 | serial IEC: SRQ streaming (firmware v12) or 8 KB RAM expansion | SRQ or parallel | no | flux |
 | Other drives powered on the bus | yes | depends on transport | with S1 or original transfer | n/a |
-| Recovers from stalls without power cycling | yes (firmware v9) | no | no | n/a |
+| Recovers from stalls without power cycling | yes (firmware v9+) | no | no | n/a |
 | Sync lengths | per-byte arrival times, bounded per sync | no | no | yes |
 | Index alignment and RPM on a stock 1571 | WD1770 index sensor | needs an SC+-style sensor mod | no | yes |
-| Revolution detection | bit-level FFT autocorrelation with a significance test | byte matching within a fixed window | n/a | tool-dependent |
+| Revolution detection | significance-tested, checked against sector headers | byte matching within a fixed window | n/a | tool-dependent |
 | Licence | Apache-2.0 | GPL-3.0 | GPL-2.0 | various |
 
 ## Requirements
 
-- A ZoomFloppy or another xum1541 adapter. Firmware v9 from
-  [anarkiwi/OpenCBM](https://github.com/anarkiwi/OpenCBM/tree/xum1541-timeouts)
-  is needed for the X protocol and for stall recovery (v10, branch
-  `xum1541-xfast`, for burst X; v11, branch `xum1541-srq`, for 1571 SRQ fast
-  serial); stock firmware works with S1/S2.
-- A 1541 or 1571 with an 8 KB RAM expansion, which is a drive modification.
-  It holds a little more than one revolution of any track, and nybulah finds
-  it automatically. Stock drives work only with M-R/M-W and sector-level
-  tools.
+- A ZoomFloppy or another xum1541 adapter. Stock firmware runs s1/s2. The
+  fork at [anarkiwi/OpenCBM](https://github.com/anarkiwi/OpenCBM) adds
+  stall recovery and X (v9), burst X (v10), s4 (v11) and streaming (v12,
+  branch `xum1541-stream`, which the Docker image's plugin is built from).
+  Flashing: [hardware.md](docs/hardware.md#flashing-the-zoomfloppy-firmware).
+- A 1541 or 1571. Raw captures on a 1541, and writes and RAM capture passes
+  on a 1571, need an 8 KB RAM expansion (`$8000-$9FFF` on a 1541,
+  `$6000-$7FFF` on a 1571). A 1571 with firmware v12 reads D64/D71 without it.
 - Docker. The image bundles OpenCBM, the assembled drive code and Python.
 
 ## Usage
@@ -81,10 +92,14 @@ them back.
 docker build --target runtime -t nybulah .
 alias nybulah='docker run --rm --device=/dev/bus/usb -v "$PWD:/data" nybulah'
 
-nybulah hwcheck --devs 8 10        # identify drives, probe RAM, benchmark transport
-nybulah read --dev 10 disk.d64     # 1541: read with error bytes
-nybulah read --dev 8 disk.d71      # 1571: double-sided
-nybulah write --dev 8 disk.d71     # encode, write, verify
+nybulah hwcheck --devs 8 10 --proto s3     # identify drives, probe RAM, bench transports
+nybulah read --dev 10 --transport s3 disk.d64   # 1541: read with error bytes
+nybulah read --dev 8 --transport s4 disk.d71    # 1571: both sides, streamed with v12
+nybulah write --dev 8 --transport s4 disk.d71   # format, write, verify every track
+nybulah info disk.g64                      # per-track kind, cycle, errors (--map: text map)
+nybulah convert disk.nbz disk.g64          # to .g64, .g71, .d64 or .p64
+nybulah map disk.nib -o disk.html          # .png disk, .apng animation, .svg/.html strip
+nybulah survey CORPUS --out survey/        # corpus statistics and thresholds
 ```
 
 ![Disk map of a synthetic disk](docs/img/diskmap.apng)
@@ -93,28 +108,24 @@ nybulah write --dev 8 disk.d71     # encode, write, verify
 four revolutions: grey is standard DOS content; hatched regions change between
 revolutions; outlines are capture faults ([static view](docs/img/diskmap.png)).*
 
-```sh
-nybulah map disk.nib -o disk.html  # .png disk, .apng animation, .svg/.html strip with tooltips
-```
-
-`nybulah <command> --help` lists the options, for example `--transport
-s1|s2|s3|s4` and `--retries`.
+Hardware probes: `homeprobe` (1571 track 00 sensor and homing plan),
+`streamprobe` (one streamed track), `ramcheck` (RAM captures against a
+stream), `ramprobe` and `bench`. `nybulah <command> --help` lists the options.
 
 ## Documentation
 
-- [docs/hardware.md](docs/hardware.md): hardware setup, firmware flashing and
-  the hardware check
-- [docs/protocol.md](docs/protocol.md): X, burst X and SRQ wire protocols and
-  timing
-- [docs/protocol-review.md](docs/protocol-review.md): X cycle budgets, burst
-  design and predicted rates
-- [docs/disk.md](docs/disk.md): D64/D71 reading and writing
-- [docs/analysis.md](docs/analysis.md): GCR, revolution detection and format
-  APIs
-- [docs/formats.md](docs/formats.md): supported image formats, flux decoding
-  and licences
-- [docs/scenarios.md](docs/scenarios.md): track scenarios in preserved images,
-  corpus statistics (`nybulah survey`) and how nybulah handles each
+- [docs/hardware.md](docs/hardware.md): hardware check, probes, firmware
+  flashing and measured rates
+- [docs/protocol.md](docs/protocol.md): X, burst X, SRQ and streaming wire
+  protocols, timing and margins
+- [docs/disk.md](docs/disk.md): drive routines, capture passes, D64/D71
+  reading and writing, head location
+- [docs/analysis.md](docs/analysis.md): GCR, revolution detection, faults,
+  disk map and format APIs
+- [docs/formats.md](docs/formats.md): image formats, flux decoding and
+  licences
+- [docs/scenarios.md](docs/scenarios.md): track scenarios in preserved
+  images, corpus statistics and how nybulah handles each
 
 ## Development
 
@@ -123,8 +134,8 @@ docker build --target test -t nybulah:test .
 docker run --rm -v "$PWD:/app" -w /app nybulah:test python -m pytest -n auto
 ```
 
-The drive code is ca65 assembly in `drive/`. It is assembled in the Docker
-build. Tests run it on a compiled drive simulator (`nybulah.simfast`);
+The drive code is ca65 assembly in `drive/`, assembled in the Docker build.
+Tests run it on a compiled drive simulator (`nybulah.simfast`);
 `NYBULAH_SIM=py65` selects the py65 reference model it is checked against.
 
 ## Licence

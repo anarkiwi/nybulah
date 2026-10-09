@@ -194,6 +194,8 @@ captures. It also tests whether faults cluster at 256-byte buffer pages
 | G64 | `read_g64` / `write_g64` | v0; half tracks; per-track or per-byte speed zones |
 | NIB / NB2 | `read_nib(buf, nb2=False)` / `write_nib` | Density flags are kept; entries come from the header table |
 
+The other formats and the `DiskImage` API: [formats.md](formats.md).
+
 Conversions (`nybulah.formats.convert`), with tqdm progress:
 
 - `nib_to_g64(image, period=None, index_aligned=False)` trims each track to one
