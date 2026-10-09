@@ -15,6 +15,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .. import scenarios, survey
+from .capture import segments
 from .cycle import TrackKind, extract_revolution, find_cycle, lag_window
 from .faults import stream_faults
 from .gcr import sectors_per_track
@@ -23,10 +24,13 @@ from .regions import (
     HEADER_BITS,
     SKIP_BITS,
     Block,
+    Blocks,
     agreement,
+    block_kinds,
     canonical_keep,
     chains,
     headers_ok,
+    pair_blocks,
     parse,
     ranges,
 )
@@ -331,17 +335,6 @@ def classify(rev, key, disk_id, thr, read=True):
     return np.concatenate(found + ((_faults(rev),) if read else ()))
 
 
-def _mutual_nearest(a, b, n):
-    """Index pairs of mutually nearest positions on a circle of ``n``."""
-    if not (len(a) and len(b)):
-        return np.zeros(0, np.int64), np.zeros(0, np.int64)
-    dist = (a[:, None] - b[None, :]) % n
-    dist = np.minimum(dist, n - dist)
-    near_b, near_a = dist.argmin(axis=1), dist.argmin(axis=0)
-    i = np.flatnonzero(near_a[near_b] == np.arange(len(a)))
-    return i, near_b[i]
-
-
 def _piecewise(src, dst, n_src, n_dst):
     """Map positions by the offset of the last anchor at or before them."""
     order = np.argsort(src)
@@ -363,28 +356,58 @@ class Alignment:
     miss: np.ndarray
 
 
+def _lag(ref, bits):
+    """Position in ``ref`` of bit 0 of ``bits`` by a global canonical alignment."""
+    keep_ref, keep = canonical_keep(ref.bits), canonical_keep(bits)
+    ref_idx = np.flatnonzero(keep_ref)
+    return ref_idx[agreement(ref.bits[keep_ref], bits[keep])[2] % len(ref_idx)]
+
+
+def _synced(*revs):
+    """Every revolution has syncs."""
+    return all(len(r.sync_start) for r in revs)
+
+
 def align(ref, rev):
     """:class:`Alignment` of parsed ``rev`` to parsed ``ref``, anchored at shared syncs.
 
-    Syncs pair as mutual nearest neighbours after a global canonical alignment;
-    each block of ``ref`` is compared with ``rev`` from its paired sync.
+    Blocks pair as :func:`pair_blocks` finds; each pair is compared bit by bit
+    from both block starts over the narrower nominal width, so gaps, splices and
+    the bits framed before a sync are not compared. Revolutions without syncs
+    are compared whole after a global canonical alignment.
     """
-    keep_ref, keep_rev = canonical_keep(ref.bits), canonical_keep(rev.bits)
-    lag = agreement(ref.bits[keep_ref], rev.bits[keep_rev])[2]
-    ref_idx, rank = np.flatnonzero(keep_ref), np.cumsum(keep_rev) - 1
-    coarse = ref_idx[(rank[rev.block_start] + lag) % len(ref_idx)]
-    i, j = _mutual_nearest(coarse, ref.block_start, ref.n)
+    i, j = pair_blocks(rev.blocks, ref.blocks)[:2] if _synced(ref, rev) else ((),) * 2
     src, dst = rev.block_start[i], ref.block_start[j]
-    if i.size == 0:
-        src, dst = np.zeros(1, np.int64), ref_idx[lag % len(ref_idx)][None]
+    width = np.minimum(ref.blocks.width[j], rev.blocks.width[i])
+    if len(src) == 0:
+        src, dst = np.zeros(1, np.int64), np.array([_lag(ref, rev.bits)])
+        width = np.array([min(ref.n, rev.n)])
     to_ref = _piecewise(src, dst, rev.n, ref.n)
     from_ref = _piecewise(dst, src, ref.n, rev.n)
-    starts, lengths = _segments(ref)
-    pos = ranges(starts, lengths)
-    other = rev.bits[ranges(from_ref(starts), lengths) % rev.n]
+    pos = ranges(dst, width)
+    other = rev.bits[ranges(src, width) % rev.n]
     return Alignment(
         to_ref, from_ref, np.unique(pos[ref.bits[pos % ref.n] != other] % ref.n)
     )
+
+
+def _passes(ref, cap):
+    """Whole revolutions of a byte-ready capture: the bits between successive
+    passes of one sync, its segments paired with the reference blocks."""
+    seg = segments(cap.framed)
+    if ref.sync_len.size == 0 or len(seg) < 2:
+        return []
+    ends = np.minimum(seg.begin, len(seg.bits) - 1)
+    blocks = Blocks(seg.bits, ends, seg.content, block_kinds(seg.bits, ends)[0])
+    k, near, turn = pair_blocks(blocks, ref.blocks)
+    keep = seg.run[k] >= 0
+    order = np.lexsort((turn[keep], near[keep]))
+    k, near, turn = k[keep][order], near[keep][order], turn[keep][order]
+    nxt = np.flatnonzero((near[1:] == near[:-1]) & (turn[1:] == turn[:-1] + 1))
+    if not nxt.size:
+        return []
+    best = np.argmax(np.bincount(near[nxt]))
+    return [seg.bits[seg.run[k[a]] : seg.run[k[a + 1]]] for a in nxt[near[nxt] == best]]
 
 
 def _overlap(a, b, n):
@@ -430,14 +453,17 @@ def stability(regs, nrev, n):
     return regs[~fault | slips[by_read].any(axis=0)]
 
 
-def _windows(cap, best):
-    """Whole revolutions of one capture, index to index or cycle by cycle; for
-    the surveyed capture, those after its surveyed revolution."""
+def _windows(cap, best, ref):
+    """Whole revolutions of one capture: index to index, sync to sync for other
+    byte-ready captures (see :func:`_passes`), else cycle by cycle; for the
+    surveyed capture, those after its surveyed revolution."""
     if cap.revolutions:
         cuts = np.stack((cap.index[:-1], cap.index[1:]), axis=1)
         return [cap.bits[a:b] for a, b in cuts[int(best) :]]
     if cap.circular or len(cap.bits) < lag_window(cap.zone)[0]:
         return [] if best else [cap.bits]
+    if cap.framed is not None and not best:
+        return _passes(ref, cap)
     source = cap.framed if cap.framed is not None else cap.bits
     cycle = find_cycle(source, cap.zone)
     if cycle.kind != TrackKind.FORMATTED:
@@ -473,7 +499,9 @@ def _local(track, thr):
     """Regions of every revolution of a formatted track, in the reference frame."""
     cap = track.best[0]
     revs = [(track.ref, not cap.circular)] + [
-        (parse(w), not c.circular) for c in track.caps for w in _windows(c, c is cap)
+        (parse(w), not c.circular)
+        for c in track.caps
+        for w in _windows(c, c is cap, track.ref)
     ]
     out = [classify(track.ref, track.key, track.disk_id, thr, revs[0][1])]
     for r, (rev, read) in enumerate(revs[1:], 1):
