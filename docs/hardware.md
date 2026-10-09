@@ -139,6 +139,16 @@ with drive 8 the 1571 and a formatted disk inserted:
 
 ## 1571 streaming (firmware v12)
 
+Measured on drive 8 (1571, 2 MHz), firmware v12:
+
+| probe | result |
+|---|---|
+| `xprobe.py --cia` | CIA flag 34 cycles after SDR on both timer phases |
+| `xprobe.py --sweep --fast` | 21.40 µs per byte, 1.08 ms per block |
+| `streamprobe --halftrack 36` | adapter and drive `done`; 2 index edges, 6982 bytes per revolution; 76 syncs; 19/19 sectors |
+| `streamprobe --halftrack 2 --revolutions 3` | adapter and drive `done`; 4 index edges, 7522 bytes per revolution each; 164 syncs; 21/21 sectors |
+| `read --transport s4` (D64) | 683 sectors, 0 errors, one capture per track, 25.5 s; identical to the 1541-II's RAM-path read of the same disk |
+
 Streaming needs firmware v12 and the plugin from the same tree (branch
 `xum1541-stream`). Build the image from the local checkout:
 
@@ -234,7 +244,8 @@ no checksum retries; s4 also at 1–4096 bytes across the USB bank boundaries:
 | X read / write | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
 | burst X read / write | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
 | s4 read / write | v11 | | 20960 / 22258 | 41460 / 37053 |
-| s4 read / write, simulated | v11 | | 23600 / 22400 | 47200 / 37700 |
+| s4 read / write, 40-cycle send | v12 | | 23420 / 22261 | 46372 / 37052 |
+| s4 read / write, simulated | v12 | | 23600 / 22400 | 47200 / 37700 |
 
 `nybulah bench --protocol s3 --fast` (or s4) runs a 1571 at 2 MHz for the
 transfer (VIA1 PA5) and returns it to 1 MHz before handing back to DOS; an s4
