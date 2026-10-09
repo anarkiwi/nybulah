@@ -1,3 +1,4 @@
+import pathlib
 import re
 
 import numpy as np
@@ -5,9 +6,11 @@ import pytest
 
 from nybulah import passes
 from nybulah.analysis.gcr import bits_per_revolution, to_bits
+from nybulah.formats import D64, d64_to_g64
 from nybulah.nibbler import READ, Capture, cell_cycles
 from nybulah.simdisk import Media, log_bytes, sync_track, true_syncs
 
+HW = pathlib.Path(__file__).parent / "data" / "hw" / "dev10"
 RUNS = list(range(10, 21)) + [24, 28, 32, 40, 48, 64, 80, 100, 128, 200, 255, 256]
 RUNS += [300, 400, 500, 640, 800, 1000]
 ZONE_HALFTRACK = {3: 10, 2: 40, 1: 52, 0: 64}
@@ -250,3 +253,62 @@ def test_late_ts_release_counts_are_followed():
     assert np.array_equal(cap.positions, pos)
     assert (lo <= runs).all() and ((hi < 0) | (runs <= hi)).all()
     assert (np.abs(cap.sync_bits - runs) <= 1).all()
+
+
+def _plant_before_syncs(cells, anchor):
+    """Write ``anchor`` into every gap, framed as read, ending a byte before a sync."""
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], cells, [0])).astype(np.int8)))
+    starts, ends = edges[::2], edges[1::2]
+    sync = ends - starts >= 10
+    starts, ends = starts[sync], ends[sync]
+    nxt = np.append(starts[1:], starts[0] + len(cells))
+    bits = to_bits(np.frombuffer(anchor, np.uint8))
+    for at in ends + 8 * ((nxt - ends) // 8 - len(anchor) - 1):
+        cells[np.arange(at, at + len(bits)) % len(cells)] = bits
+
+
+def test_ts_anchor_drawn_off_its_angle_on_a_periodic_track(make_rig, monkeypatch):
+    """Gaps that read as the anchor only after BITS draw the TS pass off its angle;
+    the merge places the syncs where the BITS bytes latched them."""
+    blank = d64_to_g64(D64(np.zeros((683, 256), np.uint8)), progress=False)
+    media = Media.from_g64(blank)
+    drive, nib = make_rig("1541", media)
+    nib.halftrack = 36
+    drive.mech.log = []
+    run = nib._pass  # pylint: disable=protected-access
+
+    def drawn(kind, mode, anchor=b""):
+        if anchor:
+            _plant_before_syncs(media.tracks[(0, 6)], anchor)
+        return run(kind, mode, anchor)
+
+    monkeypatch.setattr(nib, "_pass", drawn)
+    cap = nib.capture(6, start="sync", timing="syncs")
+    pos, runs = true_syncs(drive.mech.log, cap.data)
+    placed = cap.base + cap.ts_syncs()[0]
+    assert cap.base > 0 and not np.isin(placed[placed < len(cap.data)], pos).all()
+    lo, hi = cap.sync_bounds
+    assert np.array_equal(cap.positions, pos) and cap.syncs.unmatched == 0
+    assert (lo <= runs).all() and ((hi < 0) | (runs <= hi)).all()
+
+
+def test_sync_weights_favour_rare_latched_ones():
+    ok = np.array([False, True, True, True, True])
+    ones = np.array([0, 2, 2, 2, 9])
+    w = passes.sync_weights(ok, ones)
+    assert w[0] == 0 and w[4] > w[1] == w[2] == w[3] > 0
+    fold = passes._fold  # pylint: disable=protected-access
+    assert fold(np.arange(7), 5, np.maximum).tolist() == [5, 6, 2, 3, 4]
+
+
+def test_hw_ts_anchor_drawn_off_its_angle():
+    """A 1541-II read of a blank track 3 whose TS pass anchored on a gap byte at
+    the format's write splice; its syncs are where the BITS bytes latched $FF."""
+    for side in "ab":
+        cap = Capture.load(HW / side / "read-s0-t03-0.npz")
+        data = cap.data
+        latched = np.flatnonzero((data[:-1] == 0xFF) & (data[1:] != 0xFF)) + 1
+        assert np.array_equal(cap.positions, latched) and cap.syncs.unmatched == 0
+        placed = cap.base + cap.ts_syncs()[0]
+        drawn = not np.isin(placed[placed < len(data)], latched).all()
+        assert drawn == (side == "b")

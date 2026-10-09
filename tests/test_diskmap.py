@@ -24,6 +24,7 @@ from nybulah.analysis.diskmap import (
 from nybulah.analysis.regions import ILLEGAL_ZEROS, parse
 from nybulah.analysis.synth import synthetic_disk
 from nybulah.formats import loads, to_g64, write_g64, write_nib
+from nybulah.nibbler import Capture
 
 DATA = pathlib.Path(__file__).parent / "data"
 REVS = 4
@@ -258,8 +259,13 @@ def test_hw_rereads_of_a_clean_disk_agree(dev10):
     caps, dmap = dev10
     assert dmap.revs.tolist() == [len(caps[k]) for k in dmap.keys]
     r = dmap.regions
-    assert not (r["stability"] == Stability.UNSTABLE).any()
     assert not (r["kind"] == Kind.DISAGREE).any()
+    splice = r[r["stability"] == Stability.UNSTABLE]
+    assert set(splice["track"].tolist()) == {6}
+    assert (splice["kind"] == Kind.ZERO_SPAN).all()
+    cap = Capture.load(DATA / "hw" / "dev10" / "a" / "read-s0-t03-0.npz")
+    rev = cap.revolution_bytes()
+    assert (cap.data[rev + 1 :] != cap.data[1:-rev]).sum() == len(splice) == 1
     assert set(np.unique(r["kind"])) <= {
         Kind.SYNC,
         Kind.HEADER,
