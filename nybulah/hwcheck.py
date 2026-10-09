@@ -10,8 +10,9 @@ import pathlib
 import sys
 import time
 
-from . import bench, ramprobe, tool
-from .monitor import recover, supported
+from . import bench, disk, ramprobe, tool
+from .monitor import Monitor, recover, supported
+from .nibbler import Nibbler
 
 
 class Session:
@@ -54,7 +55,13 @@ class Session:
         self.emit({"step": name, "dev": dev, "ok": None, "skipped": reason})
 
 
-def check_dev(session, dev, protos, size, reps):
+def disk_step(cbm, dev, proto, model):
+    """Read one track per density zone without writing anything."""
+    with Monitor(cbm, dev, proto) as mon, Nibbler(mon, model) as nib:
+        return disk.survey(nib)
+
+
+def check_dev(session, dev, protos, size, reps, disk_check=False):
     """All steps for one drive."""
     cbm = session.cbm
     session.step("identify", dev, lambda: list(cbm.identify(dev)))
@@ -77,6 +84,15 @@ def check_dev(session, dev, protos, size, reps):
                 dev,
                 lambda d=pattern: ramprobe.verify(cbm, dev, base, d),
             )
+    if not disk_check:
+        return
+    if base is None:
+        session.skip("disk", dev, "no expansion RAM")
+    elif not supported(cbm, protos[0]):
+        session.skip("disk", dev, f"{protos[0]} not supported here")
+    else:
+        model = probe["model"]
+        session.step("disk", dev, lambda: disk_step(cbm, dev, protos[0], model))
 
 
 def summarize(records):
@@ -100,6 +116,8 @@ def summarize(records):
             }
         elif step.startswith("alias_"):
             s[step] = res["mismatched"]
+        elif step == "disk":
+            s[step] = res
     return out
 
 
@@ -112,6 +130,9 @@ def add_arguments(ap):
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("artifacts"))
     ap.add_argument("--recover-timeout", type=float, default=3.0)
+    ap.add_argument(
+        "--disk", action="store_true", help="read one track per zone (no writes)"
+    )
 
 
 def execute(args, cbm):
@@ -122,7 +143,7 @@ def execute(args, cbm):
     with path.open("w") as log:
         session = Session(cbm, log, args.recover_timeout)
         for dev in args.devs:
-            check_dev(session, dev, protos, args.size, args.reps)
+            check_dev(session, dev, protos, args.size, args.reps, args.disk)
         summary = summarize(session.records)
         session.emit({"summary": summary, "log": str(path)})
     return summary

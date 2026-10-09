@@ -43,6 +43,17 @@ skipped:
 docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 8 10 --proto s3
 ```
 
+## Disk survey (read-only)
+
+With a formatted disk in each drive, `--disk` adds one read-only step per
+drive. It captures one track per density zone and reports bytes, sync lengths,
+byte period, overrun risk and decoded sectors, plus the RPM measured from the
+index on a 1571 (see [disk.md](disk.md)). It never writes:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 8 10 --disk
+```
+
 The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
 its other subcommands (`nybulah <command> --help`), e.g.
 `nybulah bench --dev 10 --protocol s3`.

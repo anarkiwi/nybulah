@@ -17,7 +17,15 @@ from .gcr import (
     to_bytes,
     track_capacity,
 )
-from .sector import SectorError, TrackDecode, decode_track, format_track
+from .capture import capture_bits, trailing_ones
+from .sector import (
+    SectorError,
+    TrackDecode,
+    decode_track,
+    format_track,
+    header_tracks,
+    merge_decodes,
+)
 
 __all__ = [
     "Cycle",
@@ -26,6 +34,7 @@ __all__ = [
     "TrackKind",
     "bit_rate",
     "bits_per_revolution",
+    "capture_bits",
     "decode",
     "decode_bits",
     "decode_track",
@@ -34,7 +43,9 @@ __all__ = [
     "extract_revolution",
     "find_cycle",
     "format_track",
+    "header_tracks",
     "index_align",
+    "merge_decodes",
     "rotate",
     "runs_of_ones",
     "sectors_per_track",
@@ -43,4 +54,5 @@ __all__ = [
     "to_bits",
     "to_bytes",
     "track_capacity",
+    "trailing_ones",
 ]

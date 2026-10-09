@@ -61,3 +61,75 @@ def test_drivecode_env_fallback(tmp_path, monkeypatch):
     assert "s9" in protocols() and drivecode("monitor_s9") == b"\x60"
     with pytest.raises(FileNotFoundError, match="NYBULAH_DRIVECODE"):
         drivecode("monitor_s8")
+
+
+def disk_cli(monkeypatch, model, media=None, dev=10):
+    import contextlib
+    import functools
+
+    from nybulah import diskcmd
+    from nybulah.nibbler import Nibbler
+    from nybulah.simdisk import Media, SimMonitor, disk_drive
+
+    drive = disk_drive(model, media if media is not None else Media(), dev)
+    monkeypatch.setattr(
+        diskcmd,
+        "Monitor",
+        lambda cbm, dev, proto: contextlib.nullcontext(SimMonitor(cbm.drive)),
+    )
+    monkeypatch.setattr(
+        diskcmd,
+        "Nibbler",
+        functools.partial(
+            Nibbler, stepms=1, settle_ms=1, spinup_s=0, sleep=lambda s: None
+        ),
+    )
+    return tracked(drive)
+
+
+def test_read_and_write_commands(monkeypatch, tmp_path):
+    import numpy as np
+
+    from nybulah import disk
+    from nybulah.formats import D64, d64_to_g64, read_d64, write_d64
+    from nybulah.simdisk import Media
+
+    image = D64(np.random.default_rng(5).integers(0, 256, (683, 256), np.uint8))
+    path = tmp_path / "in.d64"
+    path.write_bytes(write_d64(image))
+    cbm = disk_cli(monkeypatch, "1541")
+    jobs = disk.d64_jobs
+    monkeypatch.setattr(disk, "d64_jobs", lambda tracks: jobs(2))
+    out = cli.main(["write", "--dev", "10", str(path)], cbm)
+    assert out["failed"] == [] and cbm.closed
+    monkeypatch.setattr(disk, "d64_jobs", jobs)
+    cbm = disk_cli(
+        monkeypatch, "1541", Media.from_g64(d64_to_g64(image, progress=False))
+    )
+    target = tmp_path / "out.d64"
+    out = cli.main(
+        ["read", "--dev", "10", str(target), "--archive", str(tmp_path / "caps")], cbm
+    )
+    assert out["errors"] == 0
+    assert (read_d64(target.read_bytes()).data == image.data).all()
+
+
+def test_disk_command_refusals(monkeypatch, tmp_path):
+    import numpy as np
+
+    from nybulah.formats import D71, write_d71
+
+    path = tmp_path / "in.d71"
+    path.write_bytes(write_d71(D71(np.zeros((1366, 256), np.uint8))))
+    with pytest.raises(ValueError, match="needs a 1571"):
+        cli.main(["write", "--dev", "10", str(path)], disk_cli(monkeypatch, "1541"))
+    with pytest.raises(ValueError, match="expected"):
+        cli.main(
+            ["read", "--dev", "10", str(tmp_path / "x.g64")],
+            disk_cli(monkeypatch, "1541"),
+        )
+    with pytest.raises(ValueError, match="transport"):
+        cli.main(
+            ["read", "--dev", "10", "--transport", "s3", str(path)],
+            disk_cli(monkeypatch, "1571"),
+        )
