@@ -70,4 +70,3 @@ def execute(args, cbm):
             report["saved"] = str(args.save)
     print(json.dumps(report))
     return report
-
