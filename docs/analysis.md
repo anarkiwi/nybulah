@@ -377,3 +377,117 @@ weak span, a bit slip, a half-written density change, heavy jitter and a
 half track reading both neighbours; `tools/diskmap_example.py` renders it to
 `docs/img/fluxview.png`, and `tests/test_fluxview.py` checks each feature's
 channel statistics at its known angles.
+
+## MFM tracks (`nybulah.analysis.mfm`)
+
+The 1581 records MFM through a WD1772. Sources: WD1772 datasheet (J.L. Guerin
+edit v1.3), and the 1581 DOS 318045-01 sources `mrout.src` (`fmtrk`),
+`dskint.src` (`psetdef`), `burstc.src` (`nsecks`) and `msub.src` (`trans_ts`,
+`wdstatus`).
+
+**Media and Read Track.** A track is `(data, mark)` bytes from the index;
+`mark` flags A1*/C2* bytes written without a clock. Read Track output carries
+no `mark`. The WD resynchronises on every A1*/C2*, so the first sync byte may
+come out misframed. `find_marks` therefore accepts two A1 bytes before an ID
+mark ($FC–$FF) or a data mark ($F8–$FB), and two C2 bytes before $FC (index
+mark). `decode_track` accepts fields in order, as the WD does: a mark inside an
+accepted field is data. A data mark less than 43 bytes after an ID's CRC
+belongs to that ID (the Read Sector window).
+
+**Fields.** An ID field is the mark, C, H, R, N and the CRC. A data field is
+the mark, 128 << (N & 3) bytes and the CRC. Both CRCs are CRC-16-CCITT preset
+to that of three A1 (`crc.SYNC3` = $CDB4). The records (`SECTOR_DTYPE`) hold:
+
+- positions, the ID fields and the data size;
+- CRC results;
+- `gap`: the bytes from the end of the previous field to the next sync, and
+  its 1581 value `gap_std`;
+- `split`: the bytes from the ID to the data sync;
+- the error byte and `Flag`s.
+
+| error byte (DOS) | condition |
+|---|---|
+| 01 (00) | ID and data CRC good |
+| 02 (20) | data field with no ID before it |
+| 04 (22) | good ID with no data mark within 43 bytes |
+| 05 (23) | data CRC |
+| 09 (27) | ID CRC |
+
+| flag | condition |
+|---|---|
+| `DELETED` | data mark $F8/$F9 (the DOS masks record type out of `wdstatus`, so it reads as OK) |
+| `ODD_SIZE` | N ≠ 2 |
+| `DUPLICATE` | another good ID with the same C, H, R in the revolution |
+| `FOREIGN` | C ≠ cylinder, H ≠ side, or R outside 1–10 |
+| `TRUNCATED` | field cut by the end of the read |
+| `GAP` | a gap differs from the format by more than one byte, the most a write splice adds or drops |
+
+The 1581 values follow `fmtrk` with `psetdef` gap3 35. The lead is 32 × $4E;
+each ID is followed by 22 × $4E and each data field by 35 × $4E; each sync is
+12 × $00 then 3 × A1*. The track is 6250 bytes (250 kbit/s at 300 rpm), so
+each byte takes 32 µs.
+
+`decode_ids` turns Read Address lists (six bytes, status, µs) into the same
+records. The position is the time since the index divided by 32 µs.
+`decode_reads` turns Read Sector results into records. Status maps as in the
+datasheet status summary: RNF+CRC gives 27, RNF 20 and CRC 23. Lost data
+gives 27, as in `wdstatus`.
+
+`best_sectors(tracks, cylinder, side)` picks the best read of each R over all
+revolutions or reads, and splits it into the two logical 256-byte sectors.
+
+**Logical mapping** (`trans_ts`). `physical(track, sector)` gives
+`(cylinder, side, R, half)`, and `logical` is its inverse:
+
+- cylinder = track − 1;
+- side H = 0 for sectors 0–19 and 1 for sectors 20–39;
+- R = (sector mod 20) // 2 + 1;
+- half = sector mod 2.
+
+H equals CIA PA0. The physical head is 1 − H (`head_side`).
+
+**Encoder.** `SectorSpec` describes one sector. It can carry an extra or
+duplicate R, any N, a deleted mark, a bad ID or data CRC, a missing ID or data
+field, and its own gap 2 and gap 3. `standard_layout(cylinder, side, data,
+errors)` gives the `fmtrk` layout and reproduces D81 error bytes 20, 21, 22,
+23 and 27. `encode_track` writes the media directly.
+
+`plan_track` gives a `TrackPlan`:
+
+- a Write Track image in the drive's RLE form (`rle`/`unrle`: token 0 ends;
+  1–127 repeats the next byte; 128–255 copies t − 127 literal bytes; the last
+  byte repeats until the index);
+- Write Sector jobs for data that is not constant or that holds $F5–$F7 (Write
+  Track writes those as A1*, C2* and CRC);
+- the media that both leave, with Write Sector's trailing $FF byte.
+
+Layouts that neither command can write are rejected. `wd_write_track` and
+`wd_write_sector` model the two commands on media.
+
+**Revolutions.** `compare_revolutions` pairs reads of each good ID by
+(C, H, R, copy). It reports revolutions read, good reads, distinct contents
+and stability. Weak runs are the payload bytes that differ from the per-byte
+majority.
+
+## MFM disk map (`nybulah.analysis.mfmmap`)
+
+`mfm_disk_map(decodes)` builds a `DiskMap` on the GCR map's region table,
+`stability` and raster, so `nybulah map` and `info --map` render it unchanged.
+Read Track starts at the index, so revolutions are compared without alignment.
+Positions are data bits (8 × byte). Rows are keyed by the halftrack of logical
+track cylinder + 1, with `SIDE1` for H = 1.
+
+| MFM kind | `Kind` | `detail` |
+|---|---|---|
+| sync, ID, data, gap | `SYNC`, `HEADER`, `DATA`, `GAP` | 3, R, R, length |
+| ID CRC | `HDR_CHECKSUM` | R |
+| C ≠ cylinder / H ≠ side / R outside 1–10 (extra sector) | `HDR_TRACK` / `HDR_ID` / `HDR_SECTOR` | R |
+| duplicate C, H, R | `HDR_DUPLICATE` | R |
+| ID without data (22) | `ID_NO_DATA` | R |
+| data without ID (20) | `DATA_ORPHAN` | −1 |
+| data CRC | `DATA_CHECKSUM` | R |
+| deleted data mark | `DATA_DELETED` | R |
+| N ≠ 2 | `DATA_SIZE` | R |
+| gap off the format by more than one byte | `GAP_LONG`, `GAP_SHORT` | length |
+| weak bytes (minority across revolutions) | `DISAGREE` | bytes |
+| no address mark | `UNFORMATTED` | – |
