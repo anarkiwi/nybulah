@@ -264,6 +264,12 @@ def test_scan_resume_summary_and_cli(corpus, tmp_path, monkeypatch, capsys):
     assert reference["tracks"] == 1 and reference["errors_capture"] == {"0": 19}
 
 
+def test_illegal_fill_classes():
+    fill = scenarios.ILLEGAL_FILL
+    assert fill[0x00] and fill[0x11] and fill[0x88] and not fill[-1]
+    assert not fill[0x55] and not fill[0x52] and not fill[0xFF]
+
+
 def test_summarise_empty():
     assert scenarios.summarise({"tracks": np.zeros(0, survey.TRACK_DTYPE)}) == {
         "images": 0

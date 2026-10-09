@@ -93,6 +93,8 @@ s1|s2|s3` and `--retries`.
   APIs
 - [docs/formats.md](docs/formats.md): supported image formats, flux decoding
   and licences
+- [docs/scenarios.md](docs/scenarios.md): track scenarios in preserved images,
+  corpus statistics (`nybulah survey`) and how nybulah handles each
 
 ## Development
 

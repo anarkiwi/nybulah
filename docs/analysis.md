@@ -202,3 +202,11 @@ measured to within ±3 bits. Both are for tests and tools.
 `tests/test_corpus.py` checks periods against `header_period` on NIB and NBZ
 images, loose or zipped, loaded through `nybulah.formats.loads`. It runs only when `NYBULAH_CORPUS` names a directory, and
 `NYBULAH_CORPUS_SAMPLE` sets how many images it reads.
+
+## Corpus survey (`nybulah.survey`, `nybulah.scenarios`)
+
+`nybulah survey CORPUS --out DIR` measures every halftrack of every image
+(files and nested zip members) into resumable columnar parts. It then writes
+`summary.json` with scenario prevalence, thresholds derived from clean DOS
+tracks, and the per-scenario behaviour of `find_cycle`. See
+[scenarios.md](scenarios.md).

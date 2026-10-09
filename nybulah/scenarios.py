@@ -19,6 +19,14 @@ LINEAR_KINDS = ("nib", "nbz", "nb2")
 DOS_TRACKS = 35
 MAX_TRACK = 42
 BYTE_BITS = 8
+_CYCLIC = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1)
+ILLEGAL_FILL = np.zeros(257, bool)  # index -1 (no gap bytes) is False
+ILLEGAL_FILL[:256] = (
+    np.lib.stride_tricks.sliding_window_view(np.hstack((_CYCLIC, _CYCLIC[:, :2])), 3, 1)
+    .sum(axis=2)
+    .min(axis=1)
+    == 0
+)
 NIB_FLAGS = (BM_MATCH, BM_NO_CYCLE, BM_NO_SYNC, BM_FF_TRACK)
 FEATURES = ("n_sync", "sync_max", "ratio", "bad_span", "n_hdr", "cycle_z")
 
@@ -199,38 +207,44 @@ def scenarios(tracks, d, thr):
         for k in thr["linear"]
     }
     whole, formatted, dos = d["whole"], d["formatted"], d["dos"]
-    ht = t["halftrack"].astype(np.int64)
-    upper = ht // 2 > DOS_TRACKS
-    side0 = t["side"] == 0
-    sim_prev = neighbour(t, -1, "sim_half")
-    crosstalk = np.fmax(sim_prev, t["sim_half"]) > fam["similar"]
+    upper = (t["halftrack"] // 2 > DOS_TRACKS) & (t["side"] == 0)
+    crosstalk = np.fmax(neighbour(t, -1, "sim_half"), t["sim_half"]) > fam["similar"]
     present = t["kind"] != TrackKind.UNFORMATTED
+    fill = present & ILLEGAL_FILL[t["gap_top"]] & (t["gap_top_frac"] > 0.5)
+    lower = upper & (t["n_hdr"] > 0) & (t["hdr_track"] < d["track"])
+    own = formatted & ~fill
     return {
         "standard_dos": d["clean"],
         "dos_with_errors": dos & ~upper & (d["n_ok"] < d["std_n"]),
-        "extended_36_42": whole & upper & side0 & present,
-        "extended_dos_headers": whole & upper & side0 & dos,
-        "half_track_data": ~whole & formatted & ~crosstalk,
+        "extended_36_42": whole & upper & own & ~lower,
+        "extended_dos_headers": whole & upper & dos,
+        "extended_lower_copy": whole & lower,
+        "half_track_data": ~whole & own & ~crosstalk,
         "half_track_crosstalk": ~whole & formatted & crosstalk,
-        "fat_track": whole & formatted & (t["sim_next"] > fam["similar"]),
+        "fat_track": whole
+        & own
+        & (t["sim_next"] > fam["similar"])
+        & (t["halftrack"] < 2 * DOS_TRACKS),
         "killer": t["kind"] == TrackKind.KILLER,
         "unformatted": (t["kind"] == TrackKind.UNFORMATTED) & (t["n_hdr"] == 0),
-        "no_sync": formatted & (t["n_sync"] == 0),
+        "no_flux_fill": fill,
+        "no_sync": own & (t["n_sync"] == 0),
         "long_sync": present & (t["sync_max"] > fam["sync_long"]),
         "short_sync": present & (t["n_sync"] > 0) & (t["sync_min"] < fam["sync_short"]),
         "extra_sectors": dos & (t["n_extra"] > 0),
-        "custom_sectors": formatted & (t["n_sync"] > 0) & (t["n_hdr"] == 0),
-        "nonstandard_density": whole & present & (t["zone"] != t["std_zone"]),
+        "custom_sectors": own & (t["n_sync"] > 0) & (t["n_hdr"] == 0),
+        "nonstandard_density": whole & own & (t["zone"] != t["std_zone"]),
         "density_label_mismatch": (d["period_zone"] >= 0)
         & (d["period_zone"] != t["zone"]),
         "mixed_density": t["zones"] > 1,
-        "long_track": present & (d["ratio"] > fam["ratio_long"]),
-        "short_track": present & (d["ratio"] < fam["ratio_short"]),
+        "long_track": own & (d["ratio"] > fam["ratio_long"]),
+        "short_track": own & (d["ratio"] < fam["ratio_short"]),
         "weak_multipass": t["mp_disagree"] > fam["multipass"],
-        "illegal_gcr": present & (t["bad_span"] > fam["bad_span"]),
+        "illegal_gcr": own & (t["bad_span"] > fam["bad_span"]),
         "duplicate_headers": t["n_dupe"] > 0,
         "id_mismatch": t["id_mis"] > 0,
         "header_track_mismatch": whole
+        & ~upper
         & (t["n_hdr"] > 0)
         & (t["hdr_track"] != d["track"]),
         "nonstandard_data_mark": t["n_data_nonstd"] > 0,
