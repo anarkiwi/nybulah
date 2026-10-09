@@ -154,9 +154,13 @@ def tb_knots(rec):
         period = float(np.median(np.diff(arr.read)))
         found = passes.ts_wraps(arr, rec.ts_syncs(), period, rec.base >= 0, rec.tb)
         arr = passes.tb_arrivals(rec.tb, found[0])
-    ok = passes.capable(rec.data)[0]
+    ok, latched = passes.capable(rec.data)
     pos = passes._tb_positions(  # pylint: disable=protected-access
-        arr, max(rec.base, 0), ok, rec.base >= 0
+        arr,
+        max(rec.base, 0),
+        (ok, passes.sync_weights(ok, latched)),
+        rec.base >= 0,
+        None,
     )[0]
     seg = segments(rec)
     timed = np.isfinite(arr.lo) & np.isfinite(arr.hi) & arr.valid
@@ -182,8 +186,8 @@ def zone_knots(cap):
 
 
 def _reach(knots, n):
-    """Knots extended to bits 0 and ``n`` at the mean measured rate, as uncertain
-    as the nearest measured knot."""
+    """Knots extended to both ends of the ``n`` bits at the mean measured rate,
+    as uncertain as the nearest measured knot."""
     kb, kt, ke = knots
     rate = (kt[-1] - kt[0]) / max(kb[-1] - kb[0], 1.0)
     inside = (kb > 0) & (kb < n)
