@@ -1,9 +1,9 @@
-"""convert, info and map subcommands: image files only, no drive needed."""
+"""convert, info, map and flux subcommands: image files only, no drive needed."""
 
 import json
 import pathlib
 
-from . import viz
+from . import fluxcmd, viz
 from .analysis.diskmap import Cls, disk_map, load_thresholds
 from .formats import image as images
 from .formats.d64 import write_d64
@@ -28,6 +28,16 @@ def _layout_option(ap):
         "--layout",
         choices=sorted(images.LAYOUTS),
         help="flux image track numbering (default: inferred from sector headers)",
+    )
+
+
+def _captures_option(ap):
+    ap.add_argument(
+        "--captures",
+        type=pathlib.Path,
+        nargs="*",
+        default=[],
+        help="other images of the same disk, compared as more revolutions",
     )
 
 
@@ -110,23 +120,23 @@ class Map:
             help="animation: rotating disk, or revolution by revolution "
             "(default when a track has several)",
         )
-        ap.add_argument(
-            "--captures",
-            type=pathlib.Path,
-            nargs="*",
-            default=[],
-            help="other images of the same disk, compared as more revolutions",
-        )
+        _captures_option(ap)
         ap.add_argument(
             "--thresholds",
             type=pathlib.Path,
             help="survey summary.json whose thresholds replace the shipped ones",
         )
         ap.add_argument("--bins", type=int, default=2048, help="angular bins per track")
+        ap.add_argument(
+            "--analog", action="store_true", help="flux view instead (see flux)"
+        )
+        fluxcmd.add_view_arguments(ap)
         _layout_option(ap)
 
     @staticmethod
     def execute(args, _cbm=None):
+        if args.analog:
+            return Flux.execute(args)
         image = _load(args)
         thresholds = (
             None if args.thresholds is None else load_thresholds(args.thresholds)
@@ -142,5 +152,30 @@ class Map:
             "regions": len(dmap.regions),
             "anomalies": int(anomalies.sum()),
         }
+        print(json.dumps(out))
+        return out
+
+
+class Flux:
+    """Analog flux view of an image: transitions per cell as lightness, cell length
+    as hue, revolution-to-revolution variance as lost chroma; polar disk with
+    panels (.png), one frame per revolution (.apng) or a zoomable viewer (.html)."""
+
+    NEEDS_ADAPTER = False
+
+    @staticmethod
+    def add_arguments(ap):
+        ap.add_argument("source", type=pathlib.Path)
+        ap.add_argument("-o", "--output", type=pathlib.Path, required=True)
+        _captures_option(ap)
+        fluxcmd.add_view_arguments(ap)
+        _layout_option(ap)
+
+    @staticmethod
+    def execute(args, _cbm=None):
+        image = _load(args)
+        out = fluxcmd.render(
+            image, [images.load(p) for p in args.captures], args, args.source.name
+        )
         print(json.dumps(out))
         return out

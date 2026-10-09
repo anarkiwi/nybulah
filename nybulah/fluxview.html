@@ -1,0 +1,252 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>__TITLE__ flux view</title>
+<style>
+:root { --bg: #0b0b0b; --ink: #f2f1ec; --ink2: #a3a29c; --line: #2c2c2a; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 16px; }
+h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+p, li { color: var(--ink2); margin: 2px 0; }
+#bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+button { background: #1c1c1b; color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+#wrap { position: relative; overflow-x: auto; }
+#view { display: block; cursor: crosshair; touch-action: none; }
+#readout { font: 12px/1.45 ui-monospace, monospace; white-space: pre; color: var(--ink); min-height: 5.8em; margin: 6px 0; }
+#panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-top: 8px; }
+#panels canvas { width: 100%; height: 220px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; }
+.cap { color: var(--ink2); font-size: 12px; margin-bottom: 2px; }
+</style>
+<h1>__TITLE__: flux as an image</h1>
+<p>Angle runs left to right from the index (or sector 0 without one); each halftrack is a band, one strip per revolution.
+Lightness: flux transitions per bit cell (each spread over a quarter cell, the read circuit's clock). Hue: cell length against the track's standard zone beyond its measurement bound, blue shorter, orange longer, saturating at one zone step; greyer where revolutions disagree.
+Dots: no flux inferred from bits (runs of 3+ zeros, ones between taken as read noise). Green: a decode slip starts.
+Wheel zooms, drag pans, click picks the track for the panels.</p>
+<div id="bar"><button id="fit">whole revolution</button><button id="taller">taller rows</button><button id="shorter">shorter rows</button><span id="zoom" class="cap"></span></div>
+<div id="wrap"><canvas id="view"></canvas></div>
+<div id="readout">loading…</div>
+<div id="panels">
+<div><div class="cap">intervals per zone (cells): solid measured flux, dashed decoded bits; shaded ≥4T</div><canvas id="hist"></canvas></div>
+<div><div class="cap" id="eyecap">timing eye</div><canvas id="eye"></canvas></div>
+<div><div class="cap" id="driftcap">drift</div><canvas id="drift"></canvas></div>
+</div>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const LABEL = 56, RULER = 18;
+async function unpack(b64, Type) {
+  if (b64 === null) return null;
+  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const out = await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer();
+  return new Type(out);
+}
+function rgb(hex) { return [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)); }
+function search(a, x) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= x) lo = m + 1; else hi = m; } return lo; }
+function interp(x, xs, ys) {
+  const i = search(xs, x);
+  if (i <= 0) return ys[0];
+  if (i >= xs.length) return ys[ys.length - 1];
+  const x0 = xs[i - 1], x1 = xs[i];
+  return x1 === x0 ? ys[i] : ys[i - 1] + (x - x0) * (ys[i] - ys[i - 1]) / (x1 - x0);
+}
+function cumsum(src, n, f) { const c = new Float64Array(n + 1); for (let i = 0; i < n; i++) c[i + 1] = c[i] + f(src, i); return c; }
+function undelta(a, q) { const o = new Float64Array(a.length); let s = 0; for (let i = 0; i < a.length; i++) { s += a[i]; o[i] = s / q; } return o; }
+async function prepare(r) {
+  const n = r.n, packed = await unpack(r.bits, Uint8Array), nf = await unpack(r.noflux, Uint8Array);
+  const bit = i => (packed[i >> 3] >> (7 - (i & 7))) & 1, nfb = i => (nf[i >> 3] >> (7 - (i & 7))) & 1;
+  r.bit = bit; r.nfb = nfb;
+  r.kb = undelta(await unpack(r.kb, Int32Array), 1);
+  const res = await unpack(r.kt, Int32Array); r.kt = new Float64Array(res.length);
+  for (let i = 0, s = 0; i < res.length; i++) { s += res[i] + r.q * (r.kb[i] - (i ? r.kb[i - 1] : 0)); r.kt[i] = s / r.q; }
+  r.ke = Float64Array.from(await unpack(r.ke, Uint16Array), v => v / r.q);
+  const v = await unpack(r.var, Uint8Array), faults = await unpack(r.fault, Int32Array);
+  r.cnf = cumsum(null, n, (_, i) => nfb(i)); r.cvar = cumsum(v, n, (a, i) => a[i] / 255);
+  r.varAt = i => v[i] / 255; r.faults = faults;
+  const fm = new Uint8Array(n); faults.forEach(i => fm[i] = 1); r.cfault = cumsum(fm, n, (a, i) => a[i]);
+  let t;
+  if (r.timing === "flux") t = r.kt.slice(1, -1);
+  else { const o = []; for (let i = 0; i < n; i++) if (bit(i) && !nfb(i)) o.push(interp(i, r.kb, r.kt)); t = Float64Array.from(o); }
+  r.t = t;
+  const T = r.period, ext = new Float64Array(3 * t.length);
+  for (let i = 0; i < t.length; i++) { ext[i] = t[i] - T; ext[i + t.length] = t[i]; ext[i + 2 * t.length] = t[i] + T; }
+  const half = D.kernel / 2; r.ext = ext; r.hiE = ext.map(x => x + half); r.loE = ext.map(x => x - half);
+  r.sLo = new Float64Array(ext.length + 1); for (let i = 0; i < ext.length; i++) r.sLo[i + 1] = r.sLo[i] + r.loE[i];
+  const dr = await unpack(r.drift, Float32Array), m = dr.length / 2;
+  r.driftTurns = dr.subarray(0, m); r.driftCells = dr.subarray(m);
+}
+function wrapTau(r, u) { const k = Math.floor(u / r.period); return [u - k * r.period, k]; }
+function bitAt(r, u) { const [w, k] = wrapTau(r, u); return interp(w, r.kt, r.kb) + k * r.n; }
+function boxInt(r, u) {
+  const [w, k] = wrapTau(r, u), done = search(r.hiE, w), started = search(r.loE, w);
+  return done + ((started - done) * w - (r.sLo[started] - r.sLo[done])) / D.kernel + k * r.t.length;
+}
+function cumAt(c, n, b) {
+  const k = Math.floor(b / n), x = b - k * n, i = Math.min(Math.floor(x), n - 1);
+  return k * c[n] + c[i] + (x - i) * (c[i + 1] - c[i]);
+}
+function errAt(r, u) { return interp(wrapTau(r, u)[0], r.kt, r.ke); }
+function channels(r, th0, th1) {
+  const u0 = (th0 - r.shift) * r.period, u1 = (th1 - r.shift) * r.period;
+  const b0 = bitAt(r, u0), b1 = bitAt(r, u1), du = u1 - u0, db = Math.max(b1 - b0, 1e-12);
+  const count = boxInt(r, u1) - boxInt(r, u0), raw = r.scale * du / db - 1;
+  const bound = r.scale * (errAt(r, u0) + errAt(r, u1)) / db;
+  return {
+    density: count / du, delta: count > 0 ? Math.sign(raw) * Math.max(Math.abs(raw) - bound, 0) : 0, raw, bound,
+    noflux: (cumAt(r.cnf, r.n, b1) - cumAt(r.cnf, r.n, b0)) / db,
+    vari: (cumAt(r.cvar, r.n, b1) - cumAt(r.cvar, r.n, b0)) / db,
+    fault: cumAt(r.cfault, r.n, b1) - cumAt(r.cfault, r.n, b0) > 0,
+    b0, b1, u0, u1,
+  };
+}
+let LUT, view = { t0: 0, tpp: 0, rowH: 10 }, selected = null, drag = null;
+const C = D.colours, FAULT = rgb(C.FAULT), STIP = rgb(C.STIPPLE), BG = rgb(C.SURFACE);
+const canvas = document.getElementById("view"), ctx = canvas.getContext("2d");
+function layout() {
+  const rows = [];
+  for (const side of [0, 1]) {
+    const ts = D.tracks.filter(t => t.side === side);
+    if (!ts.length) continue;
+    const lo = Math.min(...ts.map(t => t.half)), hi = Math.max(...ts.map(t => t.half));
+    for (let h = lo; h <= hi; h++) rows.push({ side, half: h, track: ts.find(t => t.half === h) || null });
+  }
+  return rows;
+}
+let ROWS = [];
+function width() { return Math.max(320, document.getElementById("wrap").clientWidth); }
+function colour(ch, std) {
+  const d = Math.min(Math.max(ch.density, 0), 1), s = Math.min(Math.max(ch.delta * std, -1), 1) * (1 - Math.min(Math.max(ch.vari, 0), 1));
+  const i = Math.round(d * (D.lutShape[0] - 1)), j = Math.round((s + 1) / 2 * (D.lutShape[1] - 1)), o = 3 * (i * D.lutShape[1] + j);
+  return [LUT[o], LUT[o + 1], LUT[o + 2]];
+}
+function draw() {
+  const W = width(), Wd = W - LABEL, H = RULER + ROWS.length * view.rowH;
+  canvas.width = W; canvas.height = H; canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  const img = ctx.createImageData(W, H), px = img.data;
+  for (let i = 0; i < px.length; i += 4) { px[i] = BG[0]; px[i + 1] = BG[1]; px[i + 2] = BG[2]; px[i + 3] = 255; }
+  ROWS.forEach((row, ri) => {
+    const t = row.track; if (!t) return;
+    const R = t.revs.length, y0 = RULER + ri * view.rowH;
+    t.revs.forEach((r, k) => {
+      const ya = y0 + Math.floor(k * view.rowH / R), yb = y0 + Math.floor((k + 1) * view.rowH / R);
+      for (let x = 0; x < Wd; x++) {
+        const ch = channels(r, view.t0 + x * view.tpp, view.t0 + (x + 1) * view.tpp);
+        let c = colour(ch, t.std);
+        for (let y = ya; y < yb; y++) {
+          let cc = c;
+          if (ch.fault) cc = FAULT; else if (ch.noflux >= 0.5 && (x + LABEL) % D.pitch === 0 && y % D.pitch === 0) cc = STIP;
+          const o = 4 * (y * W + x + LABEL); px[o] = cc[0]; px[o + 1] = cc[1]; px[o + 2] = cc[2];
+        }
+      }
+    });
+  });
+  ctx.putImageData(img, 0, 0);
+  ctx.fillStyle = C.INK_SECONDARY; ctx.font = "10px system-ui";
+  ROWS.forEach((row, ri) => { if (row.track && view.rowH >= 8) ctx.fillText(row.track.name, 2, RULER + ri * view.rowH + view.rowH - 1); });
+  const span = Wd * view.tpp * 360, step = [0.001, 0.01, 0.1, 1, 5, 10, 30, 90].find(s => span / s <= 12) || 90;
+  for (let a = Math.ceil(view.t0 * 360 / step) * step; a <= (view.t0 + Wd * view.tpp) * 360; a += step) {
+    const x = LABEL + (a / 360 - view.t0) / view.tpp;
+    ctx.fillRect(x, RULER - 5, 1, 5); ctx.fillText((((a % 360) + 360) % 360).toFixed(Math.max(0, -Math.floor(Math.log10(step)))) + "°", x + 2, 10);
+  }
+  const cellPx = 1 / (view.tpp * Math.max(...D.tracks.map(t => t.revs[0].n)));
+  document.getElementById("zoom").textContent = `${(Wd * view.tpp * 360).toPrecision(4)}° across; ${cellPx.toPrecision(3)} px per cell (longest track)`;
+}
+function hit(ev) {
+  const rect = canvas.getBoundingClientRect(), x = ev.clientX - rect.left - LABEL, y = ev.clientY - rect.top - RULER;
+  const ri = Math.floor(y / view.rowH), row = ROWS[ri];
+  if (x < 0 || !row || !row.track) return null;
+  const k = Math.min(Math.floor((y - ri * view.rowH) * row.track.revs.length / view.rowH), row.track.revs.length - 1);
+  return { t: row.track, k, x, th: view.t0 + (x + 0.5) * view.tpp };
+}
+function readout(h) {
+  const el = document.getElementById("readout");
+  if (!h) { el.textContent = ""; return; }
+  const r = h.t.revs[h.k], ch = channels(r, view.t0 + h.x * view.tpp, view.t0 + (h.x + 1) * view.tpp);
+  const u = (h.th - r.shift) * r.period, [w] = wrapTau(r, u), b = bitAt(r, u), i = ((Math.floor(b) % r.n) + r.n) % r.n;
+  const j = search(r.t, w), prev = r.t[(j - 1 + r.t.length) % r.t.length], next = r.t[j % r.t.length];
+  const gap = ((next - prev) % r.period + r.period) % r.period;
+  const how = r.timing === "flux" ? "measured" : "inferred: decoded bits at " + (r.timing === "track" ? "nominal" : r.timing) + " cell times";
+  el.textContent = [
+    `track ${h.t.name} (halftrack ${h.t.half}${h.t.side ? ", side 1" : ""}), revolution ${h.k} of ${h.t.revs.length}, zone ${h.t.zone}`,
+    `angle ${(((h.th % 1) + 1) % 1 * 360).toFixed(3)}°  bit ${i} of ${r.n} (${r.bit(i)})  time ${w.toFixed(2)} cells`,
+    `interval around cursor ${gap.toFixed(3)} cells (${how})`,
+    `pixel: ${ch.density.toFixed(3)} transitions/cell, cell ${(100 * ch.raw).toFixed(2)}% ± ${(100 * ch.bound).toFixed(2)}% vs standard zone (${D.sources[r.timing]})`,
+    `stability 4p(1-p) ${ch.vari.toFixed(3)}${ch.noflux >= 0.5 ? ", no flux inferred" : ""}${ch.fault ? ", decode slip" : ""}`,
+  ].join("\n");
+}
+function fit() { view.t0 = 0; view.tpp = 1 / (width() - LABEL); draw(); }
+canvas.addEventListener("wheel", ev => {
+  ev.preventDefault();
+  const h = hit(ev), x = h ? h.x : (width() - LABEL) / 2, th = view.t0 + x * view.tpp;
+  const minTpp = 1 / (D.maxCellPx * Math.max(...D.tracks.map(t => t.revs[0].n)));
+  view.tpp = Math.min(Math.max(view.tpp * Math.pow(1.2, Math.sign(ev.deltaY)), minTpp), 1 / (width() - LABEL));
+  view.t0 = th - x * view.tpp; draw(); readout(hit(ev));
+}, { passive: false });
+canvas.addEventListener("pointerdown", ev => { drag = { x: ev.clientX, t0: view.t0, moved: false }; canvas.setPointerCapture(ev.pointerId); });
+canvas.addEventListener("pointermove", ev => {
+  if (drag) { const dx = ev.clientX - drag.x; if (Math.abs(dx) > 2) drag.moved = true; view.t0 = drag.t0 - dx * view.tpp; draw(); }
+  readout(hit(ev));
+});
+canvas.addEventListener("pointerup", ev => { const h = hit(ev); if (drag && !drag.moved && h) { selected = h.t; panels(); } drag = null; });
+document.getElementById("fit").onclick = fit;
+document.getElementById("taller").onclick = () => { view.rowH = Math.min(view.rowH * 2, 160); draw(); };
+document.getElementById("shorter").onclick = () => { view.rowH = Math.max(view.rowH / 2, 2); draw(); };
+function axes(cv) {
+  const r = cv.getBoundingClientRect(); cv.width = r.width; cv.height = r.height;
+  const g = cv.getContext("2d"); g.fillStyle = C.SURFACE; g.fillRect(0, 0, cv.width, cv.height);
+  g.font = "10px system-ui"; g.fillStyle = C.INK_SECONDARY; g.strokeStyle = C.INK_SECONDARY; return g;
+}
+function cellGrid(g, X, Y, w, h, vertical) {
+  g.globalAlpha = 0.15; vertical ? g.fillRect(X(3.5), 0, w - X(3.5), h) : g.fillRect(28, 0, w - 28, Y(3.5)); g.globalAlpha = 1;
+  for (let n = 1; n <= 8; n++) vertical ? g.fillText(n, X(n) - 3, h - 2) : g.fillText(n, 2, Y(n) + 3);
+}
+async function histogram() {
+  const g = axes(document.getElementById("hist")), w = g.canvas.width, h = g.canvas.height - 14, X = c => 4 + c / 8 * (w - 8);
+  const series = [];
+  for (const z of D.hist) for (const [kind, dash] of [["measured", []], ["inferred", [4, 3]]]) {
+    const c = await unpack(z[kind], Int32Array); if (c.some(v => v > 0)) series.push({ z: z.zone, lo: z.lo, step: z.step, c, dash, kind });
+  }
+  const top = Math.log10(Math.max(1, ...series.map(s => Math.max(...s.c))));
+  const Y = v => h - (v > 0 ? Math.log10(v) + 0.3 : 0) / (top + 0.3) * (h - 4);
+  cellGrid(g, X, Y, w, h + 14, true);
+  series.forEach((s, k) => {
+    g.strokeStyle = D.series[s.z]; g.setLineDash(s.dash); g.beginPath();
+    s.c.forEach((v, i) => { const x = X(s.lo + i * s.step); i ? g.lineTo(x, Y(v)) : g.moveTo(x, Y(v)); });
+    g.stroke(); g.setLineDash([]); g.fillStyle = D.series[s.z]; g.fillText(`zone ${s.z} ${s.kind}`, w - 110, 12 + 12 * k);
+  });
+}
+function eye() {
+  const t = selected; if (!t) return;
+  document.getElementById("eyecap").textContent = `timing eye, track ${t.name}: interval (cells, 0-8) by angle; all revolutions`;
+  const g = axes(document.getElementById("eye")), w = g.canvas.width, h = g.canvas.height, A = Math.max(64, w - 28), B = Math.max(32, h);
+  const hist = new Float64Array(A * B);
+  for (const r of t.revs) for (let i = 0; i + 1 < r.t.length; i++) {
+    const a = Math.floor((((r.t[i] / r.period + r.shift) % 1 + 1) % 1) * A), v = Math.floor((r.t[i + 1] - r.t[i]) / 8 * B);
+    if (v >= 0 && v < B) hist[(B - 1 - v) * A + a] += 1;
+  }
+  const top = Math.log1p(Math.max(...hist)), img = g.createImageData(A, B);
+  hist.forEach((v, i) => { const s = Math.round(255 * Math.log1p(v) / top); img.data.set([s, s, s, 255], 4 * i); });
+  g.putImageData(img, 28, 0); cellGrid(g, null, v => h - v / 8 * h, w, h, false);
+}
+function drift() {
+  const t = selected; if (!t) return;
+  const what = "measured time less uniform cells, else bit offset from revolution 0";
+  document.getElementById("driftcap").textContent = `drift, track ${t.name} (cells): ${what}, by angle`;
+  const g = axes(document.getElementById("drift")), w = g.canvas.width, h = g.canvas.height;
+  const all = t.revs.flatMap(r => Array.from(r.driftCells)), lo = Math.min(...all, -0.5), hi = Math.max(...all, 0.5);
+  const Y = v => h - 12 - (v - lo) / (hi - lo) * (h - 24);
+  g.fillText(hi.toPrecision(3), 2, 10); g.fillText(lo.toPrecision(3), 2, h - 2);
+  t.revs.forEach((r, k) => {
+    const idx = Array.from(r.driftTurns.keys()).sort((a, b) => r.driftTurns[a] - r.driftTurns[b]);
+    g.strokeStyle = D.series[k % D.series.length]; g.beginPath();
+    idx.forEach((i, n) => { const x = 40 + r.driftTurns[i] * (w - 44), y = Y(r.driftCells[i]); n ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke(); g.fillStyle = D.series[k % D.series.length]; g.fillText(`rev ${k} (${r.timing})`, w - 90, 12 + 12 * k);
+  });
+}
+function panels() { eye(); drift(); }
+(async () => {
+  LUT = await unpack(D.lut, Uint8Array);
+  for (const t of D.tracks) for (const r of t.revs) await prepare(r);
+  ROWS = layout(); selected = D.tracks[0]; fit(); histogram(); panels();
+  document.getElementById("readout").textContent = "hover for readouts";
+  window.addEventListener("resize", () => { draw(); histogram(); panels(); });
+})();
+</script>

@@ -304,3 +304,76 @@ bins (2). `raster(rev=r)` gives one revolution.
 `synth.synthetic_disk(revolutions)` builds index-aligned reads with one of
 each injected anomaly and their positions; `tools/diskmap_example.py` renders
 it to `docs/img/diskmap.{png,apng}`.
+
+## Flux view
+
+`nybulah flux IMAGE -o out.{png,apng,html}` (or `nybulah map --analog`) draws
+the disk as an image of its magnetic flux (`nybulah.analysis.fluxview`,
+`nybulah.fluxviz`, `nybulah.fluxhtml`). `--size` sets the disk diameter in
+pixels, `--zoom` the viewer's largest pixels per bit cell, `--tracks 18-25` a
+track range, `--track` the track of the eye and drift panels, `--captures`
+more images of the disk as more revolutions. `tools/diskmap_captures.py
+FOLDER... --analog -o out.png` does the same for saved capture records.
+
+![Flux view of a synthetic disk](img/fluxview.png)
+
+**Time.** Each revolution is a list of flux transitions on a time axis in
+nominal bit cells of its density zone, with knots tying decoded bit positions
+to times. What is measured depends on the source:
+
+| source | transitions | time of each cell | `timing` |
+|---|---|---|---|
+| SCP, KryoFlux, P64 | measured | measured at every transition (16 MHz clock) | `flux` |
+| captures with a TB pass | decoded bits, placed at their cell | measured per latched byte, within its arrival window | `tb` |
+| G64 with a speed map | decoded bits | the image's density per byte | `zones` |
+| other bit sources (NIB, G64, D64, TS-only and streamed captures) | decoded bits | one revolution in 200 ms (300 rpm) | `track` |
+
+A bit-source transition sits at the start of its cell, where the read circuit
+(`analysis.flux`) restarts its cell counter. Angle 0 is the index where there
+is one; other tracks are rotated like the disk map, the sync before sector 0
+at 0, and later revolutions follow it through their paired syncs.
+
+**Channels.** Each angular bin of each revolution gets:
+
+| channel | drawn as | derivation |
+|---|---|---|
+| density | lightness | transitions per cell, each transition spread over one divider carry (a quarter cell, the read circuit's time resolution); 0 with no flux, 1 when every cell reverses; at full zoom each transition is a stripe |
+| delta | hue: blue shorter, orange longer, saturating at one zone step (1 / (16 - zone)) | cell length against the track's standard DOS zone, less one, shrunk towards 0 by the timing's error bound (the TB arrival window, one 16 MHz clock for flux); 0 where the bin holds no transition |
+| var | chroma lost, towards grey | 4 p (1 - p) per bit, p the share of aligned revolutions with a one there; 0 with one revolution |
+| noflux | dot lattice, transitions not drawn | inferred: runs of three or more zeros cannot be GCR, so the read saw no flux there; runs chained within `GROUP_BITS` make a span whose ones are read noise; bit sources only |
+| fault | green tick across the halftrack | where a decode slip (`faults`) starts |
+
+Each halftrack is a band (a polar ring), split among its revolutions, so
+weak bits show as grain across the band; uncaptured halftracks stay empty, so
+half tracks, fat tracks and crosstalk show as filled gaps. With `track` timing
+a revolution's hue is its length against 300 rpm (long and short tracks, or a
+track read at another density); with `flux` or `tb` it follows speed wobble,
+density changes and write splices within the revolution.
+
+**Panels** (PNG, and live in the viewer): interval histograms per zone at
+16 MHz resolution, measured solid and decoded bits dashed, with ≥4T (no legal
+GCR) shaded; the timing eye of one track (interval against angle, all
+revolutions); and each revolution's drift: measured time less uniform cells,
+or for `track` timing its bit offset from revolution 0 through the paired
+syncs.
+
+**Viewer.** The HTML page embeds every revolution's bits, knots, no-flux and
+fault masks and variance (zlib, base64; decoded with the browser's
+`DecompressionStream`) and recomputes the channels for each pixel shown, from
+the whole disk down to single transitions; hovering reads out track, angle,
+bit, the interval at the cursor (measured or inferred), cell length with its
+bound, stability, no flux and faults. `tools/html_snapshot.py` loads a page
+in headless Chromium (playwright) to check it.
+
+**Colour.** Lightness and chroma are in OKLab; both arms reach the same
+chroma at each lightness. The blue/orange poles and the green fault mark pass
+the dataviz palette validator's colour-vision (protan, deutan, tritan) and
+normal-vision separation checks against the dark surface; dots and ticks also
+carry the marks as shapes.
+
+`fluxsynth.synthetic_flux_disk(revolutions)` builds index-aligned flux reads of
+a DOS disk with a speed wobble, a long sync, a killer track, a no-flux gap, a
+weak span, a bit slip, a half-written density change, heavy jitter and a
+half track reading both neighbours; `tools/diskmap_example.py` renders it to
+`docs/img/fluxview.png`, and `tests/test_fluxview.py` checks each feature's
+channel statistics at its known angles.
