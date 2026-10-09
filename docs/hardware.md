@@ -35,7 +35,7 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybula
 ## S3 (X protocol), both drives powered
 
 S3 needs xum1541 firmware v9 or later and the plugin this image builds by
-default (`OPENCBM_SOURCE=git`, OpenCBM branch `xum1541-xfast`). With firmware
+default (`OPENCBM_SOURCE=git`, pinned to OpenCBM branch `xum1541-stream`). With firmware
 v10 it uses burst X ([protocol.md](protocol.md)); with v9 it falls back to
 per-byte X. A local OpenCBM tree can be used instead:
 
@@ -52,12 +52,8 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybula
 
 ## S4 (1571 SRQ fast serial)
 
-S4 needs firmware v11 (below) and a plugin built from the same tree; until the
-image's default OpenCBM pin moves, build it from the local branch:
-
-```sh
-docker build --build-arg OPENCBM_SOURCE=local --build-context opencbm=../opencbm-srq --target runtime -t nybulah .
-```
+S4 needs firmware v11 or later (below) and a plugin from the same tree; the
+image's default plugin is v12's.
 
 Only a 1571 runs it (a 1541 is skipped with "s4 needs a 1571"); other drives
 stay powered. `--fast` adds a second bench of s3/s4 with the 1571 at 2 MHz:
@@ -170,11 +166,7 @@ Measured on drive 8 (1571, 2 MHz), firmware v12:
 | `read --transport s4` (D64) | 683 sectors, 0 errors, one capture per track, 25.5 s; identical to the 1541-II's RAM-path read of the same disk |
 
 Streaming needs firmware v12 and the plugin from the same tree (branch
-`xum1541-stream`). Build the image from the local checkout:
-
-```sh
-docker build --build-arg OPENCBM_SOURCE=local --build-context opencbm=../opencbm-srq --target runtime -t nybulah .
-```
+`xum1541-stream`, the image's default).
 
 Flash `xum1541-ZOOMFLOPPY-v12.hex` as below (`info` must print
 `model 2 version 12`, `devinfo` firmware version 12). Then, in order, with
@@ -182,7 +174,7 @@ drive 8 the 1571 and a formatted disk inserted:
 
 1. Memory only, no head movement: the s4 benches and timing probes above
    (`bench --protocol s4 --addr 0x6000`, with and without `--fast`;
-   `xprobe.py --cia` and `--sweep`). v12 must give the same results as v11.
+   `xprobe.py --cia` and `--sweep`). Expect the s4 rows of the rates table below.
 2. Homing dry run (`homeprobe --dev 8 --transport s4 --headers`, no steps).
 3. One track, one revolution, homed through `Nibbler.home` within the dry
    run's `outward_steps` (N); the probe refuses a larger plan and never
@@ -192,8 +184,8 @@ drive 8 the 1571 and a formatted disk inserted:
    docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 8 --headers --max-steps N --halftrack 36 --save /data/artifacts/stream-36.npz
    ```
 
-   Expect `adapter` and `drive` "done", 2 `index` positions about 7140
-   bytes apart (`revolution_bytes`, zone 2) and `syncs` near 38 (19 sectors).
+   Expect `adapter` and `drive` "done", 2 `index` positions about 6980
+   bytes apart (`revolution_bytes`, zone 2; sync bits are not bytes) and `syncs` near 38 (19 sectors).
 4. Zone 3 (the tightest byte period) and several revolutions:
 
    ```sh
@@ -213,34 +205,31 @@ drive 8 the 1571 and a formatted disk inserted:
 
 ## Flashing the ZoomFloppy firmware
 
-The firmware hex is built from the same OpenCBM tree as the plugin: commit
-`07a95bdf` (branch `xum1541-xfast`) for v10, commit `89920a0d`
-(branch `xum1541-srq`) for v11
-(SRQ fast serial; also builds v10's protocols), branch `xum1541-stream` for
-v12 (streaming; also builds v11's):
+The firmware hex is built from the same OpenCBM tree as the plugin, branch
+`xum1541-stream` of the fork (v12; it also serves every older protocol):
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
-git checkout xum1541-srq
+git checkout xum1541-stream
 docker build -f Dockerfile.nybulah --target firmware-hex -o fw .
-docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v11.hex
+docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v12.hex
 ```
 
 The build steps the compiled timing routines (`misc/x_timing.py`) and checks
 the SRQ schedule (`misc/srq_timing_test.c`); it fails rather than produce a
-hex that misses them. `info` must print `model 2 version 11` (it exits with
+hex that misses them. `info` must print `model 2 version 12` (it exits with
 status 1 regardless). Then, with the ZoomFloppy plugged in (drives may stay
 connected), flash it; the adapter re-enumerates as a DFU bootloader during the
 update, so the container gets the whole USB tree:
 
 ```sh
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v "$PWD/fw:/fw" \
-  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v11.hex
+  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v12.hex
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb --entrypoint xum1541cfg nybulah devinfo
 ```
 
-`devinfo` should report firmware version 11 (the image's plugin must be v11's,
-or it refuses the newer firmware). If `update` reports no devices
+`devinfo` should report firmware version 12 (the image's plugin must be at
+least as new as the firmware, or it refuses it). If `update` reports no devices
 found, the adapter may already have re-enumerated as its DFU bootloader before
 the tool looked for it; run `update` again. `update` refuses a hex with the
 version already installed unless given `-f` (`xum1541cfg -f update ...`). Flashing the stock
@@ -263,14 +252,13 @@ no checksum retries; s4 also at 1–4096 bytes across the USB bank boundaries:
 | S1 read / write | any | 1634 / 1493 | 1669 / 1498 | |
 | X read / write | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
 | burst X read / write | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
-| s4 read / write | v11 | | 20960 / 22258 | 41460 / 37053 |
-| s4 read / write, 40-cycle send | v12 | | 23420 / 22261 | 46372 / 37052 |
+| s4 read / write | v12 | | 23420 / 22261 | 46372 / 37052 |
 | s4 read / write, simulated | v12 | | 23600 / 22400 | 47200 / 37700 |
 
 `nybulah bench --protocol s3 --fast` (or s4) runs a 1571 at 2 MHz for the
 transfer (VIA1 PA5) and returns it to 1 MHz before handing back to DOS; an s4
-drive restores PA5 itself on any exit. Burst X
-predictions and margins are in [protocol-review.md](protocol-review.md).
+drive restores PA5 itself on any exit. Burst X and s4
+predictions and margins are in [protocol.md](protocol.md).
 
 ## Probe safety
 

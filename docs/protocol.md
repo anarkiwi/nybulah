@@ -169,7 +169,6 @@ Burst X keeps the X lines, idle state, session handshakes and recovery, but pays
 one go/SYNC per burst of up to 64 bytes instead of per byte: after SYNC the
 drive runs a branch-free loop with a fixed cycle count per byte and the adapter
 follows that schedule open-loop, interrupts masked, until the burst ends.
-Design and cycle budgets: [protocol-review.md](protocol-review.md).
 
 Sources: `drive/proto_xb.inc` (`monitor_xb.bin`), `nybulah/simx.py`
 (`BurstTiming`, `xb_read`/`xb_write`), `nybulah/fastx.py` (`XBLink`);
@@ -246,8 +245,38 @@ repeated on a mismatch. Zero page `$30-$36` is saved and restored.
 | burst read (67 + about 165 per burst) | 69.6 | 14.4 KB/s | 28.8 KB/s |
 | burst write (52 + about 165 per burst) | 54.6 | 18.3 KB/s | 36.7 KB/s |
 
-Co-simulation, drive-bound; the same model gives the v9 rates within 1 % of
-the hardware measurements.
+Co-simulation, drive-bound; the same model gives the per-byte X rates within
+1 % of the hardware measurements.
+
+### Design constraints
+
+| | send | receive |
+|---|---|---|
+| loop (cycles) | fetch 4, `tax` 2, P0 6, P1 12, check 14, P2 10, P3 12, loop 7 | 4 port reads 16, shifts 10, `iny` 2, `eor #kk` 2, store 5, check 12, loop 5 |
+| per byte | 67 | 52 |
+
+- **Burst length.** USB bounds it, not drift: the ATmega32U2 has 32-byte
+  double-banked bulk endpoints (176 bytes of endpoint RAM), so 64 bytes is the
+  most the adapter can buffer without stalling the bus. Two ±100 ppm crystals
+  move the last byte of a 64-byte burst by at most 0.86 / 0.43 us (read,
+  1 / 2 MHz) and 0.66 / 0.33 us (write). The per-burst bookkeeping, watchdog
+  restart, go poll and SYNC cost about 165 cycles, 2.6 per byte.
+- **No lookup tables.** Pair tables would give a 41-cycle send loop but need
+  1 KB: base RAM holds track code (`$0300-$04FF`), the monitor
+  (`$0500-$07FF`) and DOS, the expansion the capture buffer. A single
+  256-byte table saves 4 cycles but needs the monitor under 503 bytes (it is
+  564); nibble tables cost more in index splitting than the shifts they
+  replace. The block check stays in the loop (14 cycles, zero page, the
+  loop's own carry part of the check); a separate pass would cost 21.
+- **Tightest windows.** The write windows between the 8-cycle read pairs;
+  widening them to 10 cycles would cost 4 cycles per byte (7 %) for 0.5 us at
+  2 MHz.
+- **USB.** A block is three plugin calls (command, data, 3-byte reply); with
+  8 KiB blocks this is under 1.5 % of a block at 2 MHz.
+- **Compatibility.** Firmware v10 is 16406 bytes of flash. A plugin older
+  than v10 refuses v10 firmware; the v10 plugin falls back to per-byte X on
+  older firmware, and nybulah uses burst X only when the plugin's `xb` entry
+  points answer.
 
 ## 1571 SRQ fast serial (s4, firmware v11)
 
@@ -318,10 +347,9 @@ A byte written to SDR before the shifter has finished follows the previous
 one without a gap, which the adapter cannot frame, so the period must exceed
 the time F from a write to the end of its byte. The 6526 datasheet does not
 give F; the CIA model puts it at 31 + d cycles (an underflow, the start delay
-d, 30 to the 8th rise) and the hardware bounds it: v11 polled ICR first at
-t=32 and then every 7 cycles, and its measured rates (below) match exactly
-45 cycles per byte, the second poll (52, the third, would give 36.8 KB/s at
-2 MHz). So 32 < F <= 39 on a 1571, and `SR_PERIOD` = 40. With an even period
+d, 30 to the 8th rise). On a 1571 32 < F <= 39 (`drive/ciaprobe.s` measures
+the ICR flag 34 cycles after the write on both timer phases), and
+`SR_PERIOD` = 40. With an even period
 every byte starts on the same timer phase, so the gap from a byte's last rise
 to the next first fall is `SR_PERIOD` - 30 = 10 cycles whatever d is, inside
 the adapter's [7, 14]. The adapter times every byte from its own first fall,
@@ -380,45 +408,29 @@ error and the bytes so far, lines released.
 
 ### Throughput
 
-| path | cycles/byte | 1 MHz | 2 MHz | burst X measured (v10) |
+| path | cycles/byte | 1 MHz | 2 MHz | measured 1 / 2 MHz |
 |---|---|---|---|---|
-| s4 read (40 + per burst) | 42.4 | 23.6 KB/s | 47.2 KB/s | 14.3 / 28.3 KB/s |
-| s4 write (bit timing or drive loop) | 44.6 / 53 | 22.4 KB/s | 37.7 KB/s | 18.2 / 35.9 KB/s |
+| s4 read (40 + per burst) | 42.4 | 23.6 KB/s | 47.2 KB/s | 23.4 / 46.4 KB/s |
+| s4 write (bit timing or drive loop) | 44.6 / 53 | 22.4 KB/s | 37.7 KB/s | 22.3 / 37.1 KB/s |
 
 Co-simulation of 8 KiB blocks, drive-bound as for burst X (`tools/srq_rate.py`
-prints the read column per CIA start delay). Writes are bounded by the line
-release budget (2R per bit) at 2 MHz and gain little there.
+prints the read column per CIA start delay); measured on hardware with
+firmware v12 ([hardware.md](hardware.md#expected-results)). Writes are
+bounded by the line release budget (2R per bit) at 2 MHz and gain little
+there.
 
 ### Read time on the host clock
 
 A checked block of N bytes takes C + N t on the host: t is the drive's period
 plus its per-burst overhead plus the adapter's per-burst wait, C the command
-burst, the reply and their USB round trips. The v11 drive polled ICR as
-described above; with F > 32 every byte took 45 cycles plus 2.3 per byte of
-burst overhead, 47.34 cycles, which the co-simulation reproduces for every
-start delay from 2 to 7 cycles (`tools/srq_rate.py`). Against the v11
-measurements at 2 MHz (128, 256 and 8192-byte blocks; 4096 was a single
-timing):
-
-| term | value | source |
-|---|---|---|
-| drive per byte | 23.67 us (47.34 cycles) | co-simulation, d in 2..7 |
-| adapter per burst | 22 us (0.35 us/byte) | least-squares slope 24.02 us/byte minus the drive term |
-| per block | 0.84 ms | least-squares intercept |
-| 8 KiB at 2 MHz | 24.12 us/byte, 41.5 KB/s | measured 41.46 KB/s |
-| 8 KiB at 1 MHz | 47.86 us/byte, 20.9 KB/s | measured 20.96 KB/s |
-
-Of the 49.3 vs 41.5 KB/s gap (3.87 us per byte), the missed first poll was
-3.42 us (88 %), fixed by the open-loop period; the adapter's per-burst wait
-(0.35 us, 9 %) (before a
-burst both IN banks must be empty, so the burst's second 32-byte packet,
-about 30 us of full-speed bus time, has to reach the host first, partly
-overlapping the adapter's turnaround) and the per-block round trips (0.10 us,
-3 %) remain.
-The same terms predict 46.2 KB/s at 2 MHz and 23.3 KB/s at 1 MHz for the
-fixed loop. `tools/xprobe.py --sweep` measures t and C on the host clock;
-`bench.sweep` fitted to the adapter's clock in co-simulation gives the
-drive-bound t (`test_sweep_fits_the_drive_bound_rate`).
+burst, the reply and their USB round trips. The adapter waits about 22 us per
+burst (0.35 us per byte): before a burst both IN banks must be empty, so the
+previous burst's second 32-byte packet, about 30 us of full-speed bus time,
+has to reach the host first, partly overlapping the adapter's turnaround.
+These terms predict 46.2 KB/s at 2 MHz and 23.3 KB/s at 1 MHz for 8 KiB
+blocks; `tools/xprobe.py --sweep --fast` measures 21.40 us per byte and
+1.08 ms per block at 2 MHz. `bench.sweep` fitted to the adapter's clock in
+co-simulation gives the drive-bound t (`test_sweep_fits_the_drive_bound_rate`).
 
 ## 1571 streaming capture (firmware v12)
 
@@ -426,8 +438,8 @@ A stream reads a track continuously for whole revolutions with no expansion
 RAM: every byte the drive latches goes out through the CIA shift register as
 it arrives and the adapter forwards it to USB with no handshake. Only a 1571
 at 2 MHz under s4 streams; `Nibbler(stream=None)` picks it when the adapter
-reports `XUM1541_CAP_STREAM`, and D64/D71 reads then use it. Firmware v9-v11
-commands are unchanged.
+reports `XUM1541_CAP_STREAM`, and D64/D71 reads then use it. Firmware v12
+keeps the v9-v11 commands.
 
 Sources: drive `drive/stream.s` (`stream_1571.bin`, loaded at `$0300` over
 `seek_1571.bin`, the `SEEK` build of `track.s`, whose prep placed the head),
