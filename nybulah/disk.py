@@ -243,7 +243,12 @@ SURVEY_TRACKS = (1, 18, 25, 31)
 
 
 def survey(nib, tracks=SURVEY_TRACKS):
-    """Read-only check: one capture per density zone, plus the index period on a 1571."""
+    """Read-only check: one capture per density zone, plus the index period on a 1571.
+
+    The head is located and calibrated first, as for a disk read.
+    """
+    nib.locate()
+    calibrate(nib, Archive())
     out = []
     for track in tracks:
         cap = nib.capture(2 * track, start="now")

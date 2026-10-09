@@ -8,6 +8,7 @@ import numpy as np
 
 from .analysis.capture import capture_bits, trailing_ones
 from .analysis.gcr import SYNC_MIN_BITS, bit_rate, speed_zone, to_bits
+from .analysis.sector import header_tracks
 from .monitor import drivecode
 
 CPU_HZ = 1_000_000
@@ -21,7 +22,9 @@ TSL, PL, PH, TEL, CNT = (TAB_STRIDE * i for i in range(5))
 ST_NOSYNC, ST_NOINDEX, ST_KILLER, ST_WPROT = 0x01, 0x02, 0x04, 0x08
 START = {"now": 0, "sync": 1, "index": 2}
 
-VIA1PA, T2CL, ACR1 = 0x1801, 0x1808, 0x180B
+VIA1PA, T2CL, ACR1, VIA1PA_NH = 0x1801, 0x1808, 0x180B, 0x180F
+DOS_TRACK = 0x22
+PA_TRK0 = 0x01
 VIA2PB, PCR2 = 0x1C00, 0x1C0C
 PA_SIDE, PA_2MHZ, ACR_T2_PULSE = 0x04, 0x20, 0x20
 PCR_SOE_MASK, PCR_SOE_OFF = 0xF1, 0x0C
@@ -39,7 +42,10 @@ READ_PAIR_CYCLES = 46
 
 STEP_MS, SETTLE_MS, SPINUP_S = 5, 20, 0.5
 HOME_HALFTRACK, HOME_STEPS = 2, 88
+PHASE_OFFSET = 2
+PHASE_NUDGE = (0, 1, 0, -1)
 MAX_HALFTRACK = 84
+MAX_DOS_TRACK = MAX_HALFTRACK // 2
 
 
 class TrackError(IOError):
@@ -220,8 +226,10 @@ class Capture:  # pylint: disable=too-many-instance-attributes
 class Nibbler:
     """Track-level access to one drive through a started monitor.
 
-    The head position is tracked on the host; ``home()`` bumps it to track 1.
-    ``sleep`` waits for the spindle after the motor starts.
+    The head position is tracked on the host and found by ``locate()`` the
+    first time it is needed. Bumping the head against the stop happens only
+    when ``allow_bump`` is set and nothing else can place it. ``sleep`` waits
+    for the spindle after the motor starts.
     """
 
     def __init__(
@@ -232,6 +240,7 @@ class Nibbler:
         settle_ms=SETTLE_MS,
         spinup_s=SPINUP_S,
         sleep=time.sleep,
+        allow_bump=False,
     ):
         if model not in BUFPG:
             raise ValueError(f"unsupported model {model}")
@@ -242,6 +251,7 @@ class Nibbler:
             spinup_s,
             sleep,
         )
+        self.allow_bump = allow_bump
         self.halftrack = None
         self.motor = False
         self._saved = None
@@ -314,12 +324,74 @@ class Nibbler:
         if start not in START:
             raise ValueError(f"start must be one of {tuple(START)}")
 
-    def home(self):
+    def bump(self):
         """Step outwards past the stop, ending on the phase of track 1."""
         phase = self.mon.read(VIA2PB, 1)[0] & PB_PHASE
-        steps = HOME_STEPS + ((phase - HOME_HALFTRACK) & PB_PHASE)
-        self._prep(PB_MOTOR_LED if self.motor else 0, 0, -steps)
+        steps = HOME_STEPS + ((phase - HOME_HALFTRACK - PHASE_OFFSET) & PB_PHASE)
+        self._prep(self._pbset(), 0, -steps)
         self.halftrack = HOME_HALFTRACK
+
+    def _pbset(self, density=0):
+        return (PB_MOTOR_LED | (density & 3) << 5) if self.motor else 0
+
+    def _phase_halftrack(self, track):
+        """2 * track, moved to an adjacent halftrack when the stepper phase says so.
+
+        A phase two halftracks away is ambiguous and leaves 2 * track.
+        """
+        phase = self.mon.read(VIA2PB, 1)[0] & PB_PHASE
+        return 2 * track + PHASE_NUDGE[(phase - 2 * track - PHASE_OFFSET) & PB_PHASE]
+
+    def _track0(self):
+        """1571 track 0 sensor (VIA1 PA0 low), read without clearing the ATN flag."""
+        return not self.mon.read(VIA1PA_NH, 1)[0] & PA_TRK0
+
+    def _to_sensor(self):
+        """1571: step out one halftrack at a time until the track 0 sensor trips."""
+        for _ in range(MAX_HALFTRACK - HOME_HALFTRACK + 1):
+            if self._track0():
+                return True
+            self._prep(self._pbset(), 0, -1)
+        return False
+
+    def _dos_track(self):
+        """Drive 0's current track as DOS last left it, if plausible."""
+        track = self.mon.read(DOS_TRACK, 1)[0]
+        return track if 1 <= track <= MAX_DOS_TRACK else None
+
+    def _headers_here(self, track):
+        """Track number from the sector headers under the head, trying every density."""
+        if not self.motor:
+            self.motor = True
+            self.sleep(self.spinup_s)
+        zones = [speed_zone(track)] if track else []
+        for density in zones + [z for z in range(4) if z not in zones]:
+            self._prep(self._pbset(density), 0, 0)
+            found = header_tracks(self._read(density, "sync", 0, None).bits())
+            if len(found):
+                return int(np.bincount(found).argmax())
+        return None
+
+    def locate(self):
+        """Find the head position: 1571 track 0 sensor, else headers and DOS's track.
+
+        Raises TrackError when nothing places the head, unless ``allow_bump``.
+        """
+        if self.model == "1571" and self._to_sensor():
+            self.halftrack = HOME_HALFTRACK
+            return self.halftrack
+        dos = self._dos_track()
+        track = self._headers_here(dos) or dos
+        if track is not None:
+            self.halftrack = self._phase_halftrack(track)
+        elif self.allow_bump:
+            self.bump()
+        else:
+            raise TrackError(
+                "head position unknown (no track 0 sensor, DOS track or headers);"
+                " allow_bump permits a bump against the stop"
+            )
+        return self.halftrack
 
     def seek(self, halftrack, density=None, side=0):
         """Motor on, density and side selected, head on halftrack."""
@@ -327,13 +399,15 @@ class Nibbler:
             raise ValueError(f"halftrack {halftrack} out of range")
         if density is None:
             density = speed_zone(halftrack // 2)
+        spinning = self.motor
         if self.halftrack is None:
-            self.home()
-        pbset = PB_MOTOR_LED | (density & 3) << 5
-        self._prep(pbset, PA_SIDE if side else 0, halftrack - self.halftrack)
+            self.locate()
+        self.motor = True
+        self._prep(
+            self._pbset(density), PA_SIDE if side else 0, halftrack - self.halftrack
+        )
         self.halftrack = halftrack
-        if not self.motor:
-            self.motor = True
+        if not spinning:
             self.sleep(self.spinup_s)
         return density
 
@@ -345,6 +419,9 @@ class Nibbler:
         """
         self._check(side, start)
         density = self.seek(halftrack, density, side)
+        return self._read(density, start, side, marker)
+
+    def _read(self, density, start, side, marker):
         value, mask = marker or (0, 0)
         self._params(mode=START[start], npages=NPAGES, marker=value, mmask=mask)
         self._call(READ)
@@ -355,7 +432,7 @@ class Nibbler:
             self.mon.read(self.table_addr, 256),
             result,
             self.model,
-            halftrack,
+            self.halftrack,
             side,
             density,
             start,

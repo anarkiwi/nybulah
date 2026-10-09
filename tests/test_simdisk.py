@@ -11,11 +11,13 @@ def test_stepper_stops_on_the_detent_of_its_phase():
     mech = drive.mech
     for phase in (3, 2, 1, 0) * 30:
         drive.write(0x1C00, phase)
-    assert mech.halftrack == HT_STOP + ((0 - HT_STOP) & 3)
+    assert HT_STOP <= mech.halftrack < HT_STOP + 4 and mech.bumps > 0
+    assert (mech.halftrack + 2) & 3 == 0
     for k in range(200):
         drive.write(0x1C00, (k + 1) & 3)
     assert HT_MAX - 3 <= mech.halftrack <= HT_MAX
-    assert mech.halftrack & 3 == drive.read(0x1C00) & 3
+    assert (mech.halftrack + 2) & 3 == drive.read(0x1C00) & 3
+    assert drive.read(0x22) == 18
 
 
 def test_media_noise_and_g64():

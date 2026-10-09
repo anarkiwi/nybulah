@@ -5,3 +5,4 @@ __pycache__/
 /artifacts/
 .coverage
 .pytest_cache/
+/scratch/

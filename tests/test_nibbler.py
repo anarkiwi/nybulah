@@ -99,14 +99,38 @@ def test_side_select_reads_the_other_head(make_rig, g64):
     assert nib.capture(36, side=0, start="sync").status == 0
 
 
-def test_home_lands_on_track_1(make_rig):
+def test_1541_locates_from_dos_track_without_bumping(make_rig):
     drive, nib = make_rig("1541")
     nib.capture(36, start="now")
-    assert drive.mech.halftrack == 36 and nib.halftrack == 36
-    nib.home()
-    assert drive.mech.halftrack == 2 == nib.halftrack
+    assert drive.mech.halftrack == 36 == nib.halftrack and drive.mech.bumps == 0
     nib.seek(71)
     assert drive.mech.halftrack == 71
+
+
+def test_headers_override_dos_track(make_rig, g64):
+    drive, nib = make_rig("1541", Media.from_g64(g64))
+    drive.write(0x22, 10)
+    assert nib.locate() == 36 and drive.mech.bumps == 0
+
+
+def test_1571_steps_to_the_track_0_sensor(make_rig):
+    drive, nib = make_rig("1571")
+    drive.write(0x22, 0)
+    assert nib.locate() == 2 == drive.mech.halftrack and drive.mech.bumps == 0
+    nib.seek(40)
+    assert drive.mech.halftrack == 40
+
+
+def test_bump_needs_opt_in(make_rig):
+    drive, nib = make_rig("1541")
+    drive.write(0x22, 0)
+    with pytest.raises(TrackError, match="allow_bump"):
+        nib.capture(36)
+    nib.allow_bump = True
+    nib.capture(36)
+    assert drive.mech.bumps > 0 and drive.mech.halftrack == 36
+    nib.bump()
+    assert drive.mech.halftrack == 2 == nib.halftrack
 
 
 def test_write_then_capture(make_rig):
@@ -172,7 +196,7 @@ def test_close_restores_state(make_rig):
     nib.close()
     nib.close()
     assert drive.dump(0x60, 27) == zp and drive.mech.pcr == pcr
-    assert drive.via1.regs[1] == 0x20 and not drive.mech.pb & 0x04
+    assert drive.via1.regs[1] & 0xFE == 0x20 and not drive.mech.pb & 0x04
 
 
 def test_timer_helpers():

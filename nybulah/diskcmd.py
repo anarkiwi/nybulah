@@ -18,6 +18,11 @@ def _common(ap):
     ap.add_argument("--transport", choices=protocols() or ("s1",), default="s1")
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--archive", type=pathlib.Path, help="save every capture here")
+    ap.add_argument(
+        "--allow-bump",
+        action="store_true",
+        help="bump the head against the stop if nothing else locates it",
+    )
 
 
 def _session(args, cbm):
@@ -55,7 +60,10 @@ class Command:
         kind, model = _session(args, cbm)
         parse, serialise = FORMATS[kind]
         kw = {"retries": args.retries, "archive": args.archive}
-        with Monitor(cbm, args.dev, args.transport) as mon, Nibbler(mon, model) as nib:
+        with (
+            Monitor(cbm, args.dev, args.transport) as mon,
+            Nibbler(mon, model, allow_bump=args.allow_bump) as nib,
+        ):
             if self.write:
                 image = parse(args.image.read_bytes())
                 op = disk.write_d71 if kind == ".d71" else disk.write_d64

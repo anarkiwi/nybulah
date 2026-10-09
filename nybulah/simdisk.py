@@ -14,7 +14,9 @@ from .analysis.gcr import to_bits
 from .sim import IO_ACCESS_CYCLE, Drive1541, Drive1571
 
 CPU_HZ = 1_000_000
-HT_STOP, HT_MAX = 2, 84
+HT_STOP, HT_MAX, HT_TRACK1 = 0, 84, 2
+PHASE_OFFSET = 2
+DOS_TRACK = 0x22
 SYNC_ONES = 10
 INDEX_FRACTION = 0.02
 V_FLAG = 0x40
@@ -71,7 +73,9 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         drive.mech = self
         self.drive, self.media, self.write_protect = drive, media, write_protect
         self.halftrack = halftrack
-        self.pb, self.pcr, self.ddrb = halftrack & PB_PHASE, DOS_PCR, DOS_DDRB
+        self.pb = (halftrack + PHASE_OFFSET) & PB_PHASE
+        self.pcr, self.ddrb = DOS_PCR, DOS_DDRB
+        self.bumps = 0
         self.ora = self.ddra = 0
         self.regs = bytearray(16)
         self.wd_command = None
@@ -88,6 +92,11 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
     def side(self):
         """Selected head: VIA1 PA2 on a 1571."""
         return (self.drive.via1.regs[1] >> 2) & 1 if self.drive.MODEL == "1571" else 0
+
+    @property
+    def track0(self):
+        """1571 track 0 sensor: the head is on track 1 or outside it."""
+        return self.halftrack <= HT_TRACK1
 
     @property
     def zone(self):
@@ -238,8 +247,9 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         self.pb = value
         if step in (1, 3):
             ht = self.halftrack + (1 if step == 1 else -1)
-            phase = value & PB_PHASE
+            phase = (value - PHASE_OFFSET) & PB_PHASE
             if ht < HT_STOP:
+                self.bumps += 1
                 ht = HT_STOP + ((phase - HT_STOP) & PB_PHASE)
             elif ht > HT_MAX:
                 ht = HT_MAX - ((HT_MAX - phase) & PB_PHASE)
@@ -247,9 +257,13 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
 
 
 def disk_drive(model, media, device=8, **kw):
-    """A simulated 1541 or 1571 with expansion RAM and a mechanism holding media."""
+    """A simulated 1541 or 1571 with expansion RAM and a mechanism holding media.
+
+    DOS's current track for drive 0 is set as if DOS had left the head there.
+    """
     drive = {"1541": Drive1541, "1571": Drive1571}[model](device=device)
-    Mechanism(drive, media, **kw)
+    mech = Mechanism(drive, media, **kw)
+    drive.write(DOS_TRACK, mech.halftrack // 2)
     return drive
 
 

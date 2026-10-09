@@ -144,6 +144,8 @@ class Via:
         """Register read with 6522 side effects."""
         if reg == 0:
             return self.drive.port_b()
+        if reg in (1, 15):
+            return self.drive.port_a(self.regs[1])
         if reg in (4, 5):
             count = (self.latch - (self.drive.cycles - self.t1_start)) & 0xFFFF
             if reg == 4:
@@ -180,6 +182,8 @@ class Via:
                 self.t1_ack = self._t1_events()
         elif reg == 0xE:
             self.ier = self.ier | value & 0x7F if value & 0x80 else self.ier & ~value
+        elif reg == 0xF:
+            self.regs[1] = value
         else:
             self.regs[reg] = value
 
@@ -260,6 +264,10 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         v |= PB_ATN_IN if bus & IEC_ATN else 0
         return v
 
+    def port_a(self, latch):
+        """Value read from VIA1 port A: the output latch."""
+        return latch
+
     def load(self, addr, data):
         """Write bytes into drive memory without running the CPU."""
         for i, b in enumerate(data):
@@ -303,6 +311,13 @@ class Drive1571(Drive1541):
 
     MODEL = "1571"
     EXPANSION = ((0x6000, 0x8000),)
+    PA_TRK0 = 0x01
+
+    def port_a(self, latch):
+        """PA0 is the track 0 sensor input, low on track 1."""
+        if self.mech is None:
+            return latch
+        return latch & ~self.PA_TRK0 | (0 if self.mech.track0 else self.PA_TRK0)
 
 
 class _Memory(list):

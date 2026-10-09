@@ -74,8 +74,14 @@ at the last recorded sync.
 
 **Reading:**
 
-1. The head is first bumped to track 1. Then `calibrate` relabels the head
-   position from the header track numbers it finds near track 18.
+1. The head is located without touching the stop. A 1571 steps outwards one
+   halftrack at a time until its track 0 sensor (VIA1 PA0, low) trips. A
+   1541 reads the sector headers under the head, falling back to DOS's
+   current track (`$22`), with the stepper phase choosing between adjacent
+   halftracks. Only if all of these fail (unformatted media) does it bump the
+   head against the stop, and only with `--allow-bump`. Then `calibrate`
+   relabels the head position from the header track numbers it finds near
+   track 18.
 2. The header ID of track 18 is used for ID-mismatch (29) detection.
 3. Each track is captured from a sync. The whole capture is decoded:
    1.03–1.3 revolutions, so every sector appears whole at least once.
@@ -101,8 +107,8 @@ track's.
 
 ## Hardware validation
 
-`nybulah hwcheck --disk` reads one track in each zone (1, 18, 25, 31). It
-never writes. It reports the following:
+`nybulah hwcheck --disk` locates and calibrates the head as a read does,
+then reads one track in each zone (1, 18, 25, 31). It never writes. It reports the following:
 
 - bytes;
 - syncs and their length range;
@@ -112,7 +118,9 @@ never writes. It reports the following:
 
 These are not yet confirmed on hardware:
 
-- the phase convention for the home position (track 1 at stepper phase 2);
+- the stepper phase convention (track 1 at phase 0, from a bump that landed
+  one track outside the old phase 2 assumption);
+- the 1571 track 0 sensor polarity (PA0 low on track 1);
 - the step and settle delays;
 - the 1571 side bit polarity and WD1770 index after `$D0`;
 - whether SYNC asserts on the tenth one;
