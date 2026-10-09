@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 from py65.assembler import Assembler
 from py65.devices.mpu6502 import MPU
-from test_simfast import IMPLEMENTED, LOW, assemble, registers, snapshot
+from test_simfast import IMPLEMENTED, LOW, assemble, pair, registers, snapshot
+from test_simfast import shift_in, step_both
 
 from nybulah import simcia, simfast, simsrq, simwd, simx
 from nybulah.opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ
-from nybulah.sim import Bus, Drive1581, IdleFastDrive, SimIOWrite
+from nybulah.sim import Bus, Drive1581, IdleFastDrive
 from nybulah.simdisk import disk_drive
 from nybulah.simhost import SimCBM
 from nybulah.simwd import MfmMedia
@@ -57,13 +58,6 @@ def make(**kw):
     return lambda: disk_drive("1581", media(), **kw)
 
 
-def pair(build):
-    ref, fast = build(), build()
-    ref.fast, fast.fast = False, True
-    assert simfast.eligible(fast) and not simfast.eligible(ref)
-    return ref, fast
-
-
 def state(drive):
     """Everything py65, the CIA, the WD and the media hold."""
     vars_ = {k: v for k, v in snapshot(drive).items() if k != "wd"}
@@ -75,17 +69,6 @@ def state(drive):
         drive.wd.w.tobytes(),
         drive.wd.flat.tobytes(),
     ]
-
-
-def step_both(ref, fast):
-    errors = []
-    for run in (ref.step, lambda: simfast.run_drive(fast, simfast.NEVER, steps=1)):
-        try:
-            run()
-            errors.append(None)
-        except (SimIOWrite, IndexError) as e:
-            errors.append(type(e))
-    assert errors[0] == errors[1]
 
 
 def lockstep(ref, fast, n):
@@ -463,17 +446,7 @@ RECEIVE = assemble(
     "bcc go",
     "lda #$18",
     "sta $4001",
-    "ldy #$00",
-    "next:",
-    "lda #$08",
-    "wait:",
-    "bit $400d",
-    "beq wait",
-    "lda $400c",
-    "sta $0500,y",
-    "iny",
-    "cpy #$10",
-    "bne next",
+    *shift_in(0x10),
     "lda #$10",
     "sta $4001",
     "rts",

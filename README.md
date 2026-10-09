@@ -1,7 +1,8 @@
 # nybulah
 
 Raw-track ("nibbler") imaging and writing for Commodore 1541 and 1571 disk
-drives over the standard serial IEC bus, through OpenCBM and a ZoomFloppy or
+drives, and WD177x-level imaging and writing for the 1581, over the standard
+serial IEC bus, through OpenCBM and a ZoomFloppy or
 another xum1541 adapter. No parallel cable is needed. It is for preserving
 copy-protected and non-standard disks and writing them back.
 
@@ -52,9 +53,18 @@ copy-protected and non-standard disks and writing them back.
   colour, inferred no-flux as dots; interval histograms, timing eye and drift;
   per-revolution APNG and a zoomable HTML viewer down to single transitions
   ([analysis.md](docs/analysis.md#flux-view)).
-- **Formats.** Read and write NIB, NB2, NBZ, G64, G71, P64, SCP, KryoFlux and
-  D64; flux decoded through a 1541 read-circuit model; conversion to G64, G71,
-  D64 and P64 keeps every track ([formats.md](docs/formats.md)).
+- **1581.** ID lists with timing, sector reads with status, Read Track, and
+  Write Track/Write Sector, streamed through the 8520 shift register (s4,
+  firmware v12) or through the track cache RAM; an MFM layer decodes marks,
+  CRCs and layouts and maps CRC errors, deleted data, odd sizes, duplicate or
+  missing IDs and unstable bytes
+  ([protocol.md](docs/protocol.md#1581-capture-and-streaming-drivemfms-drivemfmstreams)).
+  The head is homed by a WD Restore bounded to the estimated cylinder and
+  confirmed by TR00.
+- **Formats.** Read and write NIB, NB2, NBZ, G64, G71, P64, SCP, KryoFlux,
+  D64 and D81 (1581 captures also export to IMD); flux decoded through a 1541
+  read-circuit model; conversion to G64, G71, D64 and P64 keeps every track
+  ([formats.md](docs/formats.md)).
 
 Measured transfer rates, ZoomFloppy, 8 KB blocks, bytes/s read / write
 ([hardware.md](docs/hardware.md#expected-results)):
@@ -89,6 +99,7 @@ Measured transfer rates, ZoomFloppy, 8 KB blocks, bytes/s read / write
 - A 1541 or 1571. Raw captures on a 1541, and writes and RAM capture passes
   on a 1571, need an 8 KB RAM expansion (`$8000-$9FFF` on a 1541,
   `$6000-$7FFF` on a 1571). A 1571 with firmware v12 reads D64/D71 without it.
+- A 1581 needs no modification (any DOS ROM, JiffyDOS included).
 - Docker. The image bundles OpenCBM, the assembled drive code and Python.
 
 ## Usage
@@ -102,6 +113,7 @@ nybulah hwcheck --devs 8 10 --proto s3     # identify drives, probe RAM, bench t
 nybulah read --dev 10 --transport s3 disk.d64   # 1541: read with error bytes
 nybulah read --dev 8 --transport s4 disk.d71    # 1571: both sides, streamed with v12
 nybulah write --dev 8 --transport s4 disk.d71   # format, write, verify every track
+nybulah read --dev 9 --transport s4 disk.d81    # 1581: D81 with error bytes
 nybulah info disk.g64                      # per-track kind, cycle, errors (--map: text map)
 nybulah convert disk.nbz disk.g64          # to .g64, .g71, .d64 or .p64
 nybulah map disk.nib -o disk.html          # .png disk, .apng animation, .svg/.html strip
@@ -135,7 +147,8 @@ stream), `ramprobe` and `bench`. `nybulah <command> --help` lists the options.
 - [docs/protocol.md](docs/protocol.md): X, burst X, SRQ and streaming wire
   protocols, timing and margins
 - [docs/disk.md](docs/disk.md): drive routines, capture passes, D64/D71
-  reading and writing, head location
+  reading and writing, head location; 1581 in
+  [hardware.md](docs/hardware.md#1581)
 - [docs/analysis.md](docs/analysis.md): GCR, revolution detection, faults,
   disk map and format APIs
 - [docs/formats.md](docs/formats.md): image formats, flux decoding and

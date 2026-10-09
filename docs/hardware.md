@@ -416,6 +416,97 @@ drive 8 the 1571 and a formatted disk inserted:
    docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah read --dev 8 --transport s4 /data/artifacts/disk.d64
    ```
 
+## 1581
+
+### Hardware (sources)
+
+| fact | value | source |
+|---|---|---|
+| CPU | 6502A at 2 MHz (16 MHz oscillator Y1 / 8 by 74LS93 U10; WD clock 8 MHz) | service manual PN-314982-01 parts list, schematic 252380 sheet 2 |
+| memory map | RAM `$0000-$1FFF`, `$2000-$3FFF` unused, 8520A CIA `$4000-$5FFF` (16 registers mirrored), WD1770/1772 `$6000-$7FFF` (4 registers mirrored), ROM `$8000-$FFFF` | sheet 1 (74LS139 U6), service manual memory map |
+| DOS RAM | buffers `$0300-$09FF`, BAM `$0A00-$0BFF`, track cache `$0C00-$1FFF` | service manual RAM usage, DOS `equate.src` |
+| CIA port A | PA0 side select (0: head 1), PA1 /RDY, PA2 /MOTOR (0: on), PA3-4 device switches, PA5 power LED, PA6 activity LED (1: lit), PA7 /DISK CHANGE | DOS `iodef.src`, sheets 2-3 |
+| CIA port B | PB0 DATA in, PB1 DATA out, PB2 CLK in, PB3 CLK out, PB4 ATN acknowledge, PB5 fast serial direction, PB6 /WPRT, PB7 ATN in | `iodef.src`, sheet 3 |
+| ATN | FLAG = ATN (ICR bit 4 on its falling edge); DATA pulled iff PB4 = 1 and ATN asserted (74LS00 U7) | sheet 3, `irq.src`, `sieee.src` |
+| fast serial | CNT on SRQ, SP on DATA through 74LS241 U13 and 7407 U11, direction PB5; timer A is the shift clock | sheet 3, service manual "programmable baud rate" |
+| WD177x | DDEN tied low (MFM only); DRQ not connected; index (drive pin 8) and TR00 (pin 26) only to the WD; /WPRT also on PB6 | sheet 2 |
+| WD step rates | 1772: 6/12/2/3 ms, 1770: 6/12/20/30 ms; DOS uses `$08` on 1770 boards and `$09` on 1772 boards (J1 sensed through the 8520 TOD counter); nybulah uses 12 ms (r1r0 = 01) | WD1772 datasheet, `mrout.src` reset_ctl, sheet 3 note |
+| format | 80 cylinders x 2 sides x 10 sectors of 512 bytes, 250 kbit/s at 300 rpm (6250 bytes, 32 us a byte); ID side byte H = 0 on head 1 | service manual specifications, `mrout.src` fmtrk |
+| logical | track 1-80 = cylinder 0-79; sectors 0-19 on H = 0, 20-39 on H = 1, two per physical sector | `msub.src` trans_ts |
+| head motion by the DOS | Restore at power-on and reset, in job error recovery, format and burst query | `dskint.src`, `job.src`, `burstc.src`, `patch.src` |
+| fast host flag | an idle 1581 sets it after 8 SRQ rises (shift register in input mode, `irq.src`, lock bit set at init) and clears it only on UNLISTEN, UNTALK or a framing error (`sieee.src`); while set a TALK answers over the shift register | DOS source |
+
+nybulah uses no ROM routine and no DOS variable, so a JiffyDOS 1581 ROM behaves as the
+stock one. Its only DOS interface is the job queue at `$0002` (job 0), documented in
+the 1581 user's guide, to run job `$82` (controller reset: track cache invalidated,
+no head movement) after a session that used the track cache RAM.
+
+### What can be captured and written
+
+| | capture | write back |
+|---|---|---|
+| IDs (C, H, R, N incl. wrong track, side or size codes, duplicates, extra sectors, cylinder 80) | Read Address stream, with times | Write Track |
+| sector data, data CRC errors, deleted data marks, odd sizes 128-1024 | Read Sector | Write Track / Write Sector |
+| ID CRC errors | Read Address status | Write Track (two plain bytes for the CRC) |
+| gaps, marks, layout | Read Track (gap bytes may read wrong at write splices and false C2 resyncs in data fields; data from Read Sector) | Write Track, except bytes `$F5-$F7` |
+| revolution time, sector timing | stamps per command (first byte, end), index edges | no (fixed 8 MHz clock and motor speed) |
+| fuzzy bits | differences between reads | no |
+| no-flux areas, clock bits | no (reads as data `$00`) | no |
+| long/short tracks, IDs over the index | from stamps and Read Track | no |
+
+### What to run (1581 on device 9)
+
+Build the image from the local OpenCBM tree as for streaming (firmware v12 is
+already flashed; nothing changes on the adapter). Insert a 1581 disk you can afford
+to lose only for step 5.
+
+1. Memory only, the head does not move: the monitor transports and the 8520
+   shift register timing.
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 9 --proto s1 --proto s3 --proto s4
+   docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 9 --cia
+   ```
+
+   Expect `bench_*` errors 0 and the `dos_cache` step true; `--cia` `first` at 39
+   or less on both phases (the stream's 40-cycle period needs it).
+2. Dry run, no stepping (the motor turns, one ID is read):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb nybulah homeprobe --dev 9 --transport s4 --headers
+   ```
+
+   Expect `t0` false unless the head is on cylinder 0, `index` toggling between
+   runs, `period_us` near 200000, `id` with `c` equal to `estimate` (source
+   `id`), `track_register` equal to it if DOS last moved the head, and `steps` =
+   `estimate`.
+3. Homing, bounded by the dry run's `steps` (N): Restore never sends more than N
+   step pulses and fails if TR00 is not sensed; the head returns to the estimate.
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb nybulah homeprobe --dev 9 --transport s4 --headers --step --max-steps N
+   ```
+
+   Expect `homed` true.
+4. One track, streamed (homes as in 3 first):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah streamprobe --dev 9 --max-steps N --cylinder 39 --revolutions 2 --save /data/artifacts/stream-1581-39.npz
+   docker run --rm -v "$PWD/artifacts:/data/artifacts" nybulah info /data/artifacts/stream-1581-39.npz
+   ```
+
+   Expect `adapter` and `drive` "done", `revolution_bytes` near 6250,
+   `revolution_us` near 200000, 10 IDs a revolution with `c` 39, no ID CRC errors.
+5. A whole disk, read (and, on a scratch disk, written and verified):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah read --dev 9 --transport s4 --max-steps N /data/artifacts/disk.d81
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah write --dev 9 --transport s4 --max-steps N /data/artifacts/disk.d81
+   ```
+
+   Expect `errors` 0 on a good disk, `failed` empty after the write. Each session
+   ends with DOS job `$82`; after a write, use DOS on the disk only after that.
+
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin, branch
@@ -481,6 +572,9 @@ Blocks that decode to I/O are never written:
   `$1C00`, open bus and their mirrors).
 - 1571: `$0800-$5FFF` (VIAs, WD1770 `$2000-$3FFF`, CIA `$4000-$5FFF`, and the
   undocumented decode below `$1800`).
+
+- 1581: nothing is probed; its free run is the DOS track cache `$0C00-$1FFF`,
+  after which hwcheck runs DOS job `$82` (`dos_cache` step).
 
 Each probe writes a two-byte marker that never equals open-bus reads, then
 restores every byte it changed, including base RAM reached through mirrors.

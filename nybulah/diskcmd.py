@@ -1,15 +1,19 @@
-"""read and write subcommands: D64/D71 images through the raw track routines."""
+"""read and write subcommands: D64/D71 images through the raw track routines, D81
+through the 1581's WD177x (Read Sector, Write Track, Write Sector)."""
 
 import json
 import pathlib
 
-from . import disk
+from . import disk, disk1581, r1581
 from .formats import read_d64, read_d71, write_d64, write_d71
+from .formats.d81 import read_d81, write_d81
 from .monitor import Monitor, protocols, resolve, supported
 from .nibbler import Nibbler, TrackError
 from .ramprobe import identify_model
 
 FORMATS = {".d64": (read_d64, write_d64), ".d71": (read_d71, write_d71)}
+FORMATS[".d81"] = (read_d81, write_d81)
+NEEDS = {".d71": "1571", ".d81": "1581"}
 
 
 def _common(ap):
@@ -23,19 +27,44 @@ def _common(ap):
         action="store_true",
         help="1541: bump the head against the stop if nothing else locates it",
     )
+    ap.add_argument(
+        "--max-steps",
+        type=int,
+        default=r1581.MAX_CYL,
+        help="1581: refuse homing that needs more Restore step pulses",
+    )
 
 
 def _session(args, cbm):
     """Check the request against the drive; returns its model."""
     kind = args.image.suffix.lower()
     if kind not in FORMATS:
-        raise ValueError(f"{args.image}: expected .d64 or .d71")
+        raise ValueError(f"{args.image}: expected .d64, .d71 or .d81")
     if not supported(cbm, resolve(cbm, args.transport)):
         raise ValueError(f"transport {args.transport} is not available here")
     model = identify_model(cbm, args.dev)
-    if kind == ".d71" and model != "1571":
-        raise ValueError(f"device {args.dev} is a {model}: D71 needs a 1571")
+    if kind in NEEDS and model != NEEDS[kind]:
+        raise ValueError(
+            f"device {args.dev} is a {model}: {kind} needs a {NEEDS[kind]}"
+        )
+    if model == "1581" and kind != ".d81":
+        raise ValueError(f"device {args.dev} is a 1581: use a .d81 image")
     return kind, model
+
+
+def _d81(args, cbm, write):
+    """Home within --max-steps, then read or write the whole disk."""
+    with r1581.session(cbm, args.dev, args.transport, writes=write) as drive:
+        drive.motor(True)
+        disk1581.home(drive, disk1581.dry(drive), args.max_steps)
+        if write:
+            out = disk1581.write_disk(drive, read_d81(args.image.read_bytes()))
+            out["failed"] = out["mismatched"]
+        else:
+            image = disk1581.read_disk(drive, args.retries, args.archive)
+            args.image.write_bytes(write_d81(image))
+            out = {"errors": int((image.errors != 1).sum())}
+    return out
 
 
 class Command:
@@ -44,9 +73,9 @@ class Command:
     def __init__(self, write):
         self.write = write
         self.__doc__ = (
-            "Write a D64/D71 image to disk, verifying every track."
+            "Write a D64/D71/D81 image to disk, verifying every track."
             if write
-            else "Read a disk into a D64/D71 image with error bytes."
+            else "Read a disk into a D64/D71/D81 image with error bytes."
         )
 
     def add_arguments(self, ap):
@@ -58,6 +87,12 @@ class Command:
     def execute(self, args, cbm):
         """Run against cbm; returns a summary (and writes the image when reading)."""
         kind, model = _session(args, cbm)
+        if kind == ".d81":
+            out = _d81(args, cbm, self.write) | {"image": str(args.image)}
+            print(json.dumps(out | {"model": model}))
+            if out.get("failed"):
+                raise r1581.TrackError(f"verify failed on {len(out['failed'])} sides")
+            return out
         parse, serialise = FORMATS[kind]
         kw = {"retries": args.retries, "archive": args.archive}
         with (

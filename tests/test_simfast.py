@@ -360,24 +360,26 @@ SHIFT_OUT = assemble(
     "bne next",
     "rts",
 )
-SHIFT_IN = assemble(
-    0x400,
-    *SETUP,
-    "lda #$01",
-    "sta $400e",
-    "ldy #$00",
-    "next:",
-    "lda #$08",
-    "wait:",
-    "bit $400d",
-    "beq wait",
-    "lda $400c",
-    "sta $0500,y",
-    "iny",
-    "cpy #$20",
-    "bne next",
-    "rts",
-)
+
+
+def shift_in(n):
+    """Store n shift register bytes at $0500 as each ICR flag shows."""
+    return (
+        "ldy #$00",
+        "next:",
+        "lda #$08",
+        "wait:",
+        "bit $400d",
+        "beq wait",
+        "lda $400c",
+        "sta $0500,y",
+        "iny",
+        f"cpy #${n:02x}",
+        "bne next",
+    )
+
+
+SHIFT_IN = assemble(0x400, *SETUP, "lda #$01", "sta $400e", *shift_in(0x20), "rts")
 
 
 @pytest.mark.parametrize("delay", [0, 2])

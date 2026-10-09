@@ -117,3 +117,28 @@ def test_s4_session_benches_1571_at_both_clocks(tmp_path):
 def test_s4_skipped_on_a_1541(tmp_path):
     summary, _ = run(two_drives(), tmp_path, "--devs", "10", "--proto", "s4")
     assert summary["10"]["skipped"] == ["bench_s4"]
+
+
+def test_1581_session(tmp_path, monkeypatch):
+    from nybulah import r1581
+    from nybulah.sim import Drive1581
+    from nybulah.simwd import MfmMedia
+    from nybulah.simx import adapter
+
+    jobs = []
+    monkeypatch.setattr(
+        r1581, "invalidate", lambda cbm, dev, sleep=None: jobs.append(dev) or True
+    )
+    monkeypatch.setattr(r1581.time, "sleep", lambda s: None)
+    media = MfmMedia.formatted(cylinders=20)
+    cbm = adapter("s1", Drive1581, device=9, media=media, cylinder=17)
+    cbm.budget = 20_000_000
+    summary, _ = run(cbm, tmp_path, "--devs", "9", "--disk", "--size", "8192")
+    s9 = summary["9"]
+    assert s9["model"] == "1581" and s9["failed"] == []
+    assert s9["bench_s1"]["errors"] == 0 and s9["bench_s1"]["addr"] == 0x0C00
+    assert s9["disk"]["estimate"] == 17 and s9["disk"]["source"] == "id"
+    assert jobs == [9]
+    sim = cbm.drives[9]
+    sim.sync()
+    assert sim.wd.bumps == 0 and sim.wd.cylinder == 17
