@@ -65,7 +65,9 @@ def main():
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--rate", action="store_true", help="only measure read rate")
     ap.add_argument("--sweep", action="store_true", help="read time per block size")
-    ap.add_argument("--cia", action="store_true", help="1571/1581 CIA flag latency (s3)")
+    ap.add_argument(
+        "--cia", action="store_true", help="1571/1581 CIA flag latency (s3)"
+    )
     ap.add_argument("--reps", type=int, default=10)
     args = ap.parse_args()
     with OpenCBM() as cbm:
