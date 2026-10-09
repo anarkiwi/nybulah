@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG OPENCBM_IMAGE=anarkiwi/opencbm:latest
 
-FROM ubuntu:24.04 AS drivecode
+FROM ubuntu:26.04 AS drivecode
 RUN apt-get update && apt-get install -y --no-install-recommends cc65 make \
     && rm -rf /var/lib/apt/lists/*
 COPY drive/ /src/drive/
