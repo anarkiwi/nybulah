@@ -4,10 +4,18 @@ TRACK_MODELS := 1541 1571
 TRACK_BASE := 0300
 PASSPG_1541 := 9F
 PASSPG_1571 := 7F
+M1581 := s1 s2 xb s4
+M1581_PROTO_s1 := 1
+M1581_PROTO_s2 := 2
+M1581_PROTO_xb := 4
+M1581_PROTO_s4 := 5
+MFM := $(if $(wildcard mfm.s),mfm) $(if $(wildcard mfmstream.s),mfmstream)
 BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
 	$(OUT)/sense_1571.bin $(OUT)/seek_1571.bin $(OUT)/stream_1571.bin \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
-	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin $(OUT)/ciaprobe.bin)
+	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin $(OUT)/ciaprobe.bin) \
+	$(M1581:%=$(OUT)/monitor_%_1581.bin) $(OUT)/ciaprobe_1581.bin \
+	$(MFM:%=$(OUT)/%_1581.bin)
 
 all: $(BINS)
 
@@ -25,6 +33,21 @@ $(OUT)/monitor_s4.bin: monitor.s drive.cfg $(wildcard proto_*.inc) burst.inc
 	ca65 -t none -D PROTO=5 -o $(OUT)/monitor_s4.o $<
 	ld65 -C drive.cfg -o $@ $(OUT)/monitor_s4.o
 	rm -f $(OUT)/monitor_s4.o
+
+$(OUT)/monitor_%_1581.bin: monitor.s drive.cfg $(wildcard proto_*.inc) burst.inc
+	ca65 -t none -D PROTO=$(M1581_PROTO_$*) -D M1581=1 -o $(OUT)/monitor_$*_1581.o $<
+	ld65 -C drive.cfg -o $@ $(OUT)/monitor_$*_1581.o
+	rm -f $(OUT)/monitor_$*_1581.o
+
+$(OUT)/ciaprobe_1581.bin: ciaprobe.s
+	ca65 -t none -D M1581=1 -o $(OUT)/ciaprobe_1581.o $<
+	ld65 -t none -S '$$0300' -o $@ $(OUT)/ciaprobe_1581.o
+	rm -f $(OUT)/ciaprobe_1581.o
+
+$(OUT)/%_1581.bin: %.s mfm.cfg mfm.inc
+	ca65 -t none -o $(OUT)/$*_1581.o $<
+	ld65 -C mfm.cfg -o $@ $(OUT)/$*_1581.o
+	rm -f $(OUT)/$*_1581.o
 
 $(OUT)/ciaprobe.bin: ciaprobe.s
 	ca65 -t none -o $(OUT)/ciaprobe.o $<
@@ -52,6 +75,6 @@ $(OUT)/sense_1571.bin: sense.s sense.cfg
 	rm -f $(OUT)/sense_1571.o
 
 clean:
-	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe.bin
+	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/mfm*.bin
 
 .PHONY: all clean

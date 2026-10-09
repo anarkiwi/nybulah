@@ -15,6 +15,9 @@
 ;
 ; VIA1 port B ($1800): PB0 DATA in, PB1 DATA out, PB2 CLK in, PB3 CLK out,
 ; PB4 ATNA, PB7 ATN in. ATNA must equal ATN in or the drive pulls DATA.
+; -D M1581=1 builds for a 1581: the same bits are 8520 CIA port B ($4001),
+; whose ATN acknowledge gate pulls DATA only for ATNA = 1 with ATN asserted
+; (schematic 252380 sheet 3, U7), and PB5 turns the fast serial drivers.
 ;
 ; Commands (host -> drive): opcode, then 16-bit little endian operands.
 ;   'R' addr len  send len bytes from addr
@@ -27,9 +30,44 @@
 ; or WD_IDLE_MS waiting for the next command, makes the drive release the
 ; bus, restore zero page and VIA1, and return to DOS exactly like 'Q'. The
 ; 1571 in 2 MHz mode halves both.
+; On a 1581 (2 MHz) the CIA does it: timer A runs at latch 1 (continuous)
+; and timer B counts its underflows from $FFFF, a wrap every TB_PERIOD
+; cycles; WAIT polls ICR bit 7, which the DOS's mask (dskint: $9A) and the
+; $82 written on entry raise for timer B. Any enabled flag (ATN edge, shift
+; register byte) also counts a tick. Entry saves CRA, CRB and both timer
+; latches; every exit restores them and reads ICR.
 
         .export start
 
+DATA_IN  = $01
+DATA_OUT = $02
+CLK_IN   = $04
+CLK_OUT  = $08
+ATNA     = $10
+
+.ifdef M1581
+IEC     = $4001
+CIA_TALO = $4004
+CIA_TAHI = $4005
+CIA_TBLO = $4006
+CIA_TBHI = $4007
+CIA_ICR  = $400D
+CIA_CRA  = $400E
+CIA_CRB  = $400F
+CRA_START = $01
+CRX_LOAD = $10
+CRB_TA   = $40                  ; CRB bits 6-5 = 10: count timer A underflows
+ICR_SET  = $80
+ICR_TB   = $02
+FSDIR    = $20
+ACK_HELD = $00                  ; ATNA keeping DATA released under ATN
+CLOCK_HZ = 2000000
+TB_PERIOD = 2 * $10000          ; timer A latch 1: an underflow every 2 cycles
+WD_MS    = 1000
+WD_TICKS = (CLOCK_HZ / 1000 * WD_MS + TB_PERIOD - 1) / TB_PERIOD
+WD_IDLE_MS = 10000
+WD_IDLE_TICKS = CLOCK_HZ / 1000 * WD_IDLE_MS / TB_PERIOD
+.else
 IEC     = $1800
 VIA1PA  = $1801
 T1CL    = $1804
@@ -40,15 +78,10 @@ ACR     = $180B
 IFR     = $180D
 IER     = $180E
 
-DATA_IN  = $01
-DATA_OUT = $02
-CLK_IN   = $04
-CLK_OUT  = $08
-ATNA     = $10
-
 ACR_T1_FREERUN = $40
 IRQ_T1   = $40
 
+ACK_HELD = ATNA
 CLOCK_HZ = 1000000
 WD_MS    = 1000
 WD_CYCLES = CLOCK_HZ / 1000 * WD_MS
@@ -57,6 +90,7 @@ WD_PERIOD = WD_CYCLES / WD_TICKS
 WD_LATCH = WD_PERIOD - 2                ; free-run period is latch + 2
 WD_IDLE_MS = 10000
 WD_IDLE_TICKS = CLOCK_HZ / 1000 * WD_IDLE_MS / WD_PERIOD
+.endif
 .assert WD_IDLE_TICKS < 256, error, "idle ticks must fit a byte"
 
 ptr     = $30
@@ -86,8 +120,13 @@ spin:   t1
         t3
 .endif
         ready done
+.ifdef M1581
+        bit CIA_ICR
+        bpl spin
+.else
         bit IFR
         bvc spin
+.endif
         jsr wdtick
         bne spin
 done:
@@ -106,6 +145,9 @@ start:  sei
         sta zpsave,x
         dex
         bpl :-
+.ifdef M1581
+        jsr ciasave
+.else
         lda ACR
         sta viasave
         lda IER
@@ -124,6 +166,7 @@ start:  sei
         sta T1CL
         lda #>WD_LATCH
         sta T1CH
+.endif
         lda #WD_TICKS
         sta wdload
         WDRESET
@@ -150,6 +193,10 @@ loop:   ldx #WD_IDLE_TICKS
 
 exit:   ldx savesp
         txs
+.ifdef M1581
+        lda #CRA_START                  ; serial input before the drivers turn in
+        sta CIA_CRA
+.endif
         lda #$00
         sta IEC
         ldx #zpsize - 1
@@ -157,6 +204,9 @@ exit:   ldx savesp
         sta ptr,x
         dex
         bpl :-
+.ifdef M1581
+        jsr ciarest
+.else
         lda viasave+2
         sta T1LL
         lda viasave+3
@@ -170,12 +220,16 @@ exit:   ldx savesp
         lda viasave+1
         sta IER                 ; re-enables what was enabled (bit 7 reads 1)
         lda VIA1PA              ; clear CA1 (ATN) flag
+.endif
         cli
         rts
 
 ; One T1 period elapsed inside WAIT: ack it, expire after wdload ticks.
 ; Returns with Z clear; preserves A, X and Y.
-wdtick: bit T1CL
+wdtick:
+.ifndef M1581
+        bit T1CL
+.endif
         dec wdcnt
         beq exit
         rts
@@ -248,6 +302,58 @@ declen: lda len
         rts
 .endif
 
+.ifdef M1581
+; Save CRA, CRB and both timer latches (each force-loaded into its stopped
+; counter and read back), then timer A at latch 1 in continuous mode with
+; serial input, timer B counting its underflows from $FFFF, and timer B in
+; the ICR mask.
+ciasave:
+        lda CIA_CRA
+        sta ciasave_
+        lda CIA_CRB
+        sta ciasave_ + 1
+        lda #CRX_LOAD
+        sta CIA_CRA
+        sta CIA_CRB
+        ldx #3
+:       lda CIA_TALO,x
+        sta ciasave_ + 2,x
+        dex
+        bpl :-
+        lda #1
+        sta CIA_TALO
+        stx CIA_TBLO                    ; X = $FF
+        stx CIA_TBHI
+        inx
+        stx CIA_TAHI
+        lda #CRA_START | CRX_LOAD
+        sta CIA_CRA
+        lda #CRA_START | CRX_LOAD | CRB_TA
+        sta CIA_CRB
+        lda #ICR_SET | ICR_TB
+        sta CIA_ICR
+        rts
+
+; Stop both timers, put the latches back (the stopped counters load them),
+; restore CRA and CRB, then read ICR so DOS sees no stale flag.
+ciarest:
+        lda #0
+        sta CIA_CRA
+        sta CIA_CRB
+        tax
+:       lda ciasave_ + 2,x              ; low byte first: the high write loads
+        sta CIA_TALO,x
+        inx
+        cpx #4
+        bne :-
+        lda ciasave_
+        sta CIA_CRA
+        lda ciasave_ + 1
+        sta CIA_CRB
+        bit CIA_ICR
+        rts
+.endif
+
 .if PROTO = 1
         .include "proto_s1.inc"
 .elseif PROTO = 2
@@ -271,6 +377,8 @@ regs:   .res 3
 savesp: .res 1
 wdcnt:  .res 1
 wdload: .res 1
-.if PROTO = 5
+.ifdef M1581
+ciasave_: .res 6                ; CRA, CRB, timer A and B latches
+.elseif PROTO = 5
 ciasave: .res 4                 ; CRA, timer A latch lo/hi, VIA1 port A
 .endif
