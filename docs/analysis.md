@@ -25,45 +25,157 @@ Bits are `uint8` arrays holding 0/1, MSB first.
   standard DOS track. `errors` maps a sector to a `SectorError`; codes 20, 21,
   22, 23, 24, 27 and 29 can be reproduced.
 - `decode_track(bits, track, disk_id=None, sectors=None)` returns a
-  `TrackDecode`. It tries every sync at any bit alignment. Each sector gets the
-  best read found and its error code, in D64 error-byte terms.
+  `TrackDecode`. `bits` is a circular bit stream or a byte-ready capture. Every
+  header in the stream is tried at any bit alignment, so a capture of more than
+  one revolution holds some sectors twice. Each sector gets the best read found,
+  its error code in D64 error-byte terms, `copies` (headers found for it) and
+  `copy` (which of them, in stream order, was used).
 - `merge_decodes(a, b)` keeps the better read of each sector across two decodes
   of one track. `header_tracks(bits)` lists the track numbers found in valid
   headers.
 
 ## Captures (`nybulah.analysis.capture`)
 
-`capture_bits(data, positions, runs, lead=0)` turns a byte-ready capture back
-into a bit stream. It inserts the sync ones that were never latched, so each
-sync's run (the latched trailing ones plus the inserted ones) matches its
-measured length. `trailing_ones(bits, ends)` counts the latched part.
+A byte-ready capture is not a continuous bit stream. Bytes are framed exactly
+from the end of each sync, but each sync's length is only measured to within
+`SYNC_ERROR_BITS` (±3), so the reconstructed stream can slip by a few bits at
+every sync.
+
+- `capture_bits(data, positions, runs, lead=0)` turns a byte-ready capture back
+  into a bit stream. It inserts the sync ones that were never latched, so each
+  sync's run (the latched trailing ones plus the inserted ones) matches its
+  measured length. `trailing_ones(bits, ends)` counts the latched part.
+- `segments(capture)` splits a capture into sync-delimited `Segments`. It takes
+  `nybulah.nibbler.Capture` or any object with `data`, `positions`, `sync_bits`
+  and `start` (and optionally `valid_bytes` and `sync_error`), such as
+  `ByteCapture`. Segment `k` is a run of framed bytes. It starts at bit
+  `begin[k]` of the restored stream. Its sync run starts at `run[k]`, which is
+  -1 for the unmeasured sync a `start="sync"` capture began after. `content[k]`
+  is the exact number of bits from the segment start to the next sync.
+- `framed_capture(data)` reads a raw track that stores syncs as one bits, such
+  as a nibtools NIB track. These are also byte-ready captures: syncs that end on
+  a byte boundary restart framing. Their whole `0xFF` bytes are dropped, and
+  each run is kept as a sync measured to within ±8 bits (one byte). A run that
+  reaches the end of the buffer is filler.
 
 ## Revolution detection (`nybulah.analysis.cycle`)
 
-`find_cycle(bits, zone, period=None, index_aligned=False, tolerance=None, alpha=1e-3)`
-returns a `Cycle(kind, start, length, match, z)`.
+`find_cycle(x, zone=None, period=None, index_aligned=False, tolerance=None, alpha=1e-3)`
+returns a `Cycle(kind, start, length, match, z, sigma, segments)`. One API
+covers both kinds of input:
+
+- A byte-ready capture is analysed by segment. `zone` defaults to the capture's
+  density. `period` defaults to its index period, when it has one, which
+  narrows the window.
+- A 0/1 array is treated as a continuous stream, for example from flux, P64 or
+  G64. So is a capture with fewer than two syncs.
+
+Both paths start the same way:
 
 1. If sync bits make up most of the capture, it is classed `KILLER`.
-2. The candidate lags are limited to what is physically possible:
+2. Candidates are limited to what is physically possible:
    `bit_rate(zone) × period × (1 ± tolerance)`. Without a hint, `period` is
    0.2 s and the tolerance is ±5%. When the period was measured with the 1571
    index sensor, the tolerance is ±2%.
-3. One FFT autocorrelation scores every lag by its bit agreement above chance,
-   p² + (1−p)². A track is `FORMATTED` only if both of these hold:
-   - the best lag is significant at family-wise level `alpha`, using a
-     Bonferroni correction over the searched lags;
-   - most of the overlapping bits repeat.
 
-   Anything else is `UNFORMATTED`.
-4. The start is the sync before a valid sector-0 header, otherwise the longest
-   sync. When `index_aligned=True`, the start is bit 0 of the capture.
+**Segmented captures.**
 
-`extract_revolution(bits, cycle)` cuts out one revolution.
-`index_align({key: (bits, cycle)})` gives every track a start at its index pulse.
+1. Pairs of segments `(i, j)` are candidates when their distance (bits between
+   the two sync ends) can be one revolution. Since each sync is within ±`error`
+   bits, the pair's distance must be within `error × (j − i)` of the window.
+2. A shift `P = j − i` scores the bytes that agree at equal offsets, summed over
+   its pairs. Chance agreement is Σf² over the capture's byte histogram. A
+   partial first or last segment is compared over its common prefix.
+3. A shift is rejected if any pair has two checksum-valid headers with
+   different sector, track or ID. On a uniformly formatted disk, every data
+   block is identical, so a shift of one sector less than a revolution would
+   otherwise score as high as the true period.
+4. The best remaining shift must be significant at family-wise level `alpha`,
+   using a Bonferroni correction over the shifts tried. Otherwise the capture
+   is `UNFORMATTED`.
+5. `length` is the mean distance over the shift's pairs. Pairs whose own
+   agreement is significant are used when there are any. Pairs further than
+   the error bound from the median are dropped; these come from syncs missed
+   in one pass.
+6. `sigma` propagates a uniform ±`error` error per sync over the syncs that
+   the pairs span. `segments` is the period in segments. A length outside the
+   window by more than the one-sided `alpha` quantile of `sigma` is
+   `UNFORMATTED`.
+7. The start is the sync before a valid sector-0 header in any pass, otherwise
+   the longest measured sync.
+
+**Continuous streams.** One FFT autocorrelation scores every lag by its bit
+agreement above chance, p² + (1−p)². A track is `FORMATTED` only if both of
+these hold:
+
+- the best lag is significant at Bonferroni level `alpha`;
+- most of the overlapping bits repeat.
+
+The start is chosen as for segmented captures.
+
+When `index_aligned=True`, the start is bit 0 of the capture.
+
+`extract_revolution(x, cycle)` cuts out one revolution:
+
+- For a capture, it takes the exact bits between a measured sync and its next
+  pass, rotated to the start. The length can differ from `cycle.length` within
+  the sync error.
+- For a bit stream, it takes `cycle.length` bits from the start.
+
+`index_align({key: (bits, cycle)})` gives every track a start at its index
+pulse. `header_period(x, zone)` measures the revolution from headers alone,
+without content scoring. It is the shortest in-window segment shift where some
+pair of valid headers is identical and none differ. It returns the length and
+its worst-case error.
 
 Detection needs captures longer than one revolution, and the overlap is what it
-measures. Weak bits that fall inside a short overlap can make a formatted track
-look unformatted, so captures should overlap by as much as drive RAM allows.
+measures. A capture whose overlap holds no header cannot rule out the
+sector-period alias. An index-period hint narrows the window to less than one
+sector.
+
+## GCR faults (`nybulah.analysis.faults`)
+
+`gcr_faults(bits)` finds and classifies the decode failures in one sync-framed
+stream. `capture_faults(capture, cycle=None)` does the same for every segment
+of a capture. Each returns a `FAULT_DTYPE` array with the following fields:
+
+| Field | Meaning |
+|---|---|
+| `segment` | Segment the fault is in |
+| `bit` | Bit offset of the fault within the segment |
+| `width` | Width of the fault in bits |
+| `shift` | Bits lost (negative: gained) |
+| `resynced` | Decoding resumed after the fault |
+| `exact` | `shift` is measured exactly, not only modulo 5 |
+| `kind` | Classification (see below) |
+| `byte` | Offset of the fault in the capture buffer |
+
+A hidden Markov model tracks the 5-bit code phase:
+
+- A clean slot at some phase must hold a legal code.
+- A burst may hold anything, and decoding may resume after it at another phase.
+
+Viterbi training fits the model to the data. It estimates how often a
+misaligned code is legal, how often bursts start and how long they last. A
+phase change measures the shift only modulo 5. A 2-bit slip and a lost 8-bit
+byte look the same.
+
+Given a segmented `cycle`, `capture_faults` measures a fault exactly when it is
+the only one in its segment and a clean copy of the segment exists one period
+away. The two segments' exact content lengths then give the shift.
+
+`kind` is one of the following:
+
+| Kind | Meaning |
+|---|---|
+| `CORRUPT` | No shift |
+| `SLIP` | One bit, or an exact shift other than 0 or ±8 |
+| `BYTE` | Exactly ±8 bits: a byte lost or gained by the capture loop |
+| `AMBIGUOUS` | ±2 bits modulo 5 not measured exactly, or no resynchronisation |
+
+`tools/fault_report.py CAPTURE.npz...` reports the classes over archived
+captures. It also tests whether faults cluster at 256-byte buffer pages
+(Rayleigh test) or at a position within the segment (KS test).
 
 ## Formats (`nybulah.formats`)
 
@@ -76,10 +188,17 @@ look unformatted, so captures should overlap by as much as drive RAM allows.
 Conversions (`nybulah.formats.convert`), with tqdm progress:
 
 - `nib_to_g64(image, period=None, index_aligned=False)` trims each track to one
-  revolution. For NB2 it keeps the pass with the fewest sector errors, then the
+  revolution, found per segment of its `framed_capture`. For NB2 it keeps the pass with the fewest sector errors, then the
   strongest match.
 - `g64_to_d64(image)` decodes sectors and writes error bytes.
 - `d64_to_g64(image)` writes standard formatting.
 
-`nybulah.analysis.synth.simulate_capture` generates multi-revolution captures
-with a chosen start, bit noise and weak regions, for tests and tools.
+`nybulah.analysis.synth.simulate_capture` generates multi-revolution bit
+streams with a chosen start, bit noise and weak regions. `byte_capture` turns
+a stream into the `ByteCapture` that byte ready would latch, with sync lengths
+measured to within ±3 bits. Both are for tests and tools.
+
+`tests/data/hw` holds captures of a freshly formatted disk read on a 1571.
+`tests/test_corpus.py` checks periods against `header_period` on NIB and NBZ
+images, loose or zipped, loaded through `nybulah.formats.loads`. It runs only when `NYBULAH_CORPUS` names a directory, and
+`NYBULAH_CORPUS_SAMPLE` sets how many images it reads.

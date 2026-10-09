@@ -3,6 +3,7 @@
 import numpy as np
 from tqdm import tqdm
 
+from ..analysis.capture import framed_capture
 from ..analysis.cycle import TrackKind, extract_revolution, find_cycle
 from ..analysis.gcr import speed_zone, to_bits, to_bytes
 from ..analysis.sector import SectorError, decode_track, format_track
@@ -40,7 +41,7 @@ def nib_to_g64(image: Nib, period=None, index_aligned=False, progress=True):
     out = G64()
     for entry in tqdm(image.entries, desc="nib->g64", unit="trk", disable=not progress):
         passes = entry.data[None] if image.passes is None else entry.data[entry.zone]
-        reads = [to_bits(capture) for capture in passes]
+        reads = [framed_capture(capture) for capture in passes]
         reads = [(b, find_cycle(b, entry.zone, period, index_aligned)) for b in reads]
         bits, cycle = min(reads, key=lambda r, h=entry.halftrack: _score(*r, h))
         if cycle.kind != TrackKind.UNFORMATTED:

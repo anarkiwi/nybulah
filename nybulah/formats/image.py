@@ -5,11 +5,12 @@ Every format loads into a :class:`DiskImage`: per track key (halftrack, with
 """
 
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from tqdm import tqdm
 
+from ..analysis.capture import framed_capture, segments
 from ..analysis.cycle import (
     NOMINAL_PERIOD,
     Cycle,
@@ -45,7 +46,8 @@ class Capture:
 
     ``circular``: the bits are exactly one revolution. ``index``: bit offsets
     of index pulses. Flux sources keep transition times (16 MHz clocks, one
-    revolution normalised to 300 rpm) in ``flux`` and ``flux_index``.
+    revolution normalised to 300 rpm) in ``flux`` and ``flux_index``. Byte-ready
+    sources keep their sync-framed form in ``framed`` (``bits`` is its stream).
     """
 
     bits: np.ndarray
@@ -56,6 +58,7 @@ class Capture:
     flux: np.ndarray = None
     flux_index: np.ndarray = None
     strengths: np.ndarray = None
+    framed: object = None
 
     @property
     def revolutions(self):
@@ -82,6 +85,12 @@ def _one_revolution(bits):
 def revolution(capture):
     """``(bits, cycle)`` of one revolution of a capture (cycle start 0)."""
     bits = capture.bits
+    if capture.framed is not None:
+        cycle = find_cycle(capture.framed, capture.zone)
+        if cycle.kind != TrackKind.FORMATTED:
+            return bits[: cycle.length], cycle
+        rev = extract_revolution(capture.framed, cycle)
+        return rev, replace(cycle, start=0, length=len(rev))
     if capture.revolutions == 1:
         return _one_revolution(bits[capture.index[0] : capture.index[1]])
     if capture.circular or len(bits) <= lag_window(capture.zone)[0]:
@@ -213,13 +222,19 @@ def from_g64(g64):
     return image
 
 
+def framed(data, zone):
+    """Capture of a byte-ready raw track whose syncs are stored as one bits."""
+    cap = framed_capture(data)
+    return Capture(segments(cap).bits, zone, framed=cap)
+
+
 def from_nib(nib, kind="nib"):
     """NIB entries, or the header-density passes of NB2 entries."""
     image = DiskImage(kind, source=nib)
     for entry in nib.entries:
         passes = entry.data[None] if nib.passes is None else entry.data[entry.zone]
         image.tracks.setdefault(entry.halftrack, []).extend(
-            Capture(to_bits(p), entry.zone) for p in passes
+            framed(p, entry.zone) for p in passes
         )
     return image
 
