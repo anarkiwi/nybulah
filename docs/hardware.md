@@ -8,8 +8,126 @@ and cross-checks the written pattern through M-R (alias check).
 
 Each step is isolated: on any failure the host releases its IEC lines,
 pulses RESET (twice if the drive stays silent) and waits for the drive's
-status channel before moving on. Records stream as JSON lines to
+status channel with the readiness waits of [bus sessions](#bus-sessions)
+before moving on. Records stream as JSON lines to
 `artifacts/hwcheck-<timestamp>.jsonl`; the last line is the summary.
+
+## Bus sessions
+
+All multi-step hardware work goes through `nybulah bus` or one nybulah
+process (`hwcheck`, `read`, ...), never a chain of containers such as one
+`docker run ... cbmctrl` per step with `sleep`s between them. Each container
+opens and closes the adapter, a sleep only guesses when a drive is ready, and
+a killed container leaves the adapter mid-transaction.
+
+`nybulah bus` opens the adapter once and runs its steps in order:
+
+| step | does |
+|---|---|
+| `reset` | pulse RESET, wait until no drive holds CLK or DATA |
+| `wait DEV...` | wait until each drive's DOS answers its error channel |
+| `status DEV...` | read the error channel |
+| `command DEV "CMD"` | send a DOS command; done when its status reads back |
+| `dir DEV` | list the directory |
+| `identify DEV...` | model (`ramprobe.identify_model`) |
+| `detect` | model of every drive answering on 8-30 |
+
+Steps come from `--script FILE` (one a line, `#` comments) and then the
+command line. `--reset-first` starts with `reset`; the end check
+(`--no-end-check` turns it off) reads the status of every drive the script
+touched. Each step prints one JSON line (`step`, `dev`, `result`, `status`,
+`seconds`, and `files`, `model` or `devices`); a summary with every drive's
+final status ends the run, and the exit status is 1 unless all steps
+succeeded. A DOS status of 20 or more (other than 73) is a `dos-error`.
+
+Examples:
+
+```sh
+# drive check after a power cycle
+nybulah bus --reset-first "wait 8 9 10" "identify 8 9 10"
+# 1571 mode, then a directory listing
+nybulah bus 'command 8 "U0>M1"' "dir 8"
+# reset and wait on all drives
+nybulah bus reset "wait 8 9 10"
+```
+
+### Readiness
+
+- **Bus free.** During RESET and the power-on diagnostic, VIA1 port B is an
+  input and the drive's 7406 inverters assert CLK and DATA (the OpenCBM
+  xum1541 firmware, `xum1541/iec.c` `iec_reset`, sees a 1541 grab DATA 25 ms
+  after RESET). Before addressing anyone the host releases its lines and polls
+  until no device holds CLK or DATA; it never asserts ATN while one does.
+- **DOS ready.** A drive is ready once its error channel answers. A busy DOS
+  acknowledges ATN in hardware (ATNA) but serves it only from its idle loop:
+  `atnirq` only sets `atnpnd` and `idle` calls `atnsrv`, while `watjob` does
+  not (1541 `seratn.src`, `idlesf.src`, `jobssf.src`). So a status read after
+  a command returns when the command is done, and while any drive is busy
+  every ATN sequence waits for it. If the adapter gives up, ATN is gone when
+  the drive gets to `atnsrv`, which then returns to idle unaddressed
+  (`atns15`).
+- **Unknown drives.** A drive not heard from since the session began or the
+  last reset is waited for before any step addresses it.
+- **Pairing.** Status reads (`cbm_device_status`: TALK 15, read, UNTALK) and
+  commands (`cbm_exec_command`: LISTEN 15, write, UNLISTEN) are paired inside
+  libopencbm; `dir` pairs OPEN with CLOSE and TALK with UNTALK in `finally`
+  blocks. A failed step releases ATN, CLK and DATA before the next one.
+- **Retries.** A wait tries at once, then after T_AT (1 ms, the IEC ATN
+  response time), doubling, with a last try at the deadline. Each transaction
+  arms the adapter's I/O timeout (firmware v9, 100 ms ticks) with the time
+  left, so a busy or absent drive cannot block past the deadline; on expiry
+  the firmware releases the lines.
+
+### Deadlines
+
+After `reset`: the adapter's RESET hold (100 ms, `iec_reset`) plus the DOS
+power-on diagnostic, the slowest of the three models. The diagnostic is the
+same code in each ROM (1541 `dskintsf.src` in `DOS_1541_05`, 1571
+`dskintsf.src`, 1581 `dskint.src`): a zero page count test (730 880 cycles), a
+ROM checksum (2 569 cycles a page) and a RAM pattern test (15 378 cycles a
+page), counted from each loop's instruction cycles (`bus.diagnostic_cycles`):
+
+| model | ROM pages | RAM pages | clock | diagnostic |
+|---|---|---|---|---|
+| 1541 | 64 | 7 | 1 MHz | 1.003 s |
+| 1571 | 128 | 7 | at most 1 MHz | 1.167 s |
+| 1581 | 128 | 31 | 2 MHz | 0.768 s |
+
+The 1571 switches to 1 MHz after its diagnostic (`ptch29`), so 1 MHz bounds
+it. The 1541 figure fits the "about 1.2 seconds" after RESET that OpenCBM's
+`iec_reset` notes for a 1541. A 1581 with a disk then looks for a
+`COPYRIGHT CBM 86` boot file (`dskint.src` `cbmboot`, `utlodr.src`); that
+disk access is not bounded by the diagnostic, so give such a drive a longer
+`--boot-seconds`.
+
+After a DOS command: the adapter's I/O idle timeout (`XUM1541_IO_TIMEOUT_MS`,
+30 000 ms by default in the plugin), the longest a drive may go without bus
+progress (`--command-seconds`). After `UJ` or `U:` the drive reruns its
+diagnostic, so the reset deadline applies.
+
+### Failures and signals
+
+A drive that misses its deadline fails its step with a clear error and the
+script stops; `--keep-going` skips only that drive's later steps. A hung DOS
+holds its ATN acknowledge, so it blocks every other drive's transactions too:
+`--keep-going` helps with absent drives and DOS errors, and a hung drive needs
+a power cycle.
+
+SIGINT and SIGTERM stop the session after the transaction in progress returns
+(finished or timed out); the host then releases its lines and closes the
+adapter, so the next session does not find it mid-command. A transaction
+lasts at most its deadline, and the plugin allows 3 s more to unwind an
+aborted one (`XUM1541_RESET_MS`), so `docker stop` must wait longer than the
+command deadline plus 3 s: `docker run --stop-timeout 34` with the defaults.
+
+### Head safety
+
+`command` refuses, unless `--allow-dos-bump`, the DOS commands that can step
+a 1571 head to the stop ([disk.md](disk.md#dos-commands-that-move-a-1571-head-to-the-stop)):
+`N` with an ID (format), `U0` burst commands other than `U0>` utilities,
+`M-W` into the job queue (`$00-$0A`, which covers the 1541, 1571 and 1581
+queues) and commands that run drive code (`M-E`, `B-E`, `U3`-`U8`, `&`). `I`,
+`V` and directory reads are allowed; they bump only in error recovery.
 
 ## Build
 

@@ -133,10 +133,17 @@ def test_stop_after_drive_exit_releases_host(proto):
 
 
 class StuckData:
-    """A device holding DATA forever."""
+    """A device holding DATA until RESET."""
 
-    def __init__(self, bus):
-        bus.devices.append(self)
+    def __init__(self, cbm):
+        self.bus, reset = cbm.bus, cbm.reset
+        self.bus.devices.append(self)
+
+        def release():
+            self.bus.devices.remove(self)
+            reset()
+
+        cbm.reset = release
 
     @staticmethod
     def drive_lines():
@@ -146,7 +153,7 @@ class StuckData:
 def test_start_rejects_busy_bus_and_recovers():
     bus = Bus()
     cbm = SimCBM(Drive1541(device=10, bus=bus), dev=10)
-    StuckData(bus)
+    StuckData(cbm)
     with pytest.raises(BusNotIdle, match="not idle") as e:
         with Monitor(cbm, 10, "s1", timeout=0.05):
             pass
@@ -157,11 +164,11 @@ def test_recover_retries_reset():
     cbm = SimCBM(Drive1541(device=10, resets_to_boot=2), dev=10)
     Monitor(cbm, 10, "s1").start()
     assert cbm.status(10).startswith("99")
-    assert recover(cbm, 10, timeout=0.01, poll=0).startswith("73,CBM DOS V2.6")
+    assert recover(cbm, 10, timeout=0.01).startswith("73,CBM DOS V2.6")
     wedged = SimCBM(Drive1541(device=9, resets_to_boot=3), dev=9)
     Monitor(wedged, 9, "s1").start()
     with pytest.raises(DriveUnresponsive):
-        recover(wedged, 9, timeout=0.01, poll=0)
+        recover(wedged, 9, timeout=0.01)
 
 
 def test_answers():

@@ -1,5 +1,6 @@
 """Host stand-ins for the simulated drives: SimCBM (the OpenCBM API subset over the
-simulated IEC bus, xum1541 transfers) and SimMonitor (drive calls without a bus).
+simulated IEC bus, xum1541 transfers), SimMonitor (drive calls without a bus) and
+DOSBus (DOS-level drives with boot and command times, for bus scripts).
 """
 
 import numpy as np
@@ -297,3 +298,180 @@ class SimMonitor:
             raise TimeoutError(f"jsr ${addr:04x} ran past {self.budget} cycles")
         self.calls.append((addr, start, d.cycles))
         return d.mpu.a, d.mpu.x, d.mpu.y
+
+
+class DOSDrive:
+    """A drive at DOS level for bus scripts, on DOSBus's clock.
+
+    After RESET DOS is busy for boot_s, holding CLK and DATA for the first
+    held_s (the diagnostic); command_s(cmd) is how long a command keeps it busy
+    (inf: never done) and reply(cmd) the status it leaves.
+    """
+
+    def __init__(  # pylint: disable=too-many-arguments
+        self, dev, model="1541", boot_s=0.0, command_s=None, reply=None, files=()
+    ):
+        self.dev, self.model, self.boot_s = dev, model, boot_s
+        self.held_s = boot_s
+        self.command_s = command_s or (lambda cmd: 0.0)
+        self.reply = reply or (lambda cmd: "00, OK,00,00")
+        self.files = files
+        self.booting = self.busy = 0.0
+        self.status = f"73,{IDENTITY[model][2]},00,00"
+
+    def restart(self, now):
+        """RESET or UJ: rerun the diagnostic, then the power-on message."""
+        self.booting, self.busy = now + self.held_s, now + self.boot_s
+        self.status = f"73,{IDENTITY[self.model][2]},00,00"
+
+    def directory(self):
+        """The directory as DOS sends it: a BASIC program."""
+        lines = [(0, b'\x12"SIM" 00 2A')]
+        lines += [(n, f'"{f}" PRG'.encode()) for f, n in self.files]
+        lines.append((664, b"BLOCKS FREE."))
+        body = b"".join(b"\1\1" + n.to_bytes(2, "little") + t + b"\0" for n, t in lines)
+        return b"\1\4" + body + b"\0\0"
+
+
+class DOSBus:  # pylint: disable=too-many-instance-attributes
+    """OpenCBM stand-in over DOSDrives on a virtual clock (clock(), sleep()).
+
+    An ATN sequence waits until every drive's DOS is idle (a busy DOS holds the
+    hardware ATN acknowledge), bounded by the I/O timeout; ``log`` records each
+    one as (time, kind, dev, busy devices) and ``violations`` the misuse.
+    """
+
+    NO_ACK_S = 0.002
+
+    def __init__(self, drives):
+        self.drives = {d.dev: d for d in drives}
+        self.now, self.timeout = 0.0, float("inf")
+        self.host_lines = 0
+        self.addressed = None
+        self.log, self.violations = [], []
+        self.hook, self.closed = None, False
+        self._stream, self._eoi = b"", False
+
+    def clock(self):
+        """Virtual time."""
+        return self.now
+
+    def sleep(self, seconds):
+        """Advance virtual time."""
+        self.now += seconds
+
+    def close(self):
+        """Release the adapter."""
+        self.closed = True
+
+    def set_timeout(self, ms):
+        """xum1541 I/O idle timeout, in 100 ms ticks."""
+        self.timeout = -(-ms // 100) / 10 if ms else float("inf")
+        return True
+
+    def reset(self):
+        """RESET: the adapter releases its lines and every drive restarts."""
+        self.host_lines, self.addressed = 0, None
+        self.now += 0.1
+        for d in self.drives.values():
+            d.restart(self.now)
+
+    def iec_poll(self):
+        """Host lines plus CLK and DATA from any drive in its diagnostic."""
+        booting = any(d.booting > self.now for d in self.drives.values())
+        return self.host_lines | (IEC_CLOCK | IEC_DATA if booting else 0)
+
+    def iec_release(self, lines):
+        """Release host lines."""
+        self.host_lines &= ~lines
+
+    def _atn(self, kind, dev):
+        """One ATN sequence; returns dev's drive or None when absent."""
+        if self.hook:
+            self.hook(kind, dev)
+        busy = sorted(d.dev for d in self.drives.values() if d.busy > self.now)
+        self.log.append((self.now, kind, dev, busy))
+        if self.addressed or (busy and kind == "listen") or self.iec_poll():
+            self.violations.append((self.now, kind, dev, busy, self.addressed))
+        if not self.drives:
+            self.now += self.NO_ACK_S
+            raise OpenCBMError("no device acknowledged ATN")
+        ready = max(d.busy for d in self.drives.values())
+        if ready - self.now > self.timeout:
+            self.now += self.timeout
+            self.host_lines = 0
+            raise OpenCBMError("adapter I/O timeout")
+        self.now = max(self.now, ready)
+        return self.drives.get(dev)
+
+    def _listener(self, dev):
+        d = self._atn("listen", dev)
+        if d is None:
+            self.now += self.NO_ACK_S
+            raise OpenCBMError(f"device {dev} not present")
+        return d
+
+    def _talker(self, dev):
+        d = self._atn("talk", dev)
+        if d is None:
+            self.now += self.timeout
+            raise OpenCBMError(f"device {dev} never took CLK")
+        return d
+
+    def status(self, dev):
+        """TALK 15, read, UNTALK; reading resets the channel to 00, OK."""
+        try:
+            d = self._talker(dev)
+        except OpenCBMError:
+            return "99 DRIVER ERROR,01,00"
+        status, d.status = d.status, "00, OK,00,00"
+        return status
+
+    def command(self, dev, cmd):
+        """LISTEN 15, the command, UNLISTEN; DOS then runs it."""
+        d = self._listener(dev)
+        if cmd[:2] in (b"UJ", b"U:"):
+            d.restart(self.now)
+        else:
+            d.busy, d.status = self.now + d.command_s(cmd), d.reply(cmd)
+
+    def identify(self, dev):
+        """cbm_identify: M-R of the ROM footprint, which leaves 00, OK."""
+        d = self._listener(dev)
+        d.status = "00, OK,00,00"
+        code, desc, _ = IDENTITY[d.model]
+        return code, desc
+
+    def open_file(self, dev, sa, name):
+        """OPEN: LISTEN, name, UNLISTEN; "$" builds the directory."""
+        d = self._listener(dev)
+        assert sa == 0 and name == b"$"
+        d.busy = self.now + d.command_s(name)
+        self._stream = d.directory()
+
+    def close_file(self, dev, sa):
+        """CLOSE: LISTEN, CLOSE sa, UNLISTEN."""
+        assert sa == 0
+        self._listener(dev)
+
+    def talk(self, dev, sa):
+        """Address dev as talker."""
+        assert sa == 0
+        self._talker(dev)
+        self.addressed = ("talk", dev)
+
+    def untalk(self):
+        """UNTALK."""
+        self.addressed = None
+        self._atn("untalk", None)
+
+    def raw_read(self, size):
+        """Up to size bytes of the talker's stream."""
+        assert self.addressed
+        out, self._stream = self._stream[:size], self._stream[size:]
+        self._eoi = not self._stream
+        return out
+
+    def get_eoi(self):
+        """EOI on the last byte read."""
+        return self._eoi

@@ -273,6 +273,9 @@ stop):
 Power-on and reset only set phase 0 (`lccinit` 29), which pulls the head to
 the nearest phase 0 detent.
 
+`nybulah bus` refuses the commands in this list unless `--allow-dos-bump`
+([hardware.md](hardware.md#head-safety)).
+
 ## Hardware validation
 
 `nybulah hwcheck --disk` locates and calibrates the head as a read does,

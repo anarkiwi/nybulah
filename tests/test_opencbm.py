@@ -108,3 +108,27 @@ def test_xb_entry_points_and_probe():
     assert not OpenCBM(lib=PluginLib(xb_rc=-1)).supports("xb")
     bare = OpenCBM(lib=FakeLib(cbm_get_plugin_function_address=None))
     assert not bare.supports("xb")
+
+
+def test_talk_open_and_raw_read():
+    lib = FakeLib(cbm_raw_read=3, cbm_get_eoi=1)
+    cbm = OpenCBM(lib=lib)
+    cbm.open_file(8, 0, b"$")
+    cbm.talk(8, 0)
+    assert cbm.raw_read(256) == b"\0\0\0" and cbm.get_eoi()
+    cbm.untalk()
+    cbm.close_file(8, 0)
+    assert lib.calls[-6:] == [
+        "cbm_open",
+        "cbm_talk",
+        "cbm_raw_read",
+        "cbm_get_eoi",
+        "cbm_untalk",
+        "cbm_close",
+    ]
+    bad = OpenCBM(lib=FakeLib(cbm_talk=1, cbm_open=-1, cbm_raw_read=-1))
+    for fn, args in ((bad.talk, (8, 15)), (bad.open_file, (8, 0, b"$"))):
+        with pytest.raises(OpenCBMError):
+            fn(*args)
+    with pytest.raises(OpenCBMError, match="cbm_raw_read returned -1"):
+        bad.raw_read(4)

@@ -11,14 +11,15 @@ import sys
 import time
 
 from . import bench, disk, ramprobe, tool
-from .monitor import Monitor, recover, supported
+from .bus import recover
+from .monitor import Monitor, supported
 from .nibbler import Nibbler
 
 
 class Session:
     """Runs steps against one adapter and streams their records."""
 
-    def __init__(self, cbm, log, recover_timeout=3.0, archive=None):
+    def __init__(self, cbm, log, recover_timeout=None, archive=None):
         self.cbm, self.log, self.recover_timeout = cbm, log, recover_timeout
         self.archive = archive
         self.records = []
@@ -170,7 +171,11 @@ def add_arguments(ap):
     ap.add_argument("--size", type=int, default=8192)
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("artifacts"))
-    ap.add_argument("--recover-timeout", type=float, default=3.0)
+    ap.add_argument(
+        "--recover-timeout",
+        type=float,
+        help="readiness deadline after RESET (default: the DOS diagnostic)",
+    )
     ap.add_argument(
         "--disk", action="store_true", help="read one track per zone (no writes)"
     )
