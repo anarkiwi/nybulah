@@ -148,3 +148,28 @@ def test_header_period_matches_cycle():
     blank = ByteCapture(np.full(9000, 0x55, np.uint8), [10, 4000], [40, 40], "now")
     assert header_period(blank, 3) is None
     assert header_period(ByteCapture(np.zeros(9, np.uint8), [], []), 3) is None
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_density_label_does_not_bound_the_period(seed):
+    """Zone 0 content labelled zone 2: headers repeat, so all zones' windows are searched."""
+    bits = _track(35, seed=seed)
+    cap = _capture(bits, seed)
+    assert not lag_window(2)[0] <= len(bits) <= lag_window(2)[1]
+    _assert_period(find_cycle(cap, 2), bits, 35)
+    noise = gcr.encode_bits(np.random.default_rng(seed).integers(0, 256, 5000))
+    assert find_cycle(_capture(noise, seed, "now"), 2).kind == TrackKind.UNFORMATTED
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_identical_duplicate_header_keeps_true_period(seed):
+    """A sector written twice, identically, within one revolution."""
+    track, n = 1, 19
+    payload = np.random.default_rng(seed).integers(0, 256, (n, 256), np.uint8)
+    raw = format_track(track, payload, b"ID", capacity=gcr.track_capacity(3))
+    sector = len(raw) // n
+    raw[(n - 1) * sector : n * sector] = raw[3 * sector : 4 * sector]
+    bits = gcr.to_bits(raw)
+    cycle = find_cycle(_capture(bits, seed), 3)
+    assert cycle.kind == TrackKind.FORMATTED and cycle.segments == 2 * n
+    assert abs(cycle.length - len(bits)) <= 3 * cycle.segments

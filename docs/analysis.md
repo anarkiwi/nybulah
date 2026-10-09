@@ -103,6 +103,10 @@ Both paths start the same way:
    `UNFORMATTED`.
 7. The start is the sync before a valid sector-0 header in any pass, otherwise
    the longest measured sync.
+8. If the capture is `UNFORMATTED` but some valid header occurs twice, steps
+   1–6 are repeated over the union of all four zones' windows
+   (`any_zone_window`), with Bonferroni over that union. An image's density
+   label need not be the rate its capture was read at.
 
 **Continuous streams.** One FFT autocorrelation scores every lag by its bit
 agreement above chance, p² + (1−p)². A track is `FORMATTED` only if both of
@@ -188,8 +192,10 @@ captures. It also tests whether faults cluster at 256-byte buffer pages
 Conversions (`nybulah.formats.convert`), with tqdm progress:
 
 - `nib_to_g64(image, period=None, index_aligned=False)` trims each track to one
-  revolution, found per segment of its `framed_capture`. For NB2 it keeps the pass with the fewest sector errors, then the
-  strongest match.
+  revolution, found per segment of its `framed_capture`. For NB2 it keeps the
+  pass with the fewest sector errors, then the strongest match. Every track is
+  written. An unformatted track is kept as its capture cut to the nominal
+  length, and its halftrack is appended to the optional `unformatted` list.
 - `g64_to_d64(image)` decodes sectors and writes error bytes.
 - `d64_to_g64(image)` writes standard formatting.
 
