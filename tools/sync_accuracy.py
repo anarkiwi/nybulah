@@ -15,7 +15,8 @@ from tqdm import tqdm
 
 from nybulah.analysis.gcr import bits_per_revolution
 from nybulah.nibbler import Nibbler
-from nybulah.simdisk import Media, SimMonitor, disk_drive, log_bytes, sync_track
+from nybulah.simdisk import Media, disk_drive, log_bytes, sync_track
+from nybulah.simhost import SimMonitor
 from nybulah.simdisk import true_syncs
 
 RUNS = list(range(10, 21)) + [24, 28, 32, 40, 48, 64, 80, 100, 128, 200, 255, 256]

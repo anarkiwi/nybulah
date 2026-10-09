@@ -3,7 +3,8 @@ import json
 import pytest
 
 from nybulah import bench, cli, opencbm
-from nybulah.sim import Drive1541, Drive1571, SimCBM
+from nybulah.sim import Drive1541, Drive1571
+from nybulah.simhost import SimCBM
 
 
 def tracked(drive):
@@ -69,7 +70,8 @@ def disk_cli(monkeypatch, model, media=None, dev=10):
 
     from nybulah import diskcmd
     from nybulah.nibbler import Nibbler
-    from nybulah.simdisk import Media, SimMonitor, disk_drive
+    from nybulah.simdisk import Media, disk_drive
+    from nybulah.simhost import SimMonitor
 
     drive = disk_drive(model, media if media is not None else Media(), dev)
     monkeypatch.setattr(

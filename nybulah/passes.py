@@ -8,6 +8,7 @@ in the byte interval across it. Cycle constants mirror drive/track.s.
 import dataclasses
 from statistics import NormalDist
 
+import numba
 import numpy as np
 
 from .analysis.capture import trailing_ones
@@ -130,6 +131,18 @@ def capable(data):
     return ok, ones
 
 
+@numba.njit(cache=True)
+def agreements(data, lo, hi):
+    """Per lag in lo..hi: how many bytes equal the byte that many later."""
+    out = np.zeros(hi - lo + 1, np.int64)
+    for lag in range(lo, hi + 1):
+        n = 0
+        for i in range(len(data) - lag):
+            n += data[i] == data[i + lag]
+        out[lag - lo] = n
+    return out
+
+
 def byte_period(data, cells, alpha=1e-3):
     """Bytes per revolution of a byte stream, or None without significant repetition.
 
@@ -143,11 +156,7 @@ def byte_period(data, cells, alpha=1e-3):
     if lo > hi:
         return None
     lags = np.arange(lo, hi + 1)
-    onehot = np.zeros((256, len(data)))
-    onehot[data, np.arange(len(data))] = 1.0
-    nfft = 1 << (2 * len(data) - 1).bit_length()
-    spec = np.fft.rfft(onehot, nfft)
-    agree = np.fft.irfft((spec * np.conj(spec)).sum(axis=0), nfft)[lags].round()
+    agree = agreements(data, lo, hi)
     freq = np.bincount(data, minlength=256) / len(data)
     chance = float((freq**2).sum())
     overlap = len(data) - lags

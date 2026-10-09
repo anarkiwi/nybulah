@@ -2,8 +2,10 @@ import numpy as np
 import pytest
 
 from nybulah.formats import D64, d64_to_g64
+from nybulah import simfast
 from nybulah.nibbler import Nibbler
-from nybulah.simdisk import Media, SimMonitor, disk_drive
+from nybulah.simdisk import Media, disk_drive
+from nybulah.simhost import SimMonitor
 
 
 def random_d64(seed=1, tracks=35):
@@ -24,6 +26,12 @@ def rig(model="1541", media=None, **kw):
         sleep=lambda s: None,
     )
     return drive, nib.open()
+
+
+@pytest.fixture(name="compiled_simulator", scope="session", autouse=True)
+def compiled_simulator_fixture():
+    """Compile the drive simulator before any test times a bus wait."""
+    simfast.warm()
 
 
 @pytest.fixture(name="image", scope="session")

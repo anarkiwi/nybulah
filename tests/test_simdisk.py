@@ -3,7 +3,8 @@ import pytest
 
 from nybulah.formats import G64, G64Track
 from nybulah.sim import SimIOWrite
-from nybulah.simdisk import HT_MAX, HT_STOP, Media, SimMonitor, disk_drive
+from nybulah.simdisk import HT_MAX, HT_STOP, Media, disk_drive
+from nybulah.simhost import SimMonitor
 
 
 def test_stepper_stops_on_the_detent_of_its_phase():

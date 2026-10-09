@@ -1,7 +1,8 @@
 import json
 
 from nybulah import hwcheck
-from nybulah.sim import Bus, Drive1541, Drive1571, SimCBM
+from nybulah.sim import Bus, Drive1541, Drive1571
+from nybulah.simhost import SimCBM
 
 
 def two_drives():
@@ -74,7 +75,8 @@ def test_disk_survey_step(tmp_path, monkeypatch):
 
     from nybulah.formats import D64, d64_to_g64
     from nybulah.nibbler import Nibbler
-    from nybulah.simdisk import Media, SimMonitor, disk_drive
+    from nybulah.simdisk import Media, disk_drive
+    from nybulah.simhost import SimMonitor
 
     image = D64(np.zeros((683, 256), np.uint8))
     drive = disk_drive("1541", Media.from_g64(d64_to_g64(image, progress=False)), 10)

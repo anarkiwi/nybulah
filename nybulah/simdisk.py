@@ -335,34 +335,3 @@ def disk_drive(model, media, device=8, **kw):
     mech = Mechanism(drive, media, **kw)
     drive.write(DOS_TRACK, mech.halftrack // 2)
     return drive
-
-
-class SimMonitor:
-    """Monitor stand-in that runs drive code directly, without a bus transport.
-
-    ``calls`` records ``(address, first cycle, last cycle)`` of every jsr.
-    """
-
-    def __init__(self, drive, budget=50_000_000):
-        self.drive, self.budget = drive, budget
-        self.calls = []
-
-    def read(self, addr, size):
-        """Read drive memory."""
-        return self.drive.dump(addr, size)
-
-    def write(self, addr, data):
-        """Write drive memory."""
-        self.drive.load(addr, bytes(data))
-
-    def jsr(self, addr):
-        """Run a subroutine to its rts; return (A, X, Y)."""
-        d = self.drive
-        d.call(addr)
-        start = d.cycles
-        while not d.halted:
-            d.step()
-            if d.cycles - start > self.budget:
-                raise TimeoutError(f"jsr ${addr:04x} ran past {self.budget} cycles")
-        self.calls.append((addr, start, d.cycles))
-        return d.mpu.a, d.mpu.x, d.mpu.y

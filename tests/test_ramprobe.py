@@ -4,7 +4,8 @@ import pytest
 
 from nybulah import ramprobe
 from nybulah.opencbm import OpenCBMError
-from nybulah.sim import Drive1541, Drive1571, SimCBM
+from nybulah.sim import Drive1541, Drive1571
+from nybulah.simhost import SimCBM
 
 
 def probed(drive, **kw):

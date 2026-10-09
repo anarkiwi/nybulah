@@ -3,8 +3,11 @@
 py65 6502 with the model's address decoding, VIA1 port B on an open-collector bus with
 ATN auto-acknowledge, and VIA1 timers 1 and 2 clocked by the CPU cycle counter. VIA2 and
 the 1571's WD1770 are served by an attached disk mechanism (nybulah.simdisk) when there is
-one. Writes to other I/O raise SimIOWrite; SimCBM mirrors the OpenCBM API subset.
+one. Writes to other I/O raise SimIOWrite. nybulah.simfast runs drives compiled unless
+NYBULAH_SIM=py65 (or drive.fast is False); nybulah.simhost holds the host stand-ins.
 """
+
+import os
 
 import numpy as np
 from py65.devices.mpu6502 import MPU
@@ -23,10 +26,6 @@ RETURN_TRAP = 0xFFF0
 RAM, ROM, VIA1, OPEN, IO, VIA2, FDC = range(7)
 ACR_T1_FREERUN, IRQ_T1, IRQ_T2 = 0x40, 0x40, 0x20
 IO_ACCESS_CYCLE = 3
-IDENTITY = {
-    "1541": (0, "1541", "CBM DOS V2.6 1541"),
-    "1571": (2, "1571", "CBM DOS V3.0 1571"),
-}
 
 
 class SimTimeout(OpenCBMError):
@@ -214,6 +213,7 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         self.cycles = 0
         self.resets_to_boot, self._pending = resets_to_boot, 0
         self.mech = None
+        self.fast = os.environ.get("NYBULAH_SIM") != "py65"
 
     @property
     def responsive(self):
@@ -332,215 +332,3 @@ class _Memory(list):
 
     def __setitem__(self, addr, value):
         self.drive.write(addr, value)
-
-
-class SimCBM:
-    """OpenCBM stand-in driving simulated drives sharing one bus.
-
-    gap idles the drives that many cycles before each protocol byte;
-    unplug() makes the host vanish part way into a chosen byte.
-    """
-
-    def __init__(self, drive=None, dev=8, budget=2_000_000):
-        self.drive = drive or Drive1541(device=dev)
-        self.bus = self.drive.bus
-        self.drives = {dev: self.drive}
-        self.dev = dev
-        self.budget = budget
-        self.gap = 0
-        self._cut = None
-
-    def attach(self, dev, drive):
-        """Add another drive on the same bus."""
-        assert drive.bus is self.bus
-        self.drives[dev] = drive
-
-    def close(self):
-        """No-op for API compatibility."""
-
-    def _answering(self, dev, grace=10_000):
-        """Drive dev if DOS answers within grace cycles (a bus command's duration)."""
-        d = self.drives.get(dev)
-        t = 0
-        while d is not None and t < grace and not d.halted:
-            t += d.step()
-        return d if d is not None and d.responsive else None
-
-    def _dos(self, dev):
-        d = self._answering(dev)
-        if d is None:
-            raise OpenCBMError(f"device {dev} not responding")
-        return d
-
-    def _step(self):
-        n = max(d.step() for d in self.drives.values())
-        if not n:
-            raise SimTimeout("drive halted while host was waiting")
-        return n
-
-    def _run_until(self, cond):
-        t = 0
-        while not cond():
-            t += self._step()
-            if t > self.budget:
-                raise SimTimeout("cycle budget exceeded")
-
-    def settle(self):
-        """Run the drives until their programs return."""
-        self._run_until(lambda: all(d.halted for d in self.drives.values()))
-
-    def idle(self, cycles):
-        """Let running drives execute for about cycles without host activity."""
-        t = 0
-        while t < cycles and not all(d.halted for d in self.drives.values()):
-            t += self._step()
-
-    def unplug(self, after_bytes, edges=3):
-        """Freeze the host after edges line changes into protocol byte after_bytes."""
-        self._cut = [after_bytes, edges, False]
-
-    def _byte(self):
-        if self.gap:
-            self.idle(self.gap)
-        if self._cut and not self._cut[2]:
-            self._cut[2] = self._cut[0] == 0
-            self._cut[0] -= 1
-
-    def _edge(self):
-        if self._cut and self._cut[2]:
-            if self._cut[1] == 0:
-                self._cut = None
-                raise HostGone("adapter vanished")
-            self._cut[1] -= 1
-
-    def _asserted(self, line):
-        return bool(self.bus.lines() & line)
-
-    def identify(self, dev):
-        """cbm_identify: (device type code, description)."""
-        code, desc, _ = IDENTITY[self._dos(dev).MODEL]
-        return code, desc
-
-    def status(self, dev):
-        """Error channel; OpenCBM reports a silent drive as 99, DRIVER ERROR."""
-        d = self._answering(dev)
-        if d is None:
-            return "99, DRIVER ERROR,00,00"
-        return f"73,{IDENTITY[d.MODEL][2]},00,00"
-
-    def reset(self):
-        """Pulse RESET; the adapter releases its lines."""
-        self.bus.host_lines = 0
-        for d in self.drives.values():
-            d.reset()
-
-    def upload(self, dev, addr, data):
-        """M-W."""
-        self._dos(dev).load(addr, data)
-
-    def download(self, dev, addr, size):
-        """M-R."""
-        return self._dos(dev).dump(addr, size)
-
-    def command(self, dev, cmd):
-        """Only M-E is modelled; like the xum1541, the host keeps CLK afterwards."""
-        assert cmd[:3] == b"M-E"
-        self._dos(dev).call(cmd[3] | cmd[4] << 8)
-        self.bus.host_lines |= IEC_CLOCK
-
-    def iec_poll(self):
-        """Current bus state, after letting the drives run briefly."""
-        for _ in range(16):
-            for d in self.drives.values():
-                d.step()
-        return self.bus.lines()
-
-    def iec_set(self, lines):
-        """Assert host lines."""
-        self._edge()
-        self.bus.host_lines |= lines
-
-    def iec_release(self, lines):
-        """Release host lines."""
-        self._edge()
-        self.bus.host_lines &= ~lines
-
-    def iec_wait(self, line, state):
-        """Run the drive until line is asserted (state=1) or released (state=0)."""
-        self._run_until(lambda: self._asserted(line) == bool(state))
-        return self.iec_poll()
-
-    def _wait(self, line, state):
-        self._run_until(lambda: self._asserted(line) == state)
-
-    def _put(self, line, state):
-        (self.iec_set if state else self.iec_release)(line)
-
-    def s1_read(self, size):
-        """xum1541 s1_read_byte, size times."""
-        out = bytearray()
-        for _ in range(size):
-            self._byte()
-            c = 0
-            for _ in range(8):
-                self._wait(IEC_DATA, False)
-                self.iec_release(IEC_CLOCK)
-                b = self._asserted(IEC_CLOCK)
-                c = c >> 1 | (0x80 if b else 0)
-                self.iec_set(IEC_DATA)
-                self._wait(IEC_CLOCK, not b)
-                self.iec_release(IEC_DATA)
-                self._wait(IEC_DATA, True)
-                self.iec_set(IEC_CLOCK)
-            out.append(c)
-        return bytes(out)
-
-    def s1_write(self, data):
-        """xum1541 s1_write_byte for each byte."""
-        for c in bytes(data):
-            self._byte()
-            for _ in range(8):
-                bit = c & 0x80
-                self._put(IEC_DATA, bit)
-                self.iec_release(IEC_CLOCK)
-                self._wait(IEC_CLOCK, True)
-                self._put(IEC_DATA, not bit)
-                self._wait(IEC_CLOCK, False)
-                self.iec_set(IEC_CLOCK)
-                self.iec_release(IEC_DATA)
-                self._wait(IEC_DATA, True)
-                c = c << 1 & 0xFF
-
-    def _sample(self):
-        return 0x80 if self._asserted(IEC_DATA) else 0
-
-    def s2_read(self, size):
-        """xum1541 s2_read_byte, size times."""
-        out = bytearray()
-        for _ in range(size):
-            self._byte()
-            c = 0
-            for _ in range(4):
-                self._wait(IEC_CLOCK, True)
-                c = c >> 1 | self._sample()
-                self.iec_release(IEC_ATN)
-                self._wait(IEC_CLOCK, False)
-                c = c >> 1 | self._sample()
-                self.iec_set(IEC_ATN)
-            out.append(c)
-        return bytes(out)
-
-    def s2_write(self, data):
-        """xum1541 s2_write_byte for each byte."""
-        for c in bytes(data):
-            self._byte()
-            for _ in range(4):
-                self._put(IEC_DATA, c & 1)
-                c >>= 1
-                self.iec_release(IEC_ATN)
-                self._wait(IEC_CLOCK, False)
-                self._put(IEC_DATA, c & 1)
-                c >>= 1
-                self.iec_set(IEC_ATN)
-                self._wait(IEC_CLOCK, True)
-            self.iec_release(IEC_DATA)

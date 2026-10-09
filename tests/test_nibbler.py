@@ -222,7 +222,8 @@ def test_timer_helpers():
 @pytest.mark.parametrize("proto", ["s1", "s3"])
 def test_capture_through_monitor_transport(g64, image, proto):
     from nybulah.monitor import Monitor
-    from nybulah.sim import Drive1541, SimCBM
+    from nybulah.sim import Drive1541
+    from nybulah.simhost import SimCBM
     from nybulah.simdisk import Mechanism
     from nybulah.simx import make
 

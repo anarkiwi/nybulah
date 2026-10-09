@@ -210,3 +210,13 @@ def test_anchor_choice():
     assert passes.choose_anchor(flat, cell, None) is None
     assert passes.unmeasured_after_anchor(cell_cycles(0)) >= 1
     assert not passes.capable(to_bits(np.zeros(1, np.uint8))[:1])[0].any()
+
+
+def test_agreements_count_equal_bytes_per_lag():
+    data = np.array([1, 2, 1, 2, 1, 3], np.uint8)
+    want = [
+        sum(data[i] == data[i + lag] for i in range(len(data) - lag))
+        for lag in (1, 2, 3)
+    ]
+    for fn in (passes.agreements, passes.agreements.py_func):
+        assert fn(data, 1, 3).tolist() == want == [0, 3, 0]
