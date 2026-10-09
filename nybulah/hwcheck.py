@@ -4,14 +4,13 @@ Every step is isolated: a failure is logged, the drive is recovered and the
 session moves on. Records stream as JSON lines; a summary closes the log.
 """
 
-import argparse
-import contextlib
 import json
 import os
 import pathlib
+import sys
 import time
 
-from . import bench, ramprobe
+from . import bench, ramprobe, tool
 from .monitor import protocols, recover
 
 
@@ -104,9 +103,8 @@ def summarize(records):
     return out
 
 
-def main(argv=None, cbm=None):
-    """CLI entry point."""
-    ap = argparse.ArgumentParser(description=__doc__)
+def add_arguments(ap):
+    """Command line options."""
     ap.add_argument("--devs", type=int, nargs="+", default=[8, 10])
     ap.add_argument("--s2", action="store_true", help="bench S2 instead of S1")
     ap.add_argument("--proto", action="append", default=[], help="extra protocol")
@@ -114,21 +112,25 @@ def main(argv=None, cbm=None):
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("artifacts"))
     ap.add_argument("--recover-timeout", type=float, default=3.0)
-    args = ap.parse_args(argv)
+
+
+def execute(args, cbm):
+    """Run the session; return the summary."""
     protos = ["s2" if args.s2 else "s1"] + args.proto
     args.out.mkdir(parents=True, exist_ok=True)
     path = args.out / f"hwcheck-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
-    if cbm is None:
-        from .opencbm import OpenCBM
-
-        cbm = OpenCBM()
-    with contextlib.closing(cbm), path.open("w") as log:
+    with path.open("w") as log:
         session = Session(cbm, log, args.recover_timeout)
         for dev in args.devs:
             check_dev(session, dev, protos, args.size, args.reps)
         summary = summarize(session.records)
         session.emit({"summary": summary, "log": str(path)})
     return summary
+
+
+def main(argv=None, cbm=None):
+    """CLI entry point."""
+    return tool.standalone(sys.modules[__name__], argv, cbm)
 
 
 if __name__ == "__main__":

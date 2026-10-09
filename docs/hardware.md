@@ -21,8 +21,7 @@ mkdir -p artifacts
 ## S1, both drives powered
 
 ```sh
-docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" \
-  --entrypoint python3 nybulah -m nybulah.hwcheck --devs 8 10
+docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 8 10
 ```
 
 ## S2, one drive powered
@@ -30,11 +29,11 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" \
 S2 strobes ATN, so every other drive must be switched off:
 
 ```sh
-docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" \
-  --entrypoint python3 nybulah -m nybulah.hwcheck --devs 10 --s2
+docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 10 --s2
 ```
 
-`--proto s3` adds the firmware-assisted protocol once both
+The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
+its other subcommands (`nybulah <command> --help`). `--proto s3` adds the firmware-assisted protocol once both
 `drive/proto_x.inc` and the adapter plugin provide it; otherwise the step is
 recorded as skipped.
 

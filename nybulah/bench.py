@@ -1,16 +1,16 @@
 """Measure host<->drive transfer rates for the available transports."""
 
-import argparse
+import functools
 import json
 import os
+import sys
 import time
 
 import numpy as np
-
 from tqdm import tqdm
 
+from . import tool
 from .monitor import Monitor, protocols
-from .opencbm import OpenCBM
 
 
 def _rate(fn, size, reps, desc):
@@ -40,22 +40,25 @@ def run(cbm, dev, addr, size, reps, protocol="s1", pattern=None):
     return out
 
 
-def main(argv=None):
-    """CLI entry point."""
-    ap = argparse.ArgumentParser(description=__doc__)
+def add_arguments(ap):
+    """Command line options."""
     ap.add_argument("--dev", type=int, default=8)
-    ap.add_argument("--addr", type=lambda s: int(s, 0), default=0x8000)
+    ap.add_argument("--addr", type=functools.partial(int, base=0), default=0x8000)
     ap.add_argument("--size", type=int, default=0x2000)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--protocol", choices=protocols(), default="s1")
-    args = ap.parse_args(argv)
-    with OpenCBM() as cbm:
-        print(
-            json.dumps(
-                run(cbm, args.dev, args.addr, args.size, args.reps, args.protocol),
-                indent=1,
-            )
-        )
+
+
+def execute(args, cbm):
+    """Benchmark and print the rates as JSON."""
+    out = run(cbm, args.dev, args.addr, args.size, args.reps, args.protocol)
+    print(json.dumps(out, indent=1))
+    return out
+
+
+def main(argv=None, cbm=None):
+    """CLI entry point."""
+    return tool.standalone(sys.modules[__name__], argv, cbm)
 
 
 if __name__ == "__main__":

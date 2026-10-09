@@ -5,12 +5,14 @@ decoding to I/O for the model are never written. Reading every marker back
 after all writes exposes RAM, aliasing between blocks and onto base RAM.
 """
 
-import argparse
 import functools
 import json
+import sys
 
 import numpy as np
 from tqdm import tqdm
+
+from . import tool
 
 BASE_RAM = 0x0800
 
@@ -133,26 +135,26 @@ def verify(cbm, dev, addr, data, stride=0x400, sample=16):
     return {"checked": -(-len(data) // stride), "mismatched": bad}
 
 
-def main(argv=None, cbm=None):
-    """CLI entry point."""
+def add_arguments(ap):
+    """Command line options."""
     num = functools.partial(int, base=0)
-    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dev", type=int, default=8)
     ap.add_argument("--model", choices=("1541", "1571"))
     ap.add_argument("--start", type=num, default=BASE_RAM)
     ap.add_argument("--end", type=num, default=0x10000)
     ap.add_argument("--block", type=num, default=0x400)
-    args = ap.parse_args(argv)
-    if cbm is None:
-        from .opencbm import OpenCBM
 
-        cbm = OpenCBM()
-    try:
-        out = probe(cbm, args.dev, args.model, args.start, args.end, args.block)
-    finally:
-        cbm.close()
+
+def execute(args, cbm):
+    """Probe and print the map as JSON."""
+    out = probe(cbm, args.dev, args.model, args.start, args.end, args.block)
     print(json.dumps(out))
     return out
+
+
+def main(argv=None, cbm=None):
+    """CLI entry point."""
+    return tool.standalone(sys.modules[__name__], argv, cbm)
 
 
 if __name__ == "__main__":
