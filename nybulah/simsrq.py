@@ -17,7 +17,8 @@ from .simx import SimX, TimedBus, TimedDrive1571, XError
 SRQ_U = 2  # cycles per CNT phase: timer A latch 1
 SRQ_LAST = 15 * SRQ_U  # first fall of a byte to its last rise
 SRQ_GMIN, SRQ_GMAX = 7, 14  # drive: last rise to the next byte's first fall
-SRQ_SEND = 38  # drive cycles per sent byte
+CIA_FLAG_MAX = 39  # latest ICR flag after an SDR write on a 1571: 45 cycles/byte at v11
+SRQ_SEND = CIA_FLAG_MAX + 1  # drive cycles per sent byte (proto_srq.inc SR_PERIOD)
 SRQ_RLOOP = 39  # drive receive loop: cycles between ICR polls once behind
 SRQ_POLL = 5  # adapter clocks per in-burst SRQ poll
 SRQ_ENCODE = 3  # adapter clocks to build a bit's port value

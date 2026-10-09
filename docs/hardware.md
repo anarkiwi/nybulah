@@ -72,6 +72,24 @@ docker run --rm --device=/dev/bus/usb nybulah bench --dev 8 --protocol s4 --size
 for `errors` 0 and `rejects` (block retries) 0. To probe the USB bank
 boundaries, repeat with `--size` 31, 32, 33, 63, 64, 65.
 
+### s4 timing probes
+
+`tools/xprobe.py` is not installed in the image; mount it. `--cia` runs
+`drive/ciaprobe.s` under s3 (its SRQ pulses would confuse an s4 reply) and
+prints, per timer phase, the first cycle after an SDR write at which ICR
+shows the byte done (`first`) and the full hit table; s4's send period must
+exceed both (protocol.md, 1571 SRQ). `--sweep` times reads of 64..8192 bytes
+on the host clock and fits per-byte and per-block costs:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 8 --cia
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 8 --protocol s4 --base 0x6000 --sweep
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/xprobe.py --dev 8 --protocol s4 --base 0x6000 --sweep --fast
+```
+
+Expected: `first` between 33 and 39 for both phases; `per_byte_us` near
+42.8 (1 MHz) and 21.5 (2 MHz), `per_block_us` near 840.
+
 ## Disk survey (read-only)
 
 With a formatted disk in each drive, `--disk` adds one read-only step per
@@ -171,7 +189,7 @@ no checksum retries; s4 also at 1–4096 bytes across the USB bank boundaries:
 | X read / write | v9 | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
 | burst X read / write | v10 | 14263 / 18158 | 14271 / 18153 | 28300 / 35877 |
 | s4 read / write | v11 | | 20960 / 22258 | 41460 / 37053 |
-| s4 read / write, simulated | v11 | | 24600 / 22400 | 49300 / 37700 |
+| s4 read / write, simulated | v11 | | 23600 / 22400 | 47200 / 37700 |
 
 `nybulah bench --protocol s3 --fast` (or s4) runs a 1571 at 2 MHz for the
 transfer (VIA1 PA5) and returns it to 1 MHz before handing back to DOS; an s4

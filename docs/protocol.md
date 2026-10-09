@@ -310,16 +310,24 @@ reads ICR so DOS sees no stale serial byte.
 | step | drive | adapter |
 |---|---|---|
 | go | output mode (PA1, then CRA bit 6); polls CLK | asserts CLK with interrupts masked |
-| byte 0 | writes SDR; CNT falls at the next underflow | sees SRQ released then asserted (6-clock poll, slices, grace as X), releases CLK |
-| byte i | writes SDR 6 cycles after the ICR poll that sees byte i-1 out | first poll for SRQ high, then low (5 clocks each), bounded |
-| end | waits for the last byte, input mode before the reply | |
+| byte 0 | writes SDR; CNT falls at the next underflow plus the 6526's start delay | sees SRQ released then asserted (6-clock poll, slices, grace as X), releases CLK |
+| byte i | writes SDR 40 cycles (`SR_PERIOD`) after byte i-1, open loop | first poll for SRQ high, then low (5 clocks each), bounded |
+| end | clears ICR 4 cycles after the last write, waits for its flag, input mode before the reply | |
 
-The drive's first ICR poll comes 32 cycles after each SDR write, the latest
-possible end of a byte (start at most 2 cycles after the write, 30 to the 8th
-rise), so a byte follows the previous one's last rise by 7..14 cycles plus up
-to 2 for the next underflow: 38 cycles per byte with no CIA start delay. The
-adapter times every byte from its own first fall, so drift and the CIA's
-unspecified start pipeline do not accumulate.
+A byte written to SDR before the shifter has finished follows the previous
+one without a gap, which the adapter cannot frame, so the period must exceed
+the time F from a write to the end of its byte. The 6526 datasheet does not
+give F; the CIA model puts it at 31 + d cycles (an underflow, the start delay
+d, 30 to the 8th rise) and the hardware bounds it: v11 polled ICR first at
+t=32 and then every 7 cycles, and its measured rates (below) match exactly
+45 cycles per byte, the second poll (52, the third, would give 36.8 KB/s at
+2 MHz). So 32 < F <= 39 on a 1571, and `SR_PERIOD` = 40. With an even period
+every byte starts on the same timer phase, so the gap from a byte's last rise
+to the next first fall is `SR_PERIOD` - 30 = 10 cycles whatever d is, inside
+the adapter's [7, 14]. The adapter times every byte from its own first fall,
+so drift does not accumulate. `drive/ciaprobe.s` measures F to the cycle per
+timer phase (`tools/xprobe.py --cia`); `tests/test_proto_srq.py` runs every
+d the bound allows and shows the next d failing the block check.
 
 Adapter clocks from the detecting poll (`SRQ_SAMPLE`, `SRQ_START`,
 `SRQ_POLLS`):
@@ -374,9 +382,40 @@ error and the bytes so far, lines released.
 
 | path | cycles/byte | 1 MHz | 2 MHz | burst X measured (v10) |
 |---|---|---|---|---|
-| s4 read (38 + per burst) | 40.5 | 24.6 KB/s | 49.3 KB/s | 14.3 / 28.3 KB/s |
+| s4 read (40 + per burst) | 42.4 | 23.6 KB/s | 47.2 KB/s | 14.3 / 28.3 KB/s |
 | s4 write (bit timing or drive loop) | 44.6 / 53 | 22.4 KB/s | 37.7 KB/s | 18.2 / 35.9 KB/s |
 
-Co-simulation of 8 KiB blocks, drive-bound as for burst X. Reads gain 1.7x;
-writes are bounded by the line release budget (2R per bit) at 2 MHz and gain
-little there.
+Co-simulation of 8 KiB blocks, drive-bound as for burst X (`tools/srq_rate.py`
+prints the read column per CIA start delay). Writes are bounded by the line
+release budget (2R per bit) at 2 MHz and gain little there.
+
+### Read time on the host clock
+
+A checked block of N bytes takes C + N t on the host: t is the drive's period
+plus its per-burst overhead plus the adapter's per-burst wait, C the command
+burst, the reply and their USB round trips. The v11 drive polled ICR as
+described above; with F > 32 every byte took 45 cycles plus 2.3 per byte of
+burst overhead, 47.34 cycles, which the co-simulation reproduces for every
+start delay from 2 to 7 cycles (`tools/srq_rate.py`). Against the v11
+measurements at 2 MHz (128, 256 and 8192-byte blocks; 4096 was a single
+timing):
+
+| term | value | source |
+|---|---|---|
+| drive per byte | 23.67 us (47.34 cycles) | co-simulation, d in 2..7 |
+| adapter per burst | 22 us (0.35 us/byte) | least-squares slope 24.02 us/byte minus the drive term |
+| per block | 0.84 ms | least-squares intercept |
+| 8 KiB at 2 MHz | 24.12 us/byte, 41.5 KB/s | measured 41.46 KB/s |
+| 8 KiB at 1 MHz | 47.86 us/byte, 20.9 KB/s | measured 20.96 KB/s |
+
+Of the 49.3 vs 41.5 KB/s gap (3.87 us per byte), the missed first poll was
+3.42 us (88 %), fixed by the open-loop period; the adapter's per-burst wait
+(0.35 us, 9 %) (before a
+burst both IN banks must be empty, so the burst's second 32-byte packet,
+about 30 us of full-speed bus time, has to reach the host first, partly
+overlapping the adapter's turnaround) and the per-block round trips (0.10 us,
+3 %) remain.
+The same terms predict 46.2 KB/s at 2 MHz and 23.3 KB/s at 1 MHz for the
+fixed loop. `tools/xprobe.py --sweep` measures t and C on the host clock;
+`bench.sweep` fitted to the adapter's clock in co-simulation gives the
+drive-bound t (`test_sweep_fits_the_drive_bound_rate`).
