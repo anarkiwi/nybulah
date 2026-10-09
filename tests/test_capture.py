@@ -58,7 +58,7 @@ def test_sync_lengths_within_proved_bound(sync_capture):
     assert (lo <= runs).all() and ((hi < 0) | (runs <= hi)).all()
     assert (np.abs(cap.sync_bits - runs) <= 1).all()
     assert np.mean(cap.sync_bits == runs) > 0.5
-    assert set(runs) >= {10, 1000}
+    assert set(runs) >= {10, 1000} and cap.sync_error >= 1
 
 
 def test_tb_windows_hold_every_arrival(sync_capture):
@@ -119,7 +119,7 @@ def test_version_1_records_still_load():
     assert np.array_equal(cap.sync_bits, want["sync_bits"])
     assert np.array_equal(cap.bits(), expect) and cap.rpm == pytest.approx(want["rpm"])
     assert cap.byte_cycles is None or cap.byte_cycles > 0
-    assert (cap.sync_bounds[1] - cap.sync_bounds[0] == 6).all()
+    assert (cap.sync_bounds[1] - cap.sync_bounds[0] == 6).all() and cap.sync_error == 3
 
 
 def test_syncs_timing_locates_with_coarse_lengths(make_rig):

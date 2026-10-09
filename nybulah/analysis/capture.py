@@ -1,7 +1,8 @@
 """Byte-ready captures: sync-delimited segments and the restored bit stream.
 
 Bytes are framed exactly from the end of each sync, but sync lengths are only
-measured to within ``SYNC_ERROR_BITS``, so positions are uncertain across syncs.
+measured to within a capture's ``sync_error`` (``SYNC_ERROR_BITS`` unless it
+says otherwise), so positions are uncertain across syncs.
 """
 
 from dataclasses import dataclass

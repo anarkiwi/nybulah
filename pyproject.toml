@@ -30,7 +30,6 @@ max-attributes = 12
 max-locals = 25
 min-public-methods = 1
 max-public-methods = 24
-max-locals = 20
 
 [tool.pylint."messages control"]
 disable = ["missing-module-docstring", "missing-function-docstring", "import-outside-toplevel"]
@@ -38,3 +37,6 @@ disable = ["missing-module-docstring", "missing-function-docstring", "import-out
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: whole-disk simulations"]
+
+[tool.coverage.run]
+core = "sysmon"

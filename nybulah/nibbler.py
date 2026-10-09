@@ -192,6 +192,15 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         return self.syncs.lo, self.syncs.hi
 
     @property
+    def sync_error(self):
+        """Bits a run may be off by, the widest of its bounds (unbounded runs aside)."""
+        if self.version < 2:
+            return V1_ACCURACY
+        syncs = self.syncs
+        high = np.where(syncs.hi >= 0, syncs.hi - syncs.runs, 0)
+        return int(np.maximum(syncs.runs - syncs.lo, high).max(initial=0))
+
+    @property
     def latched(self):
         """Ones of each sync run latched in the bytes before it."""
         return self.syncs.latched
