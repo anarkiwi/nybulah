@@ -147,7 +147,7 @@ def test_error_and_tail_tracks(rows):
         errors[SectorError.DATA_CHECKSUM] == errors[SectorError.HEADER_NOT_FOUND] == 1
     )
     tail = rows[2 * TAIL_TRACK]
-    assert tail["errors"][SectorError.BAD_GCR] == 1 and tail["n_gcr_tail"] == 1
+    assert tail["errors"][SectorError.OK] == 21 and tail["n_gcr_tail"] == 1
     assert tail["errors_cap"][SectorError.OK] == 21 and tail["n_gcr_payload"] == 0
 
 
@@ -201,16 +201,6 @@ def test_primitives():
         0,
         0,
     )
-
-
-def test_dos_errors_tail_and_payload():
-    track = gcr.to_bits(_gcr(TAIL_TRACK))
-    assert (survey.dos_errors(track, TAIL_TRACK) == SectorError.OK).all()
-    payload = track.copy()
-    payload[8 * (_sector_start(TAIL_TRACK, 2) + BLOCK_START + 100) :][:16] = 0
-    errors = survey.dos_errors(payload, TAIL_TRACK)
-    assert errors[2] == SectorError.BAD_GCR
-    assert (np.delete(errors, 2) == SectorError.OK).all()
 
 
 def test_scan_resume_summary_and_cli(corpus, tmp_path, monkeypatch, capsys):

@@ -22,6 +22,10 @@ HEADER_GAP_BYTES = 9
 GAP_BYTE = 0x55
 HEADER_GCR_BYTES = 10
 DATA_GCR_BYTES = 325
+SECTOR_DATA = 256
+DATA_BLOCK_BYTES = 4 * DATA_GCR_BYTES // 5
+DATA_CHECKED_BYTES = 1 + SECTOR_DATA + 1
+HEADER_CHECKED_BYTES = 6
 SECTOR_BYTES = 2 * SYNC_BYTES + HEADER_GCR_BYTES + HEADER_GAP_BYTES + DATA_GCR_BYTES
 
 
@@ -92,11 +96,11 @@ def header_blocks(track, sectors, disk_id):
 
 def data_blocks(data):
     """Raw 260-byte data blocks ``(n, 260)`` for sector payloads ``(n, 256)``."""
-    data = np.asarray(data, dtype=np.uint8).reshape(-1, 256)
-    out = np.zeros((len(data), 260), np.uint8)
+    data = np.asarray(data, dtype=np.uint8).reshape(-1, SECTOR_DATA)
+    out = np.zeros((len(data), DATA_BLOCK_BYTES), np.uint8)
     out[:, 0] = DATA_ID
-    out[:, 1:257] = data
-    out[:, 257] = np.bitwise_xor.reduce(data, axis=1)
+    out[:, 1 : 1 + SECTOR_DATA] = data
+    out[:, 1 + SECTOR_DATA] = np.bitwise_xor.reduce(data, axis=1)
     return out
 
 
@@ -177,19 +181,23 @@ def _windows(bits, starts, width):
 
 
 def _read_errors(hdr, hvalid, blk, bvalid, blk_is_hdr, disk_id):
-    """Error reading each header's sector, with ``blk`` the block after it."""
+    """Error reading each header's sector, with ``blk`` the block after it.
+
+    GCR validity (24) covers the bytes DOS uses: the header up to its ID and
+    the data block's ID, data and checksum, not the off bytes after them.
+    """
     err = np.full(len(hdr), SectorError.OK, np.uint8)
     err[blk[:, 257] != np.bitwise_xor.reduce(blk[:, 1:257], axis=1)] = (
         SectorError.DATA_CHECKSUM
     )
-    err[~bvalid.all(axis=1)] = SectorError.BAD_GCR
+    err[~bvalid[:, :DATA_CHECKED_BYTES].all(axis=1)] = SectorError.BAD_GCR
     missing = blk_is_hdr | (blk[:, 0] != DATA_ID) | ~bvalid[:, 0]
     err[missing] = SectorError.DATA_NOT_FOUND
     if disk_id is not None:
         wrong = (hdr[:, 5] != disk_id[0]) | (hdr[:, 4] != disk_id[1])
         err[wrong] = SectorError.ID_MISMATCH
     err[np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) != 0] = SectorError.HEADER_CHECKSUM
-    err[~hvalid[:, :6].all(axis=1)] = SectorError.BAD_GCR
+    err[~hvalid[:, :HEADER_CHECKED_BYTES].all(axis=1)] = SectorError.BAD_GCR
     return err
 
 

@@ -28,6 +28,7 @@ from .analysis.gcr import (
     speed_zone,
 )
 from .analysis.sector import (
+    DATA_CHECKED_BYTES,
     DATA_GCR_BYTES,
     DATA_ID,
     HEADER_GCR_BYTES,
@@ -45,7 +46,6 @@ GCR_KINDS = {"g64", "g71"}
 GROUP_BITS = 40
 HEADER_BITS = 8 * HEADER_GCR_BYTES
 DATA_BITS = 8 * DATA_GCR_BYTES
-DATA_PAYLOAD = 258
 BAM_TRACK = 18
 MAX_TRACK = 42
 BAM_ID = slice(0xA2, 0xA4)
@@ -308,7 +308,7 @@ def _data_gcr(row, rev, data):
     """Data blocks with invalid GCR in marker, payload or checksum, or only after it."""
     if len(data):
         _, bvalid = decode_bits(rev[(data[:, None] + np.arange(DATA_BITS)) % len(rev)])
-        payload = bvalid[:, :DATA_PAYLOAD].all(axis=1)
+        payload = bvalid[:, :DATA_CHECKED_BYTES].all(axis=1)
         row["n_gcr_payload"] = (~payload).sum()
         row["n_gcr_tail"] = (payload & ~bvalid.all(axis=1)).sum()
 
@@ -343,38 +343,6 @@ def _decode_args(key, disk_id):
     return _physical_track(key), disk_id, sectors_per_track(_zone_track(key))
 
 
-def dos_errors(bits, track, disk_id=None, sectors=None):
-    """Error code per sector over a whole capture.
-
-    As :func:`decode_track`, except that invalid GCR confined to the data
-    block bytes after the checksum is not an error (23 or OK instead of 24).
-    """
-    decoded = decode_track(bits, track, disk_id, sectors)
-    errors = decoded.errors.copy()
-    bad = np.flatnonzero(errors == SectorError.BAD_GCR)
-    if len(bad) == 0:
-        return errors
-    tail, good = _tail_only(bits, decoded.offsets[bad])
-    errors[bad[tail]] = np.where(good[tail], SectorError.OK, SectorError.DATA_CHECKSUM)
-    return errors
-
-
-def _tail_only(bits, offsets):
-    """For headers ending at ``offsets``: whether every GCR code up to the
-    checksum of the following data block is valid, and whether the checksum is."""
-    starts, lengths = runs_of_ones(bits, circular=True)
-    ends = np.sort((starts + lengths) % len(bits))
-    _, hvalid = _blocks(bits, offsets)
-    nxt = ends[np.searchsorted(ends, offsets, "right") % len(ends)]
-    blk, bvalid = decode_bits(bits[(nxt[:, None] + np.arange(DATA_BITS)) % len(bits)])
-    tail = (
-        hvalid[:, :6].all(axis=1)
-        & bvalid[:, :DATA_PAYLOAD].all(axis=1)
-        & (blk[:, 0] == DATA_ID)
-    )
-    return tail, np.bitwise_xor.reduce(blk[:, 1:257], axis=1) == blk[:, 257]
-
-
 def _capture_features(row, caps, cap, cycle, key, disk_id):
     half = key & ~SIDE1
     speed = np.asarray(cap.speed) if cap.speed is not None else np.zeros(0)
@@ -388,7 +356,7 @@ def _capture_features(row, caps, cap, cycle, key, disk_id):
     lo, hi = lag_window(cap.zone)
     row["in_window"] = lo <= cycle.length <= hi
     if _decodable(key) and len(cap.bits):
-        errors = dos_errors(cap.bits, *_decode_args(key, disk_id))
+        errors = decode_track(cap.bits, *_decode_args(key, disk_id)).errors
         row["errors_cap"] = np.bincount(errors, minlength=ERROR_CODES)
     if cap.circular:
         row["n_sect_cap"] = row["n_sect"]
