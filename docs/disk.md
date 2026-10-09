@@ -152,14 +152,9 @@ records (one combined pass with a polled sync table, ±3 bits) still load.
 
 **Reading:**
 
-1. The head is located without touching the stop. A 1571 steps outwards one
-   halftrack at a time until its track 0 sensor (VIA1 PA0, low) trips. A
-   1541 reads the sector headers under the head, falling back to DOS's
-   current track (`$22`), with the stepper phase choosing between adjacent
-   halftracks. Only if all of these fail (unformatted media) does it bump the
-   head against the stop, and only with `--allow-bump`. Then `calibrate`
-   relabels the head position from the header track numbers it finds near
-   track 18.
+1. The head is located without touching the stop ([Head location](#head-location)).
+   Then `calibrate` relabels the head position from the header track numbers
+   it finds near track 18.
 2. The header ID of track 18 is used for ID-mismatch (29) detection.
 3. Each track is captured from a sync. The whole capture is decoded:
    1.03–1.3 revolutions, so every sector appears whole at least once.
@@ -183,6 +178,84 @@ track's.
    `format_track` reproduces (20–24, 27, 29). Unverified tracks are rewritten
    up to `--retries` times.
 
+## Head location
+
+The estimate comes first and never moves the head: the track in the sector
+headers under the head, else DOS's current track (`$22`), placed on the
+halftrack of the stepper phase (VIA2 PB0-1); a phase two halftracks away
+takes the outer one. A 1541 uses the estimate; with none it raises unless
+`--allow-bump`. A 1571 is then homed (`Nibbler.home`), and is never bumped:
+`bump()` refuses it whatever `allow_bump` says. `close()` steps an odd
+halftrack inwards and writes its track to `$22`, so DOS (and the next
+session's estimate) stays right.
+
+### The 1571 track 00 rule (DOS ROM)
+
+From the 1571 DOS source ([listings](https://www.devili.iki.fi/Computers/Commodore/C1571/firmware/)):
+
+| fact | source |
+|---|---|
+| Track 00 is VIA1 PA0 **clear**: `ror` moves PA0 into carry and carry set means "not track 00". | `lccutil1` 150-170, `mfmcntrl` 255-275 |
+| Debounce: up to 99 iterations, each two PA reads (9 cycles apart, 33 cycles per iteration on track 00). A pair that disagrees ends the test as "not track 00"; after 99 agreeing pairs the last read decides. | `lccutil1` 150-170, `mfmcntrl` 255-275 |
+| The head is on track 00 only if, in addition, the phase is 0 (`dskcnt & 3`, `dskcnt` = VIA2 PB, so the bits are PB0-1). `adrsed` non-zero disables the sensor in the GCR stepper. | `lccutil1` 172-177, `mfmcntrl` 277-279 |
+| The test runs before every outward step and stops stepping when it passes: the stepper takes the first sensed phase 0 detent coming from inside. | `lccutil1` 144-196, `lccend` 158 (`stpout` → `patch9`), `mfmcntrl` 222-245 |
+| Track 00 is DOS track 1: the MFM side counts half steps in `cur_trk` (0 at track 00, seeks to `2 * cmd_trk`), sets the phase bits to `cur_trk & 3`, and maps GCR track T to `cur_trk = 2 (T - 1)`. A bump sets phase 0, steps 92 half steps out and sets `drvtrk = 1`. | `mfmcntrl` 222-297, `fastutl` 1205-1213, `lcccntrl` 197-210 |
+
+So, in nybulah's halftracks (track T on halftrack 2T): track 1 is halftrack 2
+at phase 0, phase = (halftrack + 2) & 3 (`PHASE_OFFSET`). The sensor covers
+halftrack 2, and halftrack 6 (the next phase 0 detent inwards) must read
+clear, or DOS would take it as track 1: the sensor's inner edge is
+halftrack 2-5 (`SENSOR_EDGE` = 5). A bump that ends at phase 0 against the
+stop is DOS's track 1, so the stop lies within halftracks -1 to 2
+(`HT_OUTER` = -1).
+
+`sense_1571` (drive/sense.s, run from the capture buffer) is the same test:
+99 pairs of `$180F` reads (port A without the ATN handshake), 9 cycles
+apart, 33 cycles per pair, and returns the phase with the result.
+
+### Homing
+
+`home(estimate)`:
+
+1. Sense. While the sensor is on, step inwards (at most `SENSOR_WALK` = 7,
+   from `HT_OUTER` past `SENSOR_EDGE`); more raises TrackError (stuck on).
+2. Without an estimate, the halftrack where the sensor clears is
+   `edge + 1`, 3-6, one per phase; the phase fixes it. A sensor clear at the
+   start with no estimate raises.
+3. Step outwards one halftrack at a time to halftrack 2, sensing after each
+   step. Each reading is checked against the halftrack: the phase must be
+   its phase, the sensor must be on at halftrack 2 or below and clear above
+   `SENSOR_EDGE`. Any mismatch raises TrackError.
+
+Outward steps are at most `estimate - 2` (or 4 after the walk); every
+outward step leaves a halftrack of 3 or more, where the last reading was
+consistent with it. A sensor stuck clear runs out at halftrack 2 and raises;
+one stuck on raises at the first halftrack above `SENSOR_EDGE` or after the
+walk. Reaching the stop would take two faults at once: an estimate too far
+in **and** a sensor stuck clear. With no estimate at all, a sensor stuck on
+walks at most 7 halftracks inwards, which reaches the inner end only from
+within 7 of it.
+
+### DOS commands that move a 1571 head to the stop
+
+nybulah sends only `M-R`, `M-W` and `M-E`; none of these step the head.
+These DOS paths step outwards until the track 00 test passes (with the
+sensor disabled by `adrsed` or failed, 92 or 180 half steps against the
+stop):
+
+- `N` (new/format): `lccfmt1` 45-61 (1541 mode), `lccfmt2a` 83-105 (1571
+  mode).
+- Error recovery on any GCR read or write job (`LOAD`, `I`, `V`, directory,
+  `B-R`, `U1`, ...): after the head-offset retries, a `bump` job unless the
+  caller set `jobrtn` (`jobssf` 246-270, `dskintsf` 300 enables it).
+- A bump job (`$C0`) written to the job queue.
+- Burst (`U0`) MFM commands: restore (`cmdone`, 180 half steps), read
+  address, format, sector-table and logical seeks that fail (`mfmsubr` 29-62,
+  `mfmsubr1` 439-447, `mfmsubr3` 130, `mfmcntrl` 496-510).
+
+Power-on and reset only set phase 0 (`lccinit` 29), which pulls the head to
+the nearest phase 0 detent.
+
 ## Hardware validation
 
 `nybulah hwcheck --disk` locates and calibrates the head as a read does,
@@ -196,9 +269,9 @@ then reads one track in each zone (1, 18, 25, 31). It never writes. It reports t
 
 These are not yet confirmed on hardware:
 
-- the stepper phase convention (track 1 at phase 0, from a bump that landed
-  one track outside the old phase 2 assumption);
-- the 1571 track 0 sensor polarity (PA0 low on track 1);
+- the 1571 track 00 sensor's edge and homing on hardware (`nybulah
+  homeprobe`, [hardware.md](hardware.md#1571-head-homing-probe)); the
+  polarity and phase rule are from the DOS ROM;
 - the step and settle delays;
 - the 1571 side bit polarity and WD1770 index after `$D0`;
 - whether SYNC asserts on the tenth one (TS's SYNC low time against TB's

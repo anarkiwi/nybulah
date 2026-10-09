@@ -39,8 +39,9 @@ them back.
   decoded through a 1541 read-circuit model (`nybulah convert`, `nybulah info`).
 - **Disk operations:** read and write D64 on the 1541 and 1571, and D71 on the
   1571, through the fast transport. Every write is verified by re-capture.
-  The head is located without bumping it against the stop (1571 track 0
-  sensor; 1541 sector headers or DOS's track); bumping needs `--allow-bump`.
+  The head is located without bumping it against the stop (1541 sector
+  headers or DOS's track; a 1571 is homed by its DOS's track 00 rule and is
+  never bumped); bumping a 1541 needs `--allow-bump`.
 - **Telemetry:** sync lengths from per-byte arrival times, each within
   per-sync bounds and within ±1 bit for 99.95% of syncs in simulation
   ([docs/disk.md](docs/disk.md)); no byte is lost for any sync length. The revolution

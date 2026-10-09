@@ -21,7 +21,7 @@ from .sim import ACR_T1_FREERUN, FDC, IO_ACCESS_CYCLE, IRQ_T1, IRQ_T2, OPEN, RAM
 from .sim import CIA, PA_FSDIR, RETURN_TRAP, ROM, VIA1, VIA2, Bus, SimTimeout
 from .sim import PB_ATN_IN, PB_ATNA, PB_CLK_IN, PB_CLK_OUT, PB_DATA_IN, PB_DATA_OUT
 from .sim import Drive1541, Drive1571
-from .simdisk import CA1_FLAG, CELL_EPS, CPU_HZ, HT_MAX, HT_STOP, HT_TRACK1
+from .simdisk import CA1_FLAG, CELL_EPS, CPU_HZ, HT_MAX, HT_STOP
 from .simdisk import INDEX_FRACTION, PB_INPUTS, PB_MOTOR, PB_PHASE, PB_SYNC, PB_WE
 from .simdisk import PCR_MODE, PCR_SOE, PCR_WRITE, PHASE_OFFSET, SYNC_ONES, V_FLAG
 from .simdisk import WANDER_NEWTON, WD_INDEX, Mechanism, Media, disk_drive
@@ -36,7 +36,7 @@ ONES, COUNT, SHREG, PENDING, CA1, WRITTEN, ARMED, OVER, UNDER = range(34, 43)
 WD, WPROT, LOGGING, NEV, HT, BUMPS, KSIDE, KHT, CSIDE, CHT = range(43, 53)
 FRESH, CORRUPT, DEFER, RESAMPLE = range(53, 57)
 VREGS, MREGS, HOSTL = 57, 73, 89
-STATE = END
+SENSOR, INNER, STATE = END, END + 1, END + 2
 DUE, SYNC_START, RPM, AMP, PERIOD = range(5)
 
 MPU_FIELDS = {A: "a", X: "x", Y: "y", SP: "sp", P: "p", PC: "pc"}
@@ -49,6 +49,7 @@ MECH_FIELDS |= {MLATCH: "latch", N: "_n", ONES: "_ones", COUNT: "_count"}
 MECH_FIELDS |= {SHREG: "_shreg", PENDING: "_pending", CA1: "_ca1", WRITTEN: "_written"}
 MECH_FIELDS |= {ARMED: "_armed", OVER: "overruns", UNDER: "underruns"}
 MECH_FIELDS |= {HT: "halftrack", BUMPS: "bumps", WPROT: "write_protect"}
+MECH_FIELDS |= {SENSOR: "sensor_edge", INNER: "inner_stops"}
 assert HOSTL < CCRA
 
 OK, HALTED, LIMIT, PYTHON, FULL, DEFERRED, MOVED = range(7)
@@ -302,7 +303,7 @@ def via_read(s, reg):
     if reg in (1, 15):
         v = s[VREGS + 1]
         if s[TRK0] and s[MECH]:
-            v = v & ~PA_TRK0 | (0 if s[HT] <= HT_TRACK1 else PA_TRK0)
+            v = v & ~PA_TRK0 | (0 if s[HT] <= s[SENSOR] else PA_TRK0)
         return v
     if reg in (4, 5):
         count = (s[LATCH] - (s[CYC] - s[T1START])) & 0xFFFF
@@ -392,6 +393,7 @@ def port_b_write(s, value):
             s[BUMPS] += 1
             ht = HT_STOP + ((phase - HT_STOP) & PB_PHASE)
         elif ht > HT_MAX:
+            s[INNER] += 1
             ht = HT_MAX - ((HT_MAX - phase) & PB_PHASE)
         s[HT] = ht
 

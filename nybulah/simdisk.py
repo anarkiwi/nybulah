@@ -16,6 +16,9 @@ from .sim import IO_ACCESS_CYCLE, Drive1541, Drive1571
 CPU_HZ = 1_000_000
 HT_STOP, HT_MAX, HT_TRACK1 = 0, 84, 2
 PHASE_OFFSET = 2
+PHASES = 4
+SENSOR_EDGES = range(HT_TRACK1, HT_TRACK1 + PHASES)
+SENSOR_STUCK_ON, SENSOR_STUCK_OFF = HT_MAX, HT_STOP - 1
 DOS_TRACK = 0x22
 SYNC_ONES = 10
 INDEX_FRACTION = 0.02
@@ -87,16 +90,27 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
 
     ``log``, when a list, receives ("byte", t, value) per byte ready and
     ("sync", t_start, t_end, ones) per sync; ``corrupt(key, cell, bit)`` may
-    alter written cells.
+    alter written cells. ``bumps`` and ``inner_stops`` count steps driven
+    against the outer (track 0) and inner end stops. The 1571 track 00 sensor
+    covers every halftrack up to ``sensor_edge``: one of ``SENSOR_EDGES`` (the
+    range DOS's track 00 rule allows), or ``SENSOR_STUCK_ON`` or
+    ``SENSOR_STUCK_OFF`` for a failed sensor.
     """
 
-    def __init__(self, drive, media, write_protect=False, halftrack=36):
+    def __init__(  # pylint: disable=too-many-arguments
+        self,
+        drive,
+        media,
+        write_protect=False,
+        halftrack=36,
+        sensor_edge=SENSOR_EDGES[-1],
+    ):
         drive.mech = self
         self.drive, self.media, self.write_protect = drive, media, write_protect
-        self.halftrack = halftrack
+        self.halftrack, self.sensor_edge = halftrack, sensor_edge
         self.pb = (halftrack + PHASE_OFFSET) & PB_PHASE
         self.pcr, self.ddrb = DOS_PCR, DOS_DDRB
-        self.bumps = 0
+        self.bumps = self.inner_stops = 0
         self.ora = self.ddra = 0
         self.regs = bytearray(16)
         self.wd_command = None
@@ -116,8 +130,8 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
 
     @property
     def track0(self):
-        """1571 track 0 sensor: the head is on track 1 or outside it."""
-        return self.halftrack <= HT_TRACK1
+        """1571 track 00 sensor: the head is at or outside ``sensor_edge``."""
+        return self.halftrack <= self.sensor_edge
 
     @property
     def zone(self):
@@ -280,6 +294,7 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
                 self.bumps += 1
                 ht = HT_STOP + ((phase - HT_STOP) & PB_PHASE)
             elif ht > HT_MAX:
+                self.inner_stops += 1
                 ht = HT_MAX - ((HT_MAX - phase) & PB_PHASE)
             self.halftrack = ht
 

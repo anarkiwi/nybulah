@@ -482,7 +482,7 @@ class Drive1571(Drive1541):
     PA_TRK0 = 0x01
 
     def port_a(self, latch):
-        """PA0 is the track 0 sensor input, low on track 1."""
+        """PA0 is the track 00 sensor input, low while the sensor covers the head."""
         if self.mech is None:
             return latch
         return latch & ~self.PA_TRK0 | (0 if self.mech.track0 else self.PA_TRK0)

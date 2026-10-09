@@ -5,6 +5,7 @@ TRACK_BASE := 0300
 PASSPG_1541 := 9F
 PASSPG_1571 := 7F
 BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
+	$(OUT)/sense_1571.bin \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
 	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin)
 
@@ -30,7 +31,12 @@ $(OUT)/track_%.bin: track.s track.cfg
 	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -D PASSPG='$$$(PASSPG_$*)' -o $@ $(OUT)/track_$*.o
 	rm -f $(OUT)/track_$*.o
 
+$(OUT)/sense_1571.bin: sense.s sense.cfg
+	ca65 -t none -o $(OUT)/sense_1571.o $<
+	ld65 -C sense.cfg -S '$$6000' -o $@ $(OUT)/sense_1571.o
+	rm -f $(OUT)/sense_1571.o
+
 clean:
-	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin
+	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin
 
 .PHONY: all clean
