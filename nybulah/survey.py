@@ -501,11 +501,19 @@ def list_items(root, progress=True):
 
 
 def read_item(root, item):
-    """Bytes of an item from :func:`list_items`."""
-    data = (pathlib.Path(root) / item[0]).read_bytes()
+    """Bytes of an item from :func:`list_items`.
+
+    Archives are read through their central directory, so only the member's
+    compressed bytes are fetched, not the whole archive.
+    """
+    path = pathlib.Path(root) / item[0]
+    if len(item) == 1:
+        return path.read_bytes()
+    source = path
     for member in item[1:]:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        with zipfile.ZipFile(source) as archive:
             data = archive.read(member)
+        source = io.BytesIO(data)
     return data
 
 
