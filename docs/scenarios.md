@@ -180,7 +180,7 @@ Values in "presentation" are medians unless stated.
 | fat track | Agreement with N+1 ≥ 0.99925; headers of N repeated on N+1 | Not detected; G64 keeps both | Write-back needs aligned writes | HT + IDX/REL |
 | killer | Sync covers nearly the whole track | `find_cycle` returns KILLER; `revolution_bytes` writes 0xFF | Length is nominal | TS (SYNC held) with a timeout |
 | unformatted | `bad_span` ≈ whole track | UNFORMATTED. Conversions write the capture cut to the nominal length and list it under `unformatted` | Written as read noise, not as no flux | MC to prove randomness |
-| no-flux fill | Constant fill: `0x00` in G64, a 4-cell pattern in NIB | FORMATTED (96%) | A periodic fill makes every multiple of its period a valid lag | MC; write as no flux |
+| no-flux fill | Constant fill: `0x00` in G64, a 4-cell pattern in NIB | UNFORMATTED: the 8-bit word test rejects a lag that only repeats the fill; written at nominal length | One read cannot show whether the fill reads back random | MC; write as no flux |
 | no-sync custom | No sync | `find_cycle` works without syncs | No `hdr_period` to check against | BITS free-running |
 | long sync | Longest stored run: 1,933 bits | Kept in the bit stream | Length not preserved (caveats) | TS |
 | 10-bit sync | Stored next to normal syncs | Kept | Reliability is low (caveats) | TS; bit-exact stream |
