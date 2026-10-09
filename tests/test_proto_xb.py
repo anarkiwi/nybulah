@@ -166,3 +166,20 @@ def test_timing_report(capsys):
     assert simx.BurstTiming().sample == (325, 613, 901, 1093)
     assert simx.BurstTiming().change == (4, 244, 388, 532, 804, 672)
     assert simx.BurstTiming(8).change == (4, 116, 188, 260, 396, 336)
+
+
+@pytest.mark.parametrize("n", [1, 31, 32, 33, 48, 63, 64, 65, 200])
+def test_write_bursts_wait_for_both_usb_banks(n):
+    cbm, mon = session(fw=10)
+    data = rand(n, n)
+    mon.write(0x8000, data)
+    assert cbm.drive.dump(0x8000, n) == data
+    assert simx.out_banks(n) == (min(n, 32), min(-(-n // 32), 2))
+
+
+def test_busy_banks_as_a_mask_stalls_bursts_past_one_bank():
+    cbm, mon = session(fw=10, timeout_us=2_000.0, retries=0)
+    cbm.out_ready = lambda k, cur, busy: cur >= k if k <= 32 else busy == 3
+    mon.write(0x8000, rand(32))
+    with pytest.raises(simx.XTimeout):
+        mon.write(0x8000, rand(33))

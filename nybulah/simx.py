@@ -35,6 +35,7 @@ RECV_PAIRS = ((0, 2), (1, 3), (4, 6), (5, 7))
 GRACE = 32
 AVR_HZ = 16_000_000
 XB_BURST = 64
+XB_BANK = 32
 XB_SEND = (14, 26, 50, 62, 74)
 XB_SEND_PERIOD = 67
 XB_RECV = (6, 12, 20, 30, 38)
@@ -130,6 +131,18 @@ class Timing:
             "sample": [round(x * f) for x in self.sample],
             "drive": [round(x * f) for x in self.drive],
         }
+
+
+def out_ready(k, current, busy):
+    """Firmware rule for starting a k-byte write burst on the OUT endpoint: the CPU
+    sees only the current bank (current bytes); busy is NBUSYBK, a count of filled
+    banks (two read 0b10). A burst past one bank needs it full and the next filled."""
+    return current == XB_BANK and busy == 2 if k > XB_BANK else current >= k
+
+
+def out_banks(k):
+    """(current bank bytes, NBUSYBK) once the host's packets for k bytes arrived."""
+    return min(k, XB_BANK), min(-(-k // XB_BANK), 2)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -387,6 +400,8 @@ class SimX(SimCBM):
         """Burst transfers started."""
         return self.count["bursts"]
 
+    out_ready = staticmethod(out_ready)
+
     def supports(self, protocol):
         """Whether this adapter speaks protocol ("xb" needs firmware 10)."""
         if protocol == "xb":
@@ -575,6 +590,9 @@ class SimX(SimCBM):
         for j in range(0, len(data), XB_BURST):
             burst, first = data[j : j + XB_BURST], self.ordinal
             try:
+                if not self.out_ready(len(burst), *out_banks(len(burst))):
+                    self.now += self.timing.timeout
+                    raise XTimeout("OUT endpoint never ready")
                 t = self._sync(len(burst))
             except (XTimeout, HostGone) as e:
                 raise self._fail(e, data[:j])
