@@ -7,21 +7,35 @@ import struct
 import time
 from importlib import resources
 
+from .fastx import XLink
+from .link import (
+    BASE,
+    CLOCK_HZ,
+    WATCHDOG_IDLE_S,
+    WATCHDOG_S,
+    BusError,
+    HandshakeTimeout,
+    S1Link,
+    S2Link,
+)
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
 
-BASE = 0x0500
-CLOCK_HZ = 1_000_000
-WATCHDOG_S = 1.0
-WATCHDOG_IDLE_S = 10.0
-IDLE_LINE = {"s1": IEC_DATA, "s2": IEC_CLOCK}
-
-
-class BusError(IOError):
-    """The IEC bus is not in the state the protocol requires."""
-
-
-class HandshakeTimeout(BusError):
-    """A bus line did not reach the expected state in time."""
+__all__ = [
+    "BASE",
+    "CLOCK_HZ",
+    "WATCHDOG_IDLE_S",
+    "WATCHDOG_S",
+    "BusError",
+    "BusNotIdle",
+    "DriveUnresponsive",
+    "HandshakeTimeout",
+    "Monitor",
+    "answers",
+    "drivecode",
+    "protocols",
+    "recover",
+    "supported",
+]
 
 
 class BusNotIdle(BusError):
@@ -59,6 +73,14 @@ def protocols():
     )
 
 
+def supported(cbm, protocol):
+    """Whether a monitor binary exists for protocol and cbm can speak it."""
+    if protocol not in protocols():
+        return False
+    probe = getattr(cbm, "supports", None)
+    return probe(protocol) if probe else hasattr(cbm, f"{protocol}_read")
+
+
 def answers(status):
     """Whether a status channel string came from a live DOS."""
     m = re.match(r"\s*(\d+)\s*,", status or "")
@@ -89,11 +111,15 @@ def recover(cbm, dev, resets=2, timeout=3.0, poll=0.1):
     raise DriveUnresponsive(f"device {dev} silent after {resets} resets: {status!r}")
 
 
+LINKS = {"s1": S1Link, "s2": S2Link, "s3": XLink}
+
+
 class Monitor:
     """Upload, start and talk to the monitor on one drive.
 
-    S1 uses only CLK/DATA and tolerates other DOS-idle drives on the bus; S2
-    strobes ATN, so every other drive must be off the bus or parked. The drive
+    S1 and S3 (X, xum1541 firmware v9+) use only CLK/DATA and tolerate other
+    DOS-idle drives on the bus; S2 strobes ATN, so every other drive must be
+    off the bus or parked. A per-protocol link does handshakes and blocks. The drive
     returns to DOS after WATCHDOG_S stalled mid-command or WATCHDOG_IDLE_S
     between commands; a command after idle_s idle restarts the monitor first
     (a 1571 at 2 MHz halves the drive's windows, so halve idle_s there).
@@ -109,17 +135,16 @@ class Monitor:
         idle_s=0.9 * WATCHDOG_IDLE_S,
         clock=time.monotonic,
     ):
-        if protocol not in protocols() or not hasattr(cbm, f"{protocol}_read"):
+        if not supported(cbm, protocol):
             raise ValueError(f"protocol must be one of {protocols()}")
         self.cbm, self.dev, self.protocol = cbm, dev, protocol
         self.code = code if code is not None else drivecode(f"monitor_{protocol}")
-        self._read = getattr(cbm, f"{protocol}_read")
-        self._write = getattr(cbm, f"{protocol}_write")
+        self.link = LINKS[protocol](self)
         self.running = False
         self.timeout, self.idle_s, self.clock = timeout, idle_s, clock
         self._last = clock()
 
-    def _wait(self, line, state, step):
+    def wait(self, line, state, step):
         """Poll until line is asserted (state=1) or released (state=0)."""
         deadline = time.monotonic() + self.timeout
         while True:
@@ -135,28 +160,20 @@ class Monitor:
         self.cbm.command(self.dev, b"M-E" + struct.pack("<H", BASE))
         self.cbm.iec_release(IEC_CLOCK | IEC_DATA | IEC_ATN)
         try:
-            lines = self._wait(IEC_CLOCK, 1, "drive ready")
+            lines = self.wait(IEC_CLOCK, 1, "drive ready")
         except HandshakeTimeout:
             lines = self.cbm.iec_poll()
             if not lines & (IEC_DATA | IEC_ATN):
                 raise
         if lines & (IEC_DATA | IEC_ATN):
             raise BusNotIdle(f"bus not idle after M-E: bus=0x{lines:02x}")
-        if self.protocol == "s1":
-            self.cbm.iec_set(IEC_DATA)
-            self._wait(IEC_CLOCK, 0, "drive saw host DATA")
-            self.cbm.iec_set(IEC_CLOCK)
-            self.cbm.iec_release(IEC_DATA)
-            self._wait(IEC_DATA, 1, "drive idle")
-        else:
-            self.cbm.iec_set(IEC_ATN)
-            self._wait(IEC_DATA, 0, "drive tracks ATN")
+        self.link.open()
         self.running = True
         self._last = self.clock()
 
     def alive(self):
-        """Whether the drive still holds its idle line (no watchdog exit)."""
-        return bool(self.cbm.iec_poll() & IDLE_LINE[self.protocol])
+        """Whether the drive still looks alive (no watchdog exit)."""
+        return self.link.alive()
 
     def restart(self):
         """Stop (or recover) and start afresh, opening a new idle window."""
@@ -166,14 +183,15 @@ class Monitor:
             self.recover()
         self.start()
 
-    def _transact(self, payload, size=None):
+    def transact(self, payload, size=None):
+        """Send one command and return its size-byte response (for links)."""
         if self.clock() - self._last > self.idle_s:
             self.restart()
         elif not self.alive():
             self.running = False
             raise HandshakeTimeout("drive left the monitor")
-        self._write(payload)
-        data = b"" if size is None else self._response(size)
+        self.link.send(payload)
+        data = b"" if size is None else self.link.response(size)
         self._last = self.clock()
         return data
 
@@ -185,13 +203,12 @@ class Monitor:
         if not self.alive():
             self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)
             return
-        self._write(b"Q")
-        if self.protocol == "s1":
-            self.cbm.iec_release(IEC_CLOCK)
-            self._wait(IEC_DATA, 0, "drive exit")
-        else:
-            self.cbm.iec_release(IEC_ATN)
-            self._wait(IEC_CLOCK, 0, "drive exit")
+        try:
+            self.link.send(b"Q")
+        except HandshakeTimeout:
+            self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)
+            return
+        self.link.close()
 
     def recover(self):
         """Abandon the session and bring the drive back to DOS."""
@@ -212,23 +229,14 @@ class Monitor:
         else:
             self.stop()
 
-    def _response(self, size):
-        if self.protocol == "s1":
-            return self._read(size)
-        self._wait(IEC_CLOCK, 0, "drive send mode")
-        data = self._read(size)
-        self._wait(IEC_CLOCK, 1, "drive receive mode")
-        return data
-
     def read(self, addr, size):
         """Read size (1..65536) bytes of drive memory."""
-        return self._transact(b"R" + struct.pack("<HH", addr, size & 0xFFFF), size)
+        return self.link.read(addr, size)
 
     def write(self, addr, data):
         """Write bytes to drive memory."""
-        data = bytes(data)
-        self._transact(b"W" + struct.pack("<HH", addr, len(data) & 0xFFFF) + data)
+        self.link.write(addr, bytes(data))
 
     def jsr(self, addr):
         """Call a drive subroutine; return its (A, X, Y)."""
-        return tuple(self._transact(b"J" + struct.pack("<H", addr), 3))
+        return tuple(self.transact(b"J" + struct.pack("<H", addr), 3))

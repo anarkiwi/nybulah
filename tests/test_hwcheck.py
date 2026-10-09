@@ -55,3 +55,12 @@ def test_s2_session(tmp_path):
         SimCBM(Drive1541(device=10), dev=10), tmp_path, "--devs", "10", "--s2"
     )
     assert summary["10"]["bench_s2"]["errors"] == 0 and "bench_s1" not in summary["10"]
+
+
+def test_s3_session(tmp_path):
+    from nybulah.simx import adapter
+
+    summary, _ = run(
+        adapter("s3", device=10), tmp_path, "--devs", "10", "--proto", "s3"
+    )
+    assert summary["10"]["bench_s3"]["errors"] == 0 and summary["10"]["alias_s3"] == []

@@ -45,14 +45,6 @@ class XTimeout(XError):
     """The drive never produced SYNC within the adapter's I/O timeout."""
 
 
-def xsum(data):
-    """Block check of sendblk/recvblk: (s1, s2)."""
-    s = np.cumsum(np.frombuffer(bytes(data), np.uint8), dtype=np.int64)
-    if not s.size:
-        return 0, 0
-    return int(s[-1] & 0xFF), int(((s & 0xFF).sum() + (s[-1] >> 8)) & 0xFF)
-
-
 def encode(byte, pairs):
     """Bus line masks (IEC_DATA, IEC_CLOCK) carrying byte in pair order."""
     return tuple(
@@ -292,8 +284,15 @@ class SimX(SimCBM):
                 t += p
         return None
 
+    def unplug(self, after_bytes, edges=3):
+        """Make the adapter vanish before X byte after_bytes from now."""
+        del edges
+        self.vanish_at = self.ordinal + after_bytes
+
     def _sync(self):
         """Assert go and return the SYNC detection time, retracting on slices."""
+        if self.gap:
+            self.idle(self.gap)
         if self.vanish_at == self.ordinal:
             self.vanish_at = None
             raise HostGone("adapter vanished")
@@ -350,9 +349,6 @@ class SimX(SimCBM):
                 samples.append(self.bus.level(at) ^ self._flip(k))
             out.append(decode(samples, SEND_PAIRS))
             self.now = t + tm.sample[3] + tm.turn
-            if i + 1 < size:
-                self._host(IEC_DATA, self.now)
-                self._go = True
         return bytes(out)
 
     def x_write(self, data, timing=None):
@@ -367,8 +363,9 @@ class SimX(SimCBM):
             for k, v in enumerate(encode(b, RECV_PAIRS)):
                 self._host(v ^ self._flip(k), t + tm.drive[k] + self.skew)
             self.now = t + tm.drive[4] + self.skew
-            self._go = i + 1 < len(data)
-            self._host(IEC_DATA if self._go else 0, self.now)
+            self._go = False
+            self._host(0, self.now)
+            self.now += tm.turn
         self._advance(self.now)
 
     def x2_read(self, size):
@@ -380,6 +377,17 @@ class SimX(SimCBM):
         self.x_write(data, dataclasses.replace(self.timing, cyc=0.5))
 
     s3_read, s3_write = x_read, x_write
+
+
+TIMED = {Drive1541: TimedDrive1541, Drive1571: TimedDrive1571}
+
+
+def adapter(protocol, cls=Drive1541, device=8, bus=None, **drive_kw):
+    """SimX on a TimedBus for s3, else SimCBM, around a new cls drive."""
+    if protocol != "s3":
+        return SimCBM(cls(device=device, bus=bus or Bus(), **drive_kw), dev=device)
+    drive = TIMED[cls](device=device, bus=bus or TimedBus(), **drive_kw)
+    return SimX(drive, device)
 
 
 def make(model="1541", cyc=1.0, rise=0.5, peers=0, dev=8, **kw):

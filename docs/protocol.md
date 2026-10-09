@@ -43,9 +43,13 @@ read:  W xparm 4 addr len | J xread  -> len data bytes, then A=s1 X=s2 Y
 write: W xparm 4 addr len | J xwrite | len data bytes -> A=s1 X=s2 Y
 ```
 
-`fastx.XLink` sends at most 4 KiB per block, compares (s1, s2) with its own
-`xsum` and repeats a block whose check fails; a transport error abandons the
-session (drive watchdog or reset) and restarts it.
+`Monitor(cbm, dev, "s3")` drives all of this through `fastx.XLink`, its S3
+link: `read`/`write` move at most 4 KiB per block, compare (s1, s2) with
+`fastx.xsum` and repeat a block whose check fails; transport errors surface
+like S1/S2 (`RECOVERABLE`), and a command the drive takes none of raises
+`HandshakeTimeout("drive left the monitor")`, since the X idle bus has no
+line that shows the drive is still there. The link sets the adapter's I/O
+timeout to the drive's 10 s idle window.
 
 Block check, per byte b: `s1 = s1 + b` (carry c out), `s2 = s2 + s1 + c`,
 both mod 256, starting at 0.
@@ -139,13 +143,14 @@ version 9.
 
 ## Throughput
 
-Drive cycles per byte in steady state (co-simulation, `test_block_throughput`)
-and the resulting rate:
+Drive cycles per byte in steady state (co-simulation, `test_block_throughput`;
+block loops restart the watchdog every byte, and a taken branch that crosses a
+page adds a cycle depending on code layout) and the resulting rate:
 
 | Path | cycles/byte | 1 MHz | 2 MHz (1571) |
 |---|---|---|---|
-| X block read (`sendblk`) | 100 | 10.0 KB/s | 20 KB/s |
-| X block write (`recvblk`) | 112 | 8.9 KB/s | 17.9 KB/s |
+| X block read (`sendblk`) | 107 | 9.3 KB/s | 18.7 KB/s |
+| X block write (`recvblk`) | 120 | 8.3 KB/s | 16.7 KB/s |
 | X monitor 'R'/'W' per byte | 148 / 151 | 6.8 / 6.6 KB/s | |
 | S2 monitor (drive-bound only) | 271 / 328 | <= 3.7 KB/s | ATN: single drive only |
 | S1 monitor (drive-bound only) | 597 / 671 | <= 1.7 KB/s | |

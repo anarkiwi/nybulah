@@ -112,8 +112,8 @@ xblkinit:
 sendblk:
         jsr xblkinit
         beq xblkdone
-        WDRESET
-xsbyte: WAIT bcs, {lda IEC}, lsr
+xsbyte: WDRESET
+        WAIT bcs, {lda IEC}, lsr
         lda #CLK_OUT
         sta IEC                         ; SYNC   t=0
         lda (ptr),y
@@ -145,7 +145,6 @@ xsbyte: WAIT bcs, {lda IEC}, lsr
         iny
         bne xsnext
         inc ptr+1
-        WDRESET
 xsnext: inc len
         bne xsbyte
         inc len+1
@@ -158,8 +157,8 @@ xblkdone:
 recvblk:
         jsr xblkinit
         beq xblkdone
-        WDRESET
-xrbyte: WAIT bcs, {lda IEC}, lsr
+xrbyte: WDRESET
+        WAIT bcs, {lda IEC}, lsr
         lda #CLK_OUT
         sta IEC                         ; SYNC   t=0
         lda #$00
@@ -194,7 +193,6 @@ xrbyte: WAIT bcs, {lda IEC}, lsr
         iny
         bne xrnext
         inc ptr+1
-        WDRESET
 xrnext: inc len
         bne xrbyte
         inc len+1
