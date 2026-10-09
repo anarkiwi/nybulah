@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from nybulah import bus, cli
-from nybulah.opencbm import IEC_CLOCK, IEC_DATA
+from nybulah.opencbm import IEC_CLOCK, IEC_DATA, OpenCBMError
 from nybulah.simhost import DOSBus, DOSDrive
 
 INF = float("inf")
@@ -276,3 +276,93 @@ def test_bus_line_masks():
     assert cbm.iec_poll() == IEC_CLOCK | IEC_DATA
     cbm.sleep(1)
     assert cbm.iec_poll() == 0
+
+
+def test_bus_held_snapshot_reads_like_a_diagnosis(capsys):
+    cbm = DOSBus([DOSDrive(8, boot_s=INF)])
+    out, recs = run(cbm, "reset", capsys=capsys)
+    snap, span = recs[0]["bus"], f"{bus.BOOT_S + bus.RESET_HOLD_S:.2f}"
+    assert snap["text"] == (
+        f"CLK low for {span} s since reset; DATA low for {span} s since reset; "
+        f"ATN not asserted; reset {span} s ago; no ATN yet; no drive addressed"
+    )
+    assert snap["low"] == ["CLK", "DATA"] and snap["since_atn_s"] is None
+    assert out["bus"]["low"] == ["CLK", "DATA"]
+
+
+def test_hung_command_snapshot_times_the_last_atn(capsys):
+    hang = DOSDrive(8, command_s=lambda cmd: INF)
+    out, recs = run(
+        DOSBus([hang]), 'command 8 "I0"', "--command-seconds", "5", capsys=capsys
+    )
+    snap = recs[0]["bus"]
+    assert snap["text"] == (
+        "no line low; ATN not asserted; no reset; last ATN 5.00 s ago; no drive addressed"
+    )
+    assert out["summary"]["8"]["bus"] == snap and out["bus"]["since_atn_s"] == 5.0
+
+
+def test_lines_held_since_mid_wait_are_timed_from_first_sight():
+    cbm = DOSBus([DOSDrive(8)])
+    b = bus.Bus(cbm)
+    b.sample()
+    cbm.drives[8].booting = 2.0
+    cbm.sleep(0.5)
+    b.sample()
+    cbm.sleep(0.25)
+    assert b.snapshot()["held_s"] == {"CLK": 0.25, "DATA": 0.25}
+
+
+def test_failed_untalk_reports_the_talker(capsys):
+    cbm = DOSBus([DOSDrive(8)])
+
+    def fail(*_):
+        raise OpenCBMError("stalled")
+
+    cbm.raw_read = cbm.untalk = fail
+    _, recs = run(cbm, "dir 8", capsys=capsys)
+    assert recs[0]["bus"]["addressed"] == "device 8 talking"
+    assert recs[0]["bus"]["text"].endswith("; device 8 talking")
+
+
+def test_interrupt_summary_carries_the_bus_state(capsys):
+    cbm = DOSBus([DOSDrive(8)])
+    cbm.hook = lambda kind, dev: os.kill(os.getpid(), signal.SIGINT)
+    out, _ = run(cbm, "status 8", "status 8", capsys=capsys)
+    assert out["interrupted"] == "SIGINT"
+    assert out["bus"]["text"].endswith(
+        "ATN not asserted; no reset; last ATN 0.00 s ago; no drive addressed"
+    )
+
+
+def mf1581(boot_s):
+    """A 1581 sets up its ports before the diagnostic, so it holds no line."""
+    drive = DOSDrive(9, "1581", boot_s=boot_s)
+    drive.held_s = 0.0
+    return DOSBus([DOSDrive(8), drive])
+
+
+@pytest.mark.parametrize(
+    "argv, ok",
+    [
+        (["--model", "9=1581", "reset", "wait 9"], True),
+        (["identify 9", "reset", "wait 9"], True),
+        (["reset", "wait 9"], False),
+        (["--model", "9=1581", "--boot-seconds", "2", "reset", "wait 9"], False),
+    ],
+)
+def test_1581_wait_covers_its_boot_file_search(argv, ok, capsys):
+    cbm = mf1581(bus.BOOT_FILE_S["1581"])
+    out, recs = run(cbm, *argv, capsys=capsys)
+    wait = [r for r in recs if r.get("step") == "wait"][0]
+    assert out["ok"] is ok and (wait["result"] == "ok") is ok
+    assert not cbm.violations
+    if ok:
+        assert out["summary"]["9"]["model"] == "1581"
+
+
+def test_model_arg_and_1581_identify():
+    assert bus.model_arg("9=1581") == (9, "1581")
+    with pytest.raises(Exception):
+        bus.model_arg("9=1551")
+    assert bus.model_of(mf1581(0), 9) == "1581"

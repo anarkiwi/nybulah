@@ -12,6 +12,7 @@ from .simfast import NEVER, eligible, run_drive, run_transfer
 IDENTITY = {
     "1541": (0, "1541", "CBM DOS V2.6 1541"),
     "1571": (2, "1571", "CBM DOS V3.0 1571"),
+    "1581": (3, "1581", "COPYRIGHT CBM DOS V10 1581"),
 }
 
 

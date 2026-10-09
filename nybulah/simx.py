@@ -518,10 +518,12 @@ class SimX(SimCBM):
         return hasattr(self, f"{protocol}_read")
 
     def iec_poll(self):
-        """Bus lines; a halted drive's clock runs on to the next settling edge."""
+        """Bus lines; a halted drive's clock catches up with the host's and on
+        until the host's last edges have settled."""
         d = self.drive
-        t = self.bus.settles(self.bus.clock()) if d.halted else math.inf
-        if t < math.inf:
+        if d.halted:
+            t = max(self.bus.clock(), self.now)
+            t = max(t, min(self.bus.settles(t), t + self.bus.rise))
             d.cycles = max(d.cycles, math.ceil(d.cycle_at(t)))
         return super().iec_poll()
 

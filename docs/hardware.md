@@ -49,6 +49,8 @@ nybulah bus --reset-first "wait 8 9 10" "identify 8 9 10"
 nybulah bus 'command 8 "U0>M1"' "dir 8"
 # reset and wait on all drives
 nybulah bus reset "wait 8 9 10"
+# the same with a 1581 (JiffyDOS or not) on 9 and a disk in it
+nybulah bus --model 9=1581 reset "wait 8 9 10"
 ```
 
 ### Readiness
@@ -95,10 +97,53 @@ page), counted from each loop's instruction cycles (`bus.diagnostic_cycles`):
 
 The 1571 switches to 1 MHz after its diagnostic (`ptch29`), so 1 MHz bounds
 it. The 1541 figure fits the "about 1.2 seconds" after RESET that OpenCBM's
-`iec_reset` notes for a 1541. A 1581 with a disk then looks for a
-`COPYRIGHT CBM 86` boot file (`dskint.src` `cbmboot`, `utlodr.src`); that
-disk access is not bounded by the diagnostic, so give such a drive a longer
-`--boot-seconds`.
+`iec_reset` notes for a 1541. A 1581 adds its boot file search
+([below](#1581-boot-file-search)) when its model is known: from an earlier
+`identify` or `detect`, or declared with `--model 9=1581`. `--boot-seconds`
+replaces the whole bound for every drive.
+
+#### 1581 boot file search
+
+After its diagnostic a 1581 resets its controller and restores the head, then
+looks for a `COPYRIGHT CBM 86` file (`dskint.src` sets `dejavu` bit 7, then
+`cbmboot` and `utlodr.src` run `autoi` and `lookup`). It serves ATN only
+afterwards. The bound (`bus.boot_file_search_s`, 27.38 s) is built from these
+terms, all from the `DOS_1581` source and the WD177x data sheet:
+
+| term | value | source |
+|---|---|---|
+| controller tick | 10 ms | CIA timer `$4E20` cycles at 2 MHz (`mrout.src` `reset_ctl`) |
+| controller reset | 2 x 255 ms | `reset_ctl`: `xms` with Y = 255, twice ("no access for 500 mS") |
+| step | at most 12 ms | restore/seek commands `$08`/`$18`, `+1` on a WD1772 (`reset_ctl`): rate field 00 or 01, 6 or 12 ms on both WD1770 and WD1772 |
+| settle | 18 ms | `setval` (`reset_ctl`), after every seek and restore |
+| restore | 79 steps | 80 cylinders (`pmaxtrk` 79); the head can be anywhere at power on |
+| spin-up | `$50` ticks = 0.8 s | `motoracc` (`dskint.src`), counted down by the controller IRQ (`end_ctl`) |
+| disk-change check | 2 steps + settle | `wait_mtr` steps in and out |
+| seek to the directory | 39 steps + settle | track 40 is cylinder 39 (`trans_ts`) |
+| revolution | 0.2 s | 300 rpm |
+| ID search | 5 revolutions | WD177x: Record Not Found after 5 index pulses |
+| one read try | ID search + 1 revolution + ID search | `read_ctl`: seek a header, then read the side's 10 sectors into the track cache |
+| tries, `autoi` and `initdr` | 3 | `jobrtn` set: the job, then `dorec` with `revcnt` = 2 (`job.src`) |
+| tries, `lookup` | 5, plus a restore and a re-seek | `jobrtn` clear: `dorec`, restore, `dorec` again (`job.src` `recov`) |
+
+The disk jobs are two header seeks (`itrial` in `autoi` and in `initdr`), the
+side-0 track read for the header and BAM (directory sectors 3-19 are then in
+the track cache), and the side-1 track read when the directory chain reaches
+sectors 20-39:
+
+    mechanics  0.51 + 79 x 0.012 + 0.8 + 41 x 0.012 + 3 x 0.018  = 2.80 s
+    autoi/initdr  3 x 1.0 + 3 x 1.0 + 3 x 2.2                 = 12.60 s
+    lookup     5 x 2.2 + 2 x 39 x 0.012 + 2 x 0.018           = 11.97 s
+
+A readable disk takes a small part of this: the mechanics and about a
+revolution per job. The bound covers the search only; a boot file that is
+found then runs, for as long as it likes.
+
+JiffyDOS replaces the ROM, and its source is not published, so whether it
+keeps, changes or drops the boot file search cannot be sourced. The bound is
+the stock ROM's; a JiffyDOS 1581 may also fail `cbm_identify`, which matches the
+stock ROM's footprint at `$FF40` (`0x01BA`, OpenCBM `detect.c`), so declare it
+with `--model 9=1581` and give it `--boot-seconds` if it takes longer.
 
 After a DOS command: the adapter's I/O idle timeout (`XUM1541_IO_TIMEOUT_MS`,
 30 000 ms by default in the plugin), the longest a drive may go without bus
@@ -106,6 +151,16 @@ progress (`--command-seconds`). After `UJ` or `U:` the drive reruns its
 diagnostic, so the reset deadline applies.
 
 ### Failures and signals
+
+Every failed, refused-by-DOS or interrupted step carries a `bus` record, and
+the summary carries one for the end of the run and for each failed drive: the
+lines found low (`ATN`, `CLK`, `DATA`, `RESET`, `SRQ`) by `iec_poll`, how
+long each has been low (from the first poll that saw it, or from the reset if
+it was low at the first poll after it), the time since the last reset and the
+last ATN sequence, and the addressed drive. Waits poll the lines at every try,
+so the times come from real samples. `text` says it in a line, for example
+`CLK low for 1.27 s since reset; DATA low for 1.27 s since reset; ATN not
+asserted; reset 1.27 s ago; no ATN yet; no drive addressed`.
 
 A drive that misses its deadline fails its step with a clear error and the
 script stops; `--keep-going` skips only that drive's later steps. A hung DOS
