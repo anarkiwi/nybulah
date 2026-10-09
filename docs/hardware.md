@@ -61,6 +61,9 @@ restores every byte it changed, including base RAM reached through mirrors.
 
 The monitor runs VIA1 timer 1 free-running with its IRQ masked and polls the
 flag only while a handshake spins. About one second without a completed byte
-(including idle time between commands) makes the drive release the bus,
-restore zero page `$30-$35` and VIA1 (ACR, IER, T1 latches) and return to
-DOS, as `Q` does. A 1571 running at 2 MHz times out after about half a second.
+inside a command, or ten seconds waiting for the next command, makes the
+drive release the bus, restore zero page `$30-$35` and VIA1 (ACR, IER, T1
+latches) and return to DOS, as `Q` does. The host restarts the monitor
+transparently when a command follows a longer pause. A 1571 running at 2 MHz
+halves both windows; pass `idle_s=WATCHDOG_IDLE_S / 2 * 0.9` to `Monitor`
+there.

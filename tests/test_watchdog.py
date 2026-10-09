@@ -1,7 +1,9 @@
 import pytest
 
 from nybulah.monitor import (
+    BASE,
     CLOCK_HZ,
+    WATCHDOG_IDLE_S,
     WATCHDOG_S,
     BusNotIdle,
     DriveUnresponsive,
@@ -23,16 +25,17 @@ from nybulah.sim import (
 )
 
 TIMEOUT = CLOCK_HZ * WATCHDOG_S
+IDLE = CLOCK_HZ * WATCHDOG_IDLE_S
 ZP = bytes(range(0x11, 0x17))
 VIA = (0x01, 0x42, 0x1234)
 
 
-def armed(proto, cls=Drive1541):
+def armed(proto, cls=Drive1541, **kw):
     cbm = SimCBM(cls(device=10), dev=10)
     d = cbm.drive
     d.load(0x30, ZP)
     d.via1.acr, d.via1.ier, d.via1.latch = VIA
-    mon = Monitor(cbm, 10, proto)
+    mon = Monitor(cbm, 10, proto, **kw)
     mon.start()
     assert not d.via1.ier & 0x40 and d.via1.acr & 0xC0 == 0x40
     return cbm, mon
@@ -75,22 +78,60 @@ def test_progress_slower_than_timeout_survives(proto):
     assert_returned(cbm.drive)
 
 
-def test_idle_monitor_returns_and_context_recovers():
+class Clock:
+    """Host clock advanced by hand."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+@pytest.mark.parametrize("proto", ["s1", "s2"])
+def test_idle_window_between_commands(proto):
+    clock = Clock()
+    cbm, mon = armed(proto, clock=clock)
+    d = cbm.drive
+    mon.write(0x8000, b"\x42")
+    t0 = d.cycles
+    cbm.idle(int(0.98 * IDLE))
+    assert not d.halted and mon.alive()
+    cbm.settle()
+    assert 0.99 * IDLE <= d.cycles - t0 <= IDLE + 200
+    assert_returned(d)
+    clock.t += 1.1 * WATCHDOG_IDLE_S
+    assert mon.read(0x8000, 1) == b"\x42" and not d.halted
+    mon.stop()
+    cbm.settle()
+    assert_returned(d)
+
+
+def test_long_pause_restarts_live_monitor():
+    clock = Clock()
+    cbm, mon = armed("s1", clock=clock)
+    uploads, upload = [], cbm.upload
+    cbm.upload = lambda dev, addr, data: (uploads.append(addr), upload(dev, addr, data))
+    mon.write(0x8000, b"\x17")
+    clock.t += mon.idle_s + 0.01
+    assert mon.read(0x8000, 1) == b"\x17" and uploads == [BASE]
+    assert mon.running and not cbm.drive.halted
+
+
+def test_drive_left_inside_window_recovers():
     cbm = SimCBM(Drive1571(device=10), dev=10)
     with pytest.raises(HandshakeTimeout, match="left the monitor") as e:
         with Monitor(cbm, 10, "s2") as mon:
-            cbm.idle(int(1.1 * TIMEOUT))
-            assert cbm.drive.halted
+            cbm.drive.reset()
             mon.read(0x6000, 1)
     assert answers(e.value.recovered) and not mon.running
     assert cbm.bus.lines() == 0
 
 
 @pytest.mark.parametrize("proto", ["s1", "s2"])
-def test_stop_after_watchdog_exit_releases_host(proto):
+def test_stop_after_drive_exit_releases_host(proto):
     cbm, mon = armed(proto)
-    cbm.idle(int(1.1 * TIMEOUT))
-    assert_returned(cbm.drive)
+    cbm.drive.reset()
     mon.stop()
     assert cbm.bus.lines() == 0 and not mon.running
 

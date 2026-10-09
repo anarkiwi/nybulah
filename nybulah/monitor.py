@@ -10,6 +10,7 @@ from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
 BASE = 0x0500
 CLOCK_HZ = 1_000_000
 WATCHDOG_S = 1.0
+WATCHDOG_IDLE_S = 10.0
 IDLE_LINE = {"s1": IEC_DATA, "s2": IEC_CLOCK}
 
 
@@ -80,10 +81,21 @@ class Monitor:
 
     S1 uses only CLK/DATA and tolerates other DOS-idle drives on the bus; S2
     strobes ATN, so every other drive must be off the bus or parked. The drive
-    returns to DOS by itself after WATCHDOG_S without host activity.
+    returns to DOS after WATCHDOG_S stalled mid-command or WATCHDOG_IDLE_S
+    between commands; a command after idle_s idle restarts the monitor first
+    (a 1571 at 2 MHz halves the drive's windows, so halve idle_s there).
     """
 
-    def __init__(self, cbm, dev, protocol="s1", code=None, timeout=2.0):
+    def __init__(
+        self,
+        cbm,
+        dev,
+        protocol="s1",
+        code=None,
+        timeout=2.0,
+        idle_s=0.9 * WATCHDOG_IDLE_S,
+        clock=time.monotonic,
+    ):
         if protocol not in protocols() or not hasattr(cbm, f"{protocol}_read"):
             raise ValueError(f"protocol must be one of {protocols()}")
         self.cbm, self.dev, self.protocol = cbm, dev, protocol
@@ -91,7 +103,8 @@ class Monitor:
         self._read = getattr(cbm, f"{protocol}_read")
         self._write = getattr(cbm, f"{protocol}_write")
         self.running = False
-        self.timeout = timeout
+        self.timeout, self.idle_s, self.clock = timeout, idle_s, clock
+        self._last = clock()
 
     def _wait(self, line, state, step):
         """Poll until line is asserted (state=1) or released (state=0)."""
@@ -126,16 +139,30 @@ class Monitor:
             self.cbm.iec_set(IEC_ATN)
             self._wait(IEC_DATA, 0, "drive tracks ATN")
         self.running = True
+        self._last = self.clock()
 
     def alive(self):
         """Whether the drive still holds its idle line (no watchdog exit)."""
         return bool(self.cbm.iec_poll() & IDLE_LINE[self.protocol])
 
-    def _command(self, payload):
-        if not self.alive():
+    def restart(self):
+        """Stop (or recover) and start afresh, opening a new idle window."""
+        try:
+            self.stop()
+        except RECOVERABLE:
+            self.recover()
+        self.start()
+
+    def _transact(self, payload, size=None):
+        if self.clock() - self._last > self.idle_s:
+            self.restart()
+        elif not self.alive():
             self.running = False
             raise HandshakeTimeout("drive left the monitor")
         self._write(payload)
+        data = b"" if size is None else self._response(size)
+        self._last = self.clock()
+        return data
 
     def stop(self):
         """Return the drive to DOS."""
@@ -182,15 +209,13 @@ class Monitor:
 
     def read(self, addr, size):
         """Read size (1..65536) bytes of drive memory."""
-        self._command(b"R" + struct.pack("<HH", addr, size & 0xFFFF))
-        return self._response(size)
+        return self._transact(b"R" + struct.pack("<HH", addr, size & 0xFFFF), size)
 
     def write(self, addr, data):
         """Write bytes to drive memory."""
         data = bytes(data)
-        self._command(b"W" + struct.pack("<HH", addr, len(data) & 0xFFFF) + data)
+        self._transact(b"W" + struct.pack("<HH", addr, len(data) & 0xFFFF) + data)
 
     def jsr(self, addr):
         """Call a drive subroutine; return its (A, X, Y)."""
-        self._command(b"J" + struct.pack("<H", addr))
-        return tuple(self._response(3))
+        return tuple(self._transact(b"J" + struct.pack("<H", addr), 3))

@@ -19,9 +19,10 @@
 ;   'Q'           release the bus and return to DOS
 ;
 ; Watchdog: VIA1 T1 free-runs with IRQs masked, polled through IFR bit 6 only
-; inside WAIT spin loops; WD_TICKS periods without a byte of progress make
-; the drive release the bus, restore zero page and VIA1, and return to DOS
-; exactly like 'Q'. The 1571 in 2 MHz mode halves the timeout.
+; inside WAIT spin loops. WD_MS without a byte of progress inside a command,
+; or WD_IDLE_MS waiting for the next command, makes the drive release the
+; bus, restore zero page and VIA1, and return to DOS exactly like 'Q'. The
+; 1571 in 2 MHz mode halves both.
 
         .export start
 
@@ -48,16 +49,20 @@ CLOCK_HZ = 1000000
 WD_MS    = 1000
 WD_CYCLES = CLOCK_HZ / 1000 * WD_MS
 WD_TICKS = WD_CYCLES / $10000 + 1
-WD_LATCH = WD_CYCLES / WD_TICKS - 2     ; free-run period is latch + 2
+WD_PERIOD = WD_CYCLES / WD_TICKS
+WD_LATCH = WD_PERIOD - 2                ; free-run period is latch + 2
+WD_IDLE_MS = 10000
+WD_IDLE_TICKS = CLOCK_HZ / 1000 * WD_IDLE_MS / WD_PERIOD
+.assert WD_IDLE_TICKS < 256, error, "idle ticks must fit a byte"
 
 ptr     = $30
 len     = $32
 tmp     = $34
 zpsize  = 6
 
-; Restart the no-progress budget. Clobbers A.
+; Restart the no-progress budget (wdload ticks). Clobbers A.
 .macro WDRESET
-        lda #WD_TICKS
+        lda wdload
         sta wdcnt
 .endmacro
 
@@ -108,10 +113,16 @@ start:  sei
         sta T1CL
         lda #>WD_LATCH
         sta T1CH
+        lda #WD_TICKS
+        sta wdload
         WDRESET
         jsr open
 
-loop:   jsr getbyte
+loop:   ldx #WD_IDLE_TICKS
+        stx wdload
+        jsr getbyte
+        ldx #WD_TICKS
+        stx wdload
         cmp #'R'
         beq cmd_read
         cmp #'W'
@@ -144,7 +155,7 @@ exit:   ldx savesp
         cli
         rts
 
-; One T1 period elapsed inside WAIT: ack it, expire after WD_TICKS.
+; One T1 period elapsed inside WAIT: ack it, expire after wdload ticks.
 ; Returns with Z clear; preserves A, X and Y.
 wdtick: bit T1CL
         dec wdcnt
@@ -231,3 +242,4 @@ viasave: .res 4                 ; ACR, IER, T1 latch lo/hi
 regs:   .res 3
 savesp: .res 1
 wdcnt:  .res 1
+wdload: .res 1
