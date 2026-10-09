@@ -19,8 +19,8 @@ them back.
   over IEC. Other drives can stay powered on the bus.
 - **Fast, recoverable transport.** Drive-resident 6502 code works with the
   stock S1/S2 protocols. With the modified xum1541 firmware it uses the X
-  protocol: CLK/DATA only, two bits per edge, and a 16-bit block check with
-  retry. Watchdogs on the drive, in the firmware and on the host return
+  protocol: CLK/DATA only, two bits per edge, one handshake per 64-byte burst
+  (firmware v10), and a 16-bit block check with retry. Watchdogs on the drive, in the firmware and on the host return
   everything to a usable state after a stall, with no power cycling.
 - **Analysis on the host:**
   - vectorised GCR codec;
@@ -58,8 +58,8 @@ them back.
 
 - A ZoomFloppy or another xum1541 adapter. Firmware v9 from
   [anarkiwi/OpenCBM](https://github.com/anarkiwi/OpenCBM/tree/xum1541-timeouts)
-  is needed for the X protocol and for stall recovery; stock firmware works
-  with S1/S2.
+  is needed for the X protocol and for stall recovery (v10, branch
+  `xum1541-xfast`, for burst X); stock firmware works with S1/S2.
 - A 1541 or 1571 with an 8 KB RAM expansion, which is a drive modification.
   It holds a little more than one revolution of any track, and nybulah finds
   it automatically. Stock drives work only with M-R/M-W and sector-level
@@ -86,6 +86,8 @@ s1|s2|s3` and `--retries`.
 - [docs/hardware.md](docs/hardware.md): hardware setup, firmware flashing and
   the hardware check
 - [docs/protocol.md](docs/protocol.md): X wire protocol and timing
+- [docs/protocol-review.md](docs/protocol-review.md): X cycle budgets, burst
+  design and predicted rates
 - [docs/disk.md](docs/disk.md): D64/D71 reading and writing
 - [docs/analysis.md](docs/analysis.md): GCR, revolution detection and format
   APIs

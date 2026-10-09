@@ -34,10 +34,18 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybula
 
 ## S3 (X protocol), both drives powered
 
-S3 needs xum1541 firmware v9 (flashed below) and the plugin this image builds
-by default (`OPENCBM_SOURCE=git`). It uses only CLK/DATA, so other drives can
-stay on; with older firmware or the stock plugin the step is recorded as
-skipped:
+S3 needs xum1541 firmware v9 or later and the plugin this image builds by
+default (`OPENCBM_SOURCE=git`). With firmware v10 and a v10 plugin it uses
+burst X ([protocol.md](protocol.md)); build the image from a local OpenCBM
+tree (branch `xum1541-xfast`) until `OPENCBM_REF` points at it, since a v9
+plugin refuses v10 firmware:
+
+```sh
+docker build --build-arg OPENCBM_SOURCE=local --build-context opencbm=../OpenCBM --target runtime -t nybulah .
+```
+
+It uses only CLK/DATA, so other drives can stay on; with older firmware or the
+stock plugin the step is recorded as skipped:
 
 ```sh
 docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah hwcheck --devs 8 10 --proto s3
@@ -60,7 +68,8 @@ its other subcommands (`nybulah <command> --help`), e.g.
 
 ## Flashing the ZoomFloppy firmware
 
-The firmware hex is built from the same OpenCBM commit the image uses:
+The firmware hex is built from the same OpenCBM commit the image uses (for
+v10, the `xum1541-xfast` branch and `xum1541-ZOOMFLOPPY-v10.hex`):
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
@@ -101,7 +110,8 @@ Transfer rates measured on a ZoomFloppy with firmware v9, both drives powered,
 | X read / write | 9102 / 8278 | 9105 / 8277 | 18176 / 16523 |
 
 `nybulah bench --protocol s3 --fast` runs a 1571 at 2 MHz for the transfer
-(VIA1 PA5) and returns it to 1 MHz before handing back to DOS.
+(VIA1 PA5) and returns it to 1 MHz before handing back to DOS. Burst X
+(firmware v10) predictions are in [protocol-review.md](protocol-review.md).
 
 ## Probe safety
 

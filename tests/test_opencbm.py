@@ -60,18 +60,21 @@ def test_open_and_plugin_failures():
 class PluginLib(FakeLib):
     """FakeLib whose plugin exports real callbacks for the X entry points."""
 
-    def __init__(self, x_rc=0, **rc):
+    def __init__(self, x_rc=0, xb_rc=0, **rc):
         super().__init__(**rc)
         self.seen = []
         xfer = ctypes.CFUNCTYPE(
             ctypes.c_int, ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint
         )
         tmo = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_ssize_t, ctypes.c_uint)
+        write = xfer(lambda fd, buf, n: self.seen.append(ctypes.string_at(buf, n)) or n)
         self.fns = {
             b"opencbm_plugin_x_read_n": xfer(lambda fd, buf, n: x_rc or n),
-            b"opencbm_plugin_x_write_n": xfer(
-                lambda fd, buf, n: self.seen.append(ctypes.string_at(buf, n)) or n
-            ),
+            b"opencbm_plugin_x_write_n": write,
+            b"opencbm_plugin_xb_read_n": xfer(lambda fd, buf, n: xb_rc or n),
+            b"opencbm_plugin_xb2_read_n": xfer(lambda fd, buf, n: xb_rc or n),
+            b"opencbm_plugin_xb_write_n": write,
+            b"opencbm_plugin_xb2_write_n": write,
             b"opencbm_plugin_xum1541_set_timeout": tmo(
                 lambda fd, ms: self.seen.append(ms) or 0
             ),
@@ -93,3 +96,15 @@ def test_s3_entry_points_and_probe():
     assert not old.supports("s3")
     bare = OpenCBM(lib=FakeLib(cbm_get_plugin_function_address=None))
     assert not bare.supports("s3") and not bare.set_timeout(1)
+
+
+def test_xb_entry_points_and_probe():
+    cbm = OpenCBM(lib=PluginLib())
+    assert cbm.supports("xb") and cbm.supports("s3")
+    assert cbm.xb_read(2) == cbm.xb2_read(2) == b"\0\0"
+    cbm.xb_write(b"ab")
+    cbm.xb2_write(b"cd")
+    assert cbm.lib.seen == [b"ab", b"cd"]
+    assert not OpenCBM(lib=PluginLib(xb_rc=-1)).supports("xb")
+    bare = OpenCBM(lib=FakeLib(cbm_get_plugin_function_address=None))
+    assert not bare.supports("xb")
