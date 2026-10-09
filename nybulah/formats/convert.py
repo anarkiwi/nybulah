@@ -3,7 +3,7 @@
 import numpy as np
 from tqdm import tqdm
 
-from ..analysis.capture import framed_capture
+from ..analysis.capture import framed_capture, segments
 from ..analysis.cycle import TrackKind, extract_revolution, find_cycle
 from ..analysis.gcr import speed_zone, to_bits, to_bytes
 from ..analysis.sector import SectorError, decode_track, format_track
@@ -15,9 +15,16 @@ MAX_D64_TRACK = 42
 
 
 def revolution_bytes(bits, cycle):
-    """One revolution as bytes, its final partial byte completed circularly."""
+    """One revolution as bytes, its final partial byte completed circularly.
+
+    An unformatted capture has no revolution: its first ``cycle.length`` bits
+    (the nominal length) are kept as they were read.
+    """
     if cycle.kind == TrackKind.KILLER:
         return np.full(-(-cycle.length // 8), 0xFF, np.uint8)
+    if cycle.kind == TrackKind.UNFORMATTED:
+        stream = segments(bits).bits if hasattr(bits, "positions") else bits
+        return to_bytes(np.asarray(stream, np.uint8)[: cycle.length])
     rev = extract_revolution(bits, cycle)
     return to_bytes(np.concatenate((rev, rev[: -len(rev) % 8])))
 
@@ -32,11 +39,15 @@ def _score(bits, cycle, halftrack):
     return (cycle.kind, errors, -cycle.match)
 
 
-def nib_to_g64(image: Nib, period=None, index_aligned=False, progress=True):
+def nib_to_g64(
+    image: Nib, period=None, index_aligned=False, progress=True, unformatted=None
+):
     """Trim each capture to one revolution and store it in a G64.
 
     NB2 entries use the best pass (fewest sector errors, then highest
-    repetition) read at the header density. Unformatted tracks are omitted.
+    repetition) read at the header density. Every track is written: an
+    unformatted one as its capture cut to the nominal length, and its
+    halftrack appended to the ``unformatted`` list when one is given.
     """
     out = G64()
     for entry in tqdm(image.entries, desc="nib->g64", unit="trk", disable=not progress):
@@ -44,10 +55,11 @@ def nib_to_g64(image: Nib, period=None, index_aligned=False, progress=True):
         reads = [framed_capture(capture) for capture in passes]
         reads = [(b, find_cycle(b, entry.zone, period, index_aligned)) for b in reads]
         bits, cycle = min(reads, key=lambda r, h=entry.halftrack: _score(*r, h))
-        if cycle.kind != TrackKind.UNFORMATTED:
-            out.tracks[entry.halftrack] = G64Track(
-                revolution_bytes(bits, cycle), entry.zone
-            )
+        if cycle.kind == TrackKind.UNFORMATTED and unformatted is not None:
+            unformatted.append(entry.halftrack)
+        out.tracks[entry.halftrack] = G64Track(
+            revolution_bytes(bits, cycle), entry.zone
+        )
     return out
 
 

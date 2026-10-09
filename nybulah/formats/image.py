@@ -328,22 +328,27 @@ def _stem(name):
     return name[: STREAM_NAME.search(name).start()]
 
 
-def to_g64(image, progress=False):
-    """Best revolution of every formatted or killer track, as a G64/G71."""
+def to_g64(image, progress=False, unformatted=None):
+    """Best revolution of every track, as a G64/G71.
+
+    Unformatted tracks are written as their capture cut to the nominal length
+    and their keys appended to the ``unformatted`` list when one is given.
+    """
     if isinstance(image.source, G64):
         return image.source
     out = G64()
     for key in tqdm(sorted(image.tracks), desc="g64", unit="trk", disable=not progress):
         cap, bits, cycle = best_revolution(image.tracks[key], key)
-        if cycle.kind != TrackKind.UNFORMATTED:
-            speed = cap.speed if cap.speed is not None else cap.zone
-            out.tracks[key] = G64Track(revolution_bytes(bits, cycle), speed)
+        if cycle.kind == TrackKind.UNFORMATTED and unformatted is not None:
+            unformatted.append(key)
+        speed = cap.speed if cap.speed is not None else cap.zone
+        out.tracks[key] = G64Track(revolution_bytes(bits, cycle), speed)
     return out
 
 
-def to_d64(image, progress=False):
+def to_d64(image, progress=False, unformatted=None):
     """Decoded sectors (first side) with error bytes."""
-    return g64_to_d64(to_g64(image, progress), progress=progress)
+    return g64_to_d64(to_g64(image, progress, unformatted), progress=progress)
 
 
 def _flux_revolution(cap):
@@ -353,8 +358,11 @@ def _flux_revolution(cap):
     return P64Track(np.minimum(positions, ROTATION_TICKS - 1))
 
 
-def to_p64(image, progress=False):
-    """Flux of the first indexed revolution where kept, else the best bit revolution."""
+def to_p64(image, progress=False, unformatted=None):
+    """Flux of the first indexed revolution where kept, else the best bit revolution.
+
+    Unformatted tracks are kept as in :func:`to_g64`.
+    """
     if isinstance(image.source, P64):
         return image.source
     out = P64()
@@ -364,15 +372,17 @@ def to_p64(image, progress=False):
             out.tracks[key] = _flux_revolution(caps[0])
             continue
         cap, bits, cycle = best_revolution(caps, key)
-        if cycle.kind != TrackKind.UNFORMATTED:
-            zones = None
-            if cap.circular and np.ndim(cap.speed):
-                zones = np.repeat(cap.speed, 8)[: len(bits)]
-            out.tracks[key] = track_from_bits(bits, zones=zones)
+        if cycle.kind == TrackKind.UNFORMATTED and unformatted is not None:
+            unformatted.append(key)
+        zones = None
+        if cap.circular and np.ndim(cap.speed):
+            zones = np.repeat(cap.speed, 8)[: len(bits)]
+        out.tracks[key] = track_from_bits(bits, zones=zones)
     return out
 
 
-def _track_name(key):
+def track_name(key):
+    """Track number of a key as text, ``.5`` for half tracks."""
     half = key & ~SIDE1
     return f"{half // 2}" + (".5" if half % 2 else "")
 
@@ -392,7 +402,7 @@ def info(image, progress=False):
             errors = int((decoded.errors != SectorError.OK).sum())
         rows.append(
             {
-                "track": _track_name(key),
+                "track": track_name(key),
                 "side": side,
                 "captures": len(image.tracks[key]),
                 "revolutions": cap.revolutions,

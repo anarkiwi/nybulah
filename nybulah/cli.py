@@ -4,6 +4,7 @@ import argparse
 
 from . import bench, diskcmd, hwcheck, ramprobe
 from .imagecmd import Convert, Info
+from .survey import Survey
 from .tool import run
 
 COMMANDS = {
@@ -14,7 +15,7 @@ COMMANDS = {
     "write": diskcmd.WRITE,
 }
 
-COMMANDS.update(convert=Convert, info=Info)
+COMMANDS.update(convert=Convert, info=Info, survey=Survey)
 
 
 def main(argv=None, cbm=None):

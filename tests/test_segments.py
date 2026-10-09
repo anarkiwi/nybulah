@@ -15,7 +15,12 @@ from nybulah.analysis.cycle import (
     header_period,
     lag_window,
 )
-from nybulah.analysis.sector import SectorError, decode_track, format_track
+from nybulah.analysis.sector import (
+    SYNC_BYTES,
+    SectorError,
+    decode_track,
+    format_track,
+)
 from nybulah.analysis.synth import byte_capture, simulate_capture
 
 CAPTURE_BYTES = 31 * 256
@@ -148,3 +153,45 @@ def test_header_period_matches_cycle():
     blank = ByteCapture(np.full(9000, 0x55, np.uint8), [10, 4000], [40, 40], "now")
     assert header_period(blank, 3) is None
     assert header_period(ByteCapture(np.zeros(9, np.uint8), [], []), 3) is None
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_density_label_does_not_bound_the_period(seed):
+    """Zone 0 content labelled zone 2: headers repeat, so all zones' windows are searched."""
+    bits = _track(35, seed=seed)
+    cap = _capture(bits, seed)
+    assert not lag_window(2)[0] <= len(bits) <= lag_window(2)[1]
+    _assert_period(find_cycle(cap, 2), bits, 35)
+    noise = gcr.encode_bits(np.random.default_rng(seed).integers(0, 256, 5000))
+    assert find_cycle(_capture(noise, seed, "now"), 2).kind == TrackKind.UNFORMATTED
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_identical_duplicate_header_keeps_true_period(seed):
+    """A sector written twice, identically, within one revolution."""
+    track, n = 1, 19
+    payload = np.random.default_rng(seed).integers(0, 256, (n, 256), np.uint8)
+    raw = format_track(track, payload, b"ID", capacity=gcr.track_capacity(3))
+    sector = len(raw) // n
+    raw[(n - 1) * sector : n * sector] = raw[3 * sector : 4 * sector]
+    bits = gcr.to_bits(raw)
+    cycle = find_cycle(_capture(bits, seed), 3)
+    assert cycle.kind == TrackKind.FORMATTED and cycle.segments == 2 * n
+    assert abs(cycle.length - len(bits)) <= 3 * cycle.segments
+
+
+def test_no_sync_pair_spans_a_revolution():
+    """A one-sector track whose syncs all lie within one revolution: the gap fill
+    repeats at any lag, so only a header seen twice fixes the period."""
+    raw = format_track(1, np.arange(256, dtype=np.uint8)[None], b"ID", capacity=7692)
+    bits = np.roll(gcr.to_bits(raw), 20000)
+    cap = framed_capture(gcr.to_bytes(simulate_capture(bits, 8 * 8192)))
+    assert segments(cap).begin.max() - segments(cap).begin.min() < lag_window(3)[0]
+    assert find_cycle(cap, 3).kind == TrackKind.UNFORMATTED
+    after_sync = np.roll(bits, -20000 - 8 * SYNC_BYTES)
+    stream = gcr.to_bytes(simulate_capture(after_sync, 65536))
+    unmeasured = ByteCapture(
+        stream, np.zeros(0, np.int64), np.zeros(0, np.int64), "now"
+    )
+    cycle = find_cycle(unmeasured, 3)
+    assert cycle.kind == TrackKind.FORMATTED and cycle.length == len(bits)

@@ -9,10 +9,10 @@ from .formats.g64 import write_g64
 from .formats.p64 import write_p64
 
 WRITERS = {
-    ".g64": lambda img: write_g64(images.to_g64(img, progress=True)),
-    ".g71": lambda img: write_g64(images.to_g64(img, progress=True)),
-    ".d64": lambda img: write_d64(images.to_d64(img, progress=True)),
-    ".p64": lambda img: write_p64(images.to_p64(img, progress=True)),
+    ".g64": lambda img, unf: write_g64(images.to_g64(img, True, unf)),
+    ".g71": lambda img, unf: write_g64(images.to_g64(img, True, unf)),
+    ".d64": lambda img, unf: write_d64(images.to_d64(img, True, unf)),
+    ".p64": lambda img, unf: write_p64(images.to_p64(img, True, unf)),
 }
 
 
@@ -30,7 +30,11 @@ def _layout_option(ap):
 
 
 class Convert:
-    """Convert a NIB/NBZ/NB2/G64/G71/P64/SCP/KryoFlux/D64 image to G64, G71, D64 or P64."""
+    """Convert a NIB/NBZ/NB2/G64/G71/P64/SCP/KryoFlux/D64 image to G64, G71, D64 or P64.
+
+    Tracks with no repeating revolution are kept as their capture cut to the
+    nominal length and listed under ``unformatted``.
+    """
 
     NEEDS_ADAPTER = False
 
@@ -46,11 +50,13 @@ class Convert:
         if writer is None:
             raise ValueError(f"{args.target}: output must be one of {sorted(WRITERS)}")
         image = _load(args)
-        args.target.write_bytes(writer(image))
+        unformatted = []
+        args.target.write_bytes(writer(image, unformatted))
         out = {
             "source": image.kind,
             "target": str(args.target),
             "tracks": len(image.tracks),
+            "unformatted": [images.track_name(k) for k in unformatted],
         }
         print(json.dumps(out))
         return out

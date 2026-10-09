@@ -3,6 +3,11 @@ import pytest
 
 from nybulah.analysis import gcr
 from nybulah.analysis.sector import (
+    DATA_CHECKED_BYTES,
+    DATA_GCR_BYTES,
+    HEADER_GAP_BYTES,
+    HEADER_GCR_BYTES,
+    SYNC_BYTES,
     SectorError,
     data_blocks,
     decode_track,
@@ -171,3 +176,22 @@ def test_duplicate_headers_prefer_good_copy():
 def test_format_overflow():
     with pytest.raises(ValueError):
         format_track(1, np.zeros((21, 256), np.uint8), DISK_ID, capacity=7000)
+
+
+@pytest.mark.parametrize(
+    "byte,code",
+    [(DATA_CHECKED_BYTES, 0), (DATA_CHECKED_BYTES + 1, 1), (1, 0), (100, 0), (257, 1)],
+)
+def test_bad_gcr_covers_id_data_and_checksum_only(byte, code):
+    """An illegal 5-bit code in the off bytes after the checksum reads OK; in the
+    data or checksum it is error 24 (an illegal block ID is 22)."""
+    track = 1
+    data = _rng(3).integers(0, 256, (gcr.sectors_per_track(track), 256))
+    bits = gcr.to_bits(format_track(track, data, DISK_ID))
+    block = 8 * (2 * SYNC_BYTES + HEADER_GCR_BYTES + HEADER_GAP_BYTES)
+    pos = block + 10 * byte + 5 * code
+    bits[pos : pos + 5] = 0
+    errors = decode_track(bits, track, DISK_ID).errors
+    expect = SectorError.OK if byte >= DATA_CHECKED_BYTES else SectorError.BAD_GCR
+    assert 10 * byte < 8 * DATA_GCR_BYTES and errors[0] == expect
+    assert (errors[1:] == SectorError.OK).all()

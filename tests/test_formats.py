@@ -142,8 +142,12 @@ def test_nib_header_roundtrip_and_conversion():
     assert [(e.halftrack, e.density) for e in nib.entries] == [
         (e.halftrack, e.density) for e in entries
     ]
-    out = nib_to_g64(nib, progress=False)
-    assert 74 not in out.tracks
+    unformatted = []
+    out = nib_to_g64(nib, progress=False, unformatted=unformatted)
+    assert unformatted == [74]
+    nominal = round(gcr.bits_per_revolution(0))
+    assert nominal % 8 == 0 and len(out.tracks[74].data) == nominal // 8
+    assert (out.tracks[74].data == noise[: nominal // 8]).all()
     assert (out.tracks[72].data == 0xFF).all() and out.tracks[72].speed == 0
     for halftrack, track in g64.tracks.items():
         assert len(out.tracks[halftrack].data) == len(track.data)

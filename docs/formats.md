@@ -23,12 +23,14 @@ The other functions work on a `DiskImage`:
 
 - `info(image)` summarises each track: cycle kind, length, z, zone and sector
   errors.
-- `to_g64`, `to_d64` and `to_p64` convert it.
+- `to_g64`, `to_d64` and `to_p64` convert it. No track is dropped. A track
+  with no repeating revolution is written as its capture cut to the nominal
+  length, and its key is appended to the optional `unformatted` list.
 
 From the command line:
 
 - `nybulah convert in out` converts any readable format to `.g64`, `.g71`,
-  `.d64` or `.p64`.
+  `.d64` or `.p64`. Its output lists those tracks under `unformatted`.
 - `nybulah info file` prints the per-track summary.
 
 | Format | Read | Write | Keeps | Loses |
