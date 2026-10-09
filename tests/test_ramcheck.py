@@ -17,6 +17,7 @@ from nybulah.simdisk import Media, disk_drive
 from nybulah.simhost import SimCBM, SimMonitor
 
 HW = pathlib.Path(__file__).parent / "data" / "hw"
+S4 = HW / "s4-1571"
 
 
 def patch(monkeypatch, model, mon):
@@ -97,3 +98,16 @@ def test_compare_separates_byte_faults_from_extra_syncs():
     assert sum(r["differ"] + len(r["extra_syncs"]) for r in rows.values()) == 2
     swapped = ramcheck.against(ref, 18, "fault", fault)
     assert swapped["missing_syncs"] == 1 and swapped["extra_syncs"] == 0
+
+
+@pytest.mark.parametrize("halftrack", [36, 50])
+@pytest.mark.parametrize("repeat", range(3))
+def test_1571_ram_captures_add_no_syncs_to_the_stream(halftrack, repeat):
+    """Real 1571 RAM captures of a blank disk, with the stream of the same track:
+    the bytes agree, so every sync the merge finds is one the stream has."""
+    ram = Capture.load(S4 / f"ram-h{halftrack}-{repeat}.npz")
+    stream = Capture.load(S4 / f"stream-h{halftrack}.npz")
+    out = ramcheck.digest(ram, halftrack // 2, [("stream", stream)])
+    (vs,) = out["against"]
+    assert vs["sectors"] == out["sectors_ok"] == (19 if halftrack == 36 else 18)
+    assert vs["extra_syncs"] == vs["missing_syncs"] == 0 and vs["differ"] <= 1

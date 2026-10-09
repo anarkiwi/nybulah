@@ -104,7 +104,8 @@ exactly; a byte already waiting when its wait began is pinned from a timed
 neighbour. The extra cycles across a sync are known to the sum of the two
 windows, at most 2 + 7 cycles, against a cell of 3.25 cycles at zone 3. The
 hidden-one count is the feasible integer nearest the middle (0, or enough to
-make 10 ones with the latched ones), and every sync carries the bounds the
+make 10 ones with the latched ones; an excess that fits neither takes the
+nearer, so one below zero is never a sync), and every sync carries the bounds the
 windows allow (`Capture.sync_bounds`). Since 9 cycles is under 3 cells at
 any supported speed, the estimate is within ±1 bit (a few in 10⁴ reach
 ±2 or ±3, inside their bounds), and exact when the windows are narrow.
