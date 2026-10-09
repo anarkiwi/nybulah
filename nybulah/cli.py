@@ -3,6 +3,7 @@
 import argparse
 
 from . import bench, diskcmd, hwcheck, ramprobe
+from .imagecmd import Convert, Info
 from .tool import run
 
 COMMANDS = {
@@ -12,6 +13,8 @@ COMMANDS = {
     "read": diskcmd.READ,
     "write": diskcmd.WRITE,
 }
+
+COMMANDS.update(convert=Convert, info=Info)
 
 
 def main(argv=None, cbm=None):
