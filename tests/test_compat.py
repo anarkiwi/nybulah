@@ -332,7 +332,7 @@ def test_nib_flux_and_d64_conversions():
         ]
     )
     rows = images.info(loads(write_nib(nib)))
-    assert [r["kind"] for r in rows] == ["KILLER", "FORMATTED"] and rows[1][
+    assert [r["kind"] for r in rows] == ["KILLER", "UNFORMATTED"] and rows[1][
         "track"
     ] == "1.5"
     short = images.Capture(np.ones(100, np.uint8), 3)

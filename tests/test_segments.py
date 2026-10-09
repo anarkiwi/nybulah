@@ -15,7 +15,12 @@ from nybulah.analysis.cycle import (
     header_period,
     lag_window,
 )
-from nybulah.analysis.sector import SectorError, decode_track, format_track
+from nybulah.analysis.sector import (
+    SYNC_BYTES,
+    SectorError,
+    decode_track,
+    format_track,
+)
 from nybulah.analysis.synth import byte_capture, simulate_capture
 
 CAPTURE_BYTES = 31 * 256
@@ -173,3 +178,20 @@ def test_identical_duplicate_header_keeps_true_period(seed):
     cycle = find_cycle(_capture(bits, seed), 3)
     assert cycle.kind == TrackKind.FORMATTED and cycle.segments == 2 * n
     assert abs(cycle.length - len(bits)) <= 3 * cycle.segments
+
+
+def test_no_sync_pair_spans_a_revolution():
+    """A one-sector track whose syncs all lie within one revolution: the gap fill
+    repeats at any lag, so only a header seen twice fixes the period."""
+    raw = format_track(1, np.arange(256, dtype=np.uint8)[None], b"ID", capacity=7692)
+    bits = np.roll(gcr.to_bits(raw), 20000)
+    cap = framed_capture(gcr.to_bytes(simulate_capture(bits, 8 * 8192)))
+    assert segments(cap).begin.max() - segments(cap).begin.min() < lag_window(3)[0]
+    assert find_cycle(cap, 3).kind == TrackKind.UNFORMATTED
+    after_sync = np.roll(bits, -20000 - 8 * SYNC_BYTES)
+    stream = gcr.to_bytes(simulate_capture(after_sync, 65536))
+    unmeasured = ByteCapture(
+        stream, np.zeros(0, np.int64), np.zeros(0, np.int64), "now"
+    )
+    cycle = find_cycle(unmeasured, 3)
+    assert cycle.kind == TrackKind.FORMATTED and cycle.length == len(bits)

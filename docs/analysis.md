@@ -107,6 +107,11 @@ Both paths start the same way:
    1–6 are repeated over the union of all four zones' windows
    (`any_zone_window`), with Bonferroni over that union. An image's density
    label need not be the rate its capture was read at.
+9. If no pair of measured syncs can span a revolution, the restored stream is
+   scored bit by bit, as for continuous streams. Bit agreement can come from
+   gap fill alone, so the lag must also be significant for 8-bit words. Their
+   chance agreement is taken from the word frequencies of the two overlapping
+   regions, so a fill that repeats at every lag scores nothing.
 
 **Continuous streams.** One FFT autocorrelation scores every lag by its bit
 agreement above chance, p² + (1−p)². A track is `FORMATTED` only if both of

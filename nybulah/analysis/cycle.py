@@ -301,7 +301,8 @@ def find_cycle(
     A byte-ready capture whose sector headers repeat but which has no period
     in the window of ``zone`` is searched again over the windows of all zones,
     Bonferroni-corrected over that union: an image's density label need not
-    be the rate its capture was actually read at.
+    be the rate its capture was actually read at. When no pair of measured
+    syncs can span a revolution, the restored stream is analysed bit by bit.
 
     Args:
         bits: 0/1 array of a continuous capture, or a byte-ready capture
@@ -325,17 +326,47 @@ def find_cycle(
     nominal = _nominal(zone, period)
     if 2 * runs_of_ones(bits)[1].sum() > len(bits):
         return Cycle(TrackKind.KILLER, 0, nominal)
-    if seg is not None and (len(seg) > 1 or lo >= len(bits)):
-        cycle = _segment_cycle(seg, lo, hi, alpha, nominal, index_aligned)
-        if cycle.kind == TrackKind.UNFORMATTED and _headers_repeat(seg):
-            wide = _segment_cycle(
-                seg, *any_zone_window(period, tolerance), alpha, nominal, index_aligned
-            )
-            cycle = wide if wide.kind == TrackKind.FORMATTED else cycle
-        return cycle
-    if lo >= len(bits):
+    if seg is None and lo >= len(bits):
         raise ValueError(f"capture of {len(bits)} bits is shorter than {lo} bits")
-    return _bit_cycle(bits, lo, min(hi, len(bits) - 1), alpha, nominal, index_aligned)
+    windows = [(lo, hi)]
+    if seg is not None and _headers_repeat(seg):
+        windows.append(any_zone_window(period, tolerance))
+    found = [
+        _window_cycle(bits, seg, wlo, whi, alpha, nominal, index_aligned)
+        for wlo, whi in windows
+    ]
+    return next((c for c in found if c.kind == TrackKind.FORMATTED), found[0])
+
+
+def _window_cycle(bits, seg, lo, hi, alpha, nominal, index_aligned):
+    """Segment analysis where some sync pair can span ``[lo, hi]``, else bit level."""
+    if seg is not None and _pairs(seg, lo, hi)[0].size:
+        return _segment_cycle(seg, lo, hi, alpha, nominal, index_aligned)
+    if lo >= len(bits):
+        return Cycle(TrackKind.UNFORMATTED, 0, nominal)
+    cycle = _bit_cycle(bits, lo, min(hi, len(bits) - 1), alpha, nominal, index_aligned)
+    if seg is None or cycle.kind != TrackKind.FORMATTED:
+        return cycle
+    if _byte_z(bits, cycle.length) >= _threshold(alpha, hi - lo + 1):
+        return cycle
+    return Cycle(TrackKind.UNFORMATTED, 0, nominal, cycle.match, cycle.z)
+
+
+def _byte_z(bits, lag):
+    """Significance of 8-bit words repeating ``lag`` bits later.
+
+    Chance is the coincidence rate of the two overlapping regions' own word
+    frequencies, so a fill that repeats at every lag scores nothing.
+    """
+    n = (len(bits) - lag) // 8
+    words = np.packbits(
+        np.stack((bits[: 8 * n], bits[lag : lag + 8 * n])).reshape(2, n, 8), axis=2
+    )[..., 0]
+    freq = np.stack([np.bincount(w, minlength=256) for w in words]) / max(n, 1)
+    chance = float((freq[0] * freq[1]).sum())
+    if n == 0 or chance >= 1:
+        return -np.inf
+    return float(_zscore((words[0] == words[1]).sum(), n, chance))
 
 
 def _segment_revolution(seg, cycle):
