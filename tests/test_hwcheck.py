@@ -96,6 +96,9 @@ def test_disk_survey_step(tmp_path, monkeypatch):
     zones = summary["10"]["disk"]["zones"]
     assert [z["sectors_ok"] for z in zones] == [21, 19, 18, 17]
     assert summary["10"]["disk"]["rpm"] is None
+    saved = sorted(p.name for p in tmp_path.glob("hwcheck-*/dev10/*.npz"))
+    assert saved[0] == "locate-s0-t18-0.npz" and len(saved) == 5
+    assert "survey-s0-t18-0.npz" in saved
 
 
 def test_s4_session_benches_1571_at_both_clocks(tmp_path):

@@ -240,16 +240,19 @@ def failed(report):
 SURVEY_TRACKS = (1, 18, 25, 31)
 
 
-def survey(nib, tracks=SURVEY_TRACKS):
+def survey(nib, tracks=SURVEY_TRACKS, archive=None):
     """Read-only check: one capture per density zone, plus the index period on a 1571.
 
-    The head is located and calibrated first, as for a disk read.
+    The head is located and calibrated first, as for a disk read; ``archive``
+    saves every capture.
     """
+    archive = archive if isinstance(archive, Archive) else Archive(archive)
     nib.locate()
-    calibrate(nib, Archive())
+    calibrate(nib, archive)
     out = []
     for track in tracks:
-        cap = nib.capture(2 * track, start="now")
+        job = TrackJob(0, track, track)
+        cap = archive("survey", job, nib.capture(job.halftrack, start="now"))
         dec = decode_track(cap.bits(), track)
         runs = cap.sync_bits
         out.append(
@@ -272,5 +275,6 @@ def survey(nib, tracks=SURVEY_TRACKS):
         )
     rpm = None
     if nib.model == "1571":
-        rpm = nib.capture(2 * BAM_TRACK, start="index").rpm
+        job = TrackJob(0, BAM_TRACK, BAM_TRACK)
+        rpm = archive("index", job, nib.capture(job.halftrack, start="index")).rpm
     return {"zones": out, "rpm": rpm}

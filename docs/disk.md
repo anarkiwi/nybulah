@@ -37,6 +37,11 @@ it opens a session, and restores them on close. On a 1571 it also selects
 | Buffer (31 pages) | `$8000-$9EFF` | `$6000-$7EFF` |
 | `PASS` code (1 page, holds **write**) | `$9F00` | `$7F00` |
 
+A streaming Nibbler (1571, s4, firmware v12) keeps the `SEEK` build of
+`track.s` at `$0300` and loads the stream code over it to stream; RAM passes
+and writes load `track_1571.bin` there first, and refuse with `TrackError`
+when its `PASS` page does not read back from expansion RAM.
+
 - **prep** sets the motor, LED and density bits. On a 1571 it also sets the
   side bit (VIA1 PA2). It steps a signed number of halftracks with a delay per
   step, then waits a settle time.

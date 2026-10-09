@@ -8,7 +8,7 @@ import struct
 import numpy as np
 import pytest
 
-from nybulah import cli, disk, simsrq, streamprobe
+from nybulah import cli, disk, simsrq, simx, streamprobe
 from nybulah import stream as fmt
 from nybulah.analysis.cycle import find_cycle
 from nybulah.analysis.gcr import bits_per_revolution
@@ -30,9 +30,10 @@ INDEX_SLACK = 4  # bytes an INDEX may wait for a metadata slot
 ST_SLOW = 0x10
 
 
-def rig(media, halftrack=36, firmware=12, peers=0, **kw):
+def rig(media, halftrack=36, firmware=12, peers=0, timeout_us=None, **kw):
     """(adapter, mechanism, opened Nibbler) on a timed 1571 at device 9."""
-    cbm = simsrq.make(1.0, rise=1.0, peers=peers, dev=9, firmware=firmware)
+    io = {} if timeout_us is None else {"timeout_us": timeout_us}
+    cbm = simsrq.make(1.0, rise=1.0, peers=peers, dev=9, firmware=firmware, **io)
     mech = Mechanism(cbm.drive, media, halftrack=halftrack)
     cbm.drive.write(DOS_TRACK, halftrack // 2)
     mon = Monitor(cbm, 9, "s4", clock=lambda: cbm.now * 1e-6)
@@ -266,6 +267,27 @@ def test_d64_tracks_read_by_streaming_without_expansion_ram(image, g64):
     )
     assert (errors == SectorError.OK).all() and (data == image.data[want]).all()
     assert not expansion and mech.bumps == mech.inner_stops == 0
+
+
+RAM_PASS_US = 2_000_000  # adapter I/O timeout covering a capture pass's bound
+
+
+def test_streaming_drive_writes_and_captures_through_the_track_code():
+    """A streaming Nibbler loads the track code for RAM passes and writes, then
+    streams again; the probe sync written to an empty track is found."""
+    _, mech, nib = rig(Media({}), halftrack=2, timeout_us=RAM_PASS_US)
+    nib.halftrack = 2
+    assert disk.revolution_cells(nib, 2) == round(bits_per_revolution(0))
+    assert nib.stream(2).stream_status == {"adapter": "done", "drive": "done"}
+    assert mech.bumps == mech.inner_stops == 0
+
+
+def test_ram_passes_need_expansion_ram(monkeypatch):
+    monkeypatch.setattr(simx.TimedDrive1571, "EXPANSION", ())
+    _, _, nib = rig(Media({}), halftrack=2)
+    nib.halftrack = 2
+    with pytest.raises(TrackError, match="no expansion RAM"):
+        nib.capture(2, start="sync")
 
 
 def test_homes_and_seeks_through_the_seek_code(g64):
