@@ -166,7 +166,8 @@ def synthetic_disk(revolutions=4, rng=0):
     weak = _data_span(10, 4, 100, WEAK_BITS)
     truth.append((20, "NOFLUX_SPAN", *weak, None))
     slip = _data_span(12, 6, 800, 1)
-    truth.append((24, "DATA_GCR", *_data_span(12, 6, 0, 8 * DATA_GCR_BYTES), 2))
+    slipped = revolutions // 2
+    truth.append((24, "DATA_GCR", *_data_span(12, 6, 0, 8 * DATA_GCR_BYTES), slipped))
     tracks[20] = _dos(20, rng, zone=3)
     truth.append((40, "ZONE", 0, 8 * track_capacity(3), None))
     half = _dos(20, rng)
@@ -183,7 +184,7 @@ def synthetic_disk(revolutions=4, rng=0):
             )
         revs = list(revs)
         if key == 24:
-            revs[2] = np.delete(revs[2], slip[0])
+            revs[slipped] = np.delete(revs[slipped], slip[0])
         zone = 3 if key == 40 else speed_zone(key // 2)
         index = np.cumsum([0] + [len(r) for r in revs])
         image.tracks[key] = [Capture(np.concatenate(revs), zone, index=index)]

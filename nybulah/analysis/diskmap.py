@@ -67,35 +67,36 @@ class Kind(IntEnum):
     HDR_SECTOR = 13
     HDR_DUPLICATE = 14
     HDR_ID = 15
-    DATA_GCR = 16
-    DATA_CHECKSUM = 17
-    DATA_SHORT = 18
-    DATA_ORPHAN = 19
-    DATA_MARK = 20
-    BLOCK_OTHER = 21
-    GAP_LONG = 22
-    GAP_SHORT = 23
-    GAP_FILL = 24
-    GAP_IRREGULAR = 25
-    GAP_NOFLUX = 26
-    NOFLUX_SPAN = 27
-    DISAGREE = 28
-    UNFORMATTED = 29
-    ZONE = 30
-    ZONE_MIXED = 31
-    ZONE_LABEL = 32
-    LONG_TRACK = 33
-    SHORT_TRACK = 34
-    HALF_TRACK = 35
-    FAT_TRACK = 36
-    EMPTY = 37
-    CAPTURE_FAULT = 38
+    HDR_MARK = 16
+    DATA_GCR = 17
+    DATA_CHECKSUM = 18
+    DATA_SHORT = 19
+    DATA_ORPHAN = 20
+    DATA_MARK = 21
+    BLOCK_OTHER = 22
+    GAP_LONG = 23
+    GAP_SHORT = 24
+    GAP_FILL = 25
+    GAP_IRREGULAR = 26
+    GAP_NOFLUX = 27
+    NOFLUX_SPAN = 28
+    DISAGREE = 29
+    UNFORMATTED = 30
+    ZONE = 31
+    ZONE_MIXED = 32
+    ZONE_LABEL = 33
+    LONG_TRACK = 34
+    SHORT_TRACK = 35
+    HALF_TRACK = 36
+    FAT_TRACK = 37
+    EMPTY = 38
+    CAPTURE_FAULT = 39
 
 
 KIND_CLASS = np.array(
     [Cls.STANDARD] * 5
     + [Cls.SYNC] * 5
-    + [Cls.HEADER] * 6
+    + [Cls.HEADER] * 7
     + [Cls.DATA] * 6
     + [Cls.GAP] * 4
     + [Cls.WEAK] * 4
@@ -204,7 +205,8 @@ def _headers(rev, key, disk_id):
 
 
 def _blocks(rev):
-    """Data blocks, and blocks with any other mark (after a header: a non-standard data mark)."""
+    """Data blocks, and blocks with another mark: a non-standard data mark after a
+    header, a damaged header mark before a data block."""
     ok = headers_ok(rev.hdr, rev.valid)
     prev = (np.arange(len(ok)) - 1) % max(len(ok), 1)
     data, other = rev.data.index, np.flatnonzero(rev.block_kind == Block.OTHER)
@@ -221,6 +223,7 @@ def _blocks(rev):
     sector = np.where(ok[prev[data]], rev.hdr[prev[data], 2].astype(np.int64), -1)
     start = rev.block_start
     mark = ok[prev[other]] & rev.valid[other, 0]
+    lost = rev.block_kind[(other + 1) % max(len(ok), 1)] == Block.DATA
     return np.concatenate(
         (
             _rows(
@@ -239,7 +242,9 @@ def _blocks(rev):
             _rows(
                 start[other],
                 start[other] + rev.seg_len[other],
-                np.where(mark, Kind.DATA_MARK, Kind.BLOCK_OTHER),
+                np.select(
+                    [mark, lost], [Kind.DATA_MARK, Kind.HDR_MARK], Kind.BLOCK_OTHER
+                ),
                 rev.hdr[other, 0],
             ),
         )
@@ -303,10 +308,12 @@ def _segments(rev):
 
 
 def _faults(rev):
-    """Decode failures located by the GCR phase model; ``detail`` is the framing shift."""
+    """Decode failures after which framing resumes shifted (a slipped bit or byte);
+    ``detail`` is the shift."""
     starts, lengths = _segments(rev)
     streams = [rev.bits[np.arange(s, s + n) % rev.n] for s, n in zip(starts, lengths)]
     faults = stream_faults(streams)
+    faults = faults[faults["resynced"] & (faults["shift"] != 0)]
     start = starts[faults["segment"]] + faults["bit"]
     return _rows(start, start + faults["width"], Kind.CAPTURE_FAULT, faults["shift"])
 
@@ -314,16 +321,14 @@ def _faults(rev):
 def classify(rev, key, disk_id, thr, read=True):
     """Regions of a parsed revolution (``track``, ``rev`` and ``stability`` unset);
     decode faults are located only in reads, not in images of one revolution."""
-    return np.concatenate(
-        (
-            _syncs(rev, thr),
-            _headers(rev, key, disk_id),
-            _blocks(rev),
-            _gaps(rev, thr),
-            _zero_spans(rev, thr),
-            _faults(rev) if read else _rows([], [], Kind.CAPTURE_FAULT, 0),
-        )
+    found = (
+        _syncs(rev, thr),
+        _headers(rev, key, disk_id),
+        _blocks(rev),
+        _gaps(rev, thr),
+        _zero_spans(rev, thr),
     )
+    return np.concatenate(found + ((_faults(rev),) if read else ()))
 
 
 def _mutual_nearest(a, b, n):
@@ -400,10 +405,10 @@ def _reach(regs):
 
 
 def stability(regs, nrev, n):
-    """Set ``stability`` of one track's regions and drop decode faults every revolution repeats.
+    """Set ``stability`` of one track's regions; keep only the faults that explain one.
 
     Intrinsic: every revolution has one of its kind overlapping it and no
-    unexplained disagreement does. Transient: lone, over a decode fault of its read.
+    unexplained disagreement does. Transient: lone, over a slip of its own read.
     """
     fault = regs["kind"] == Kind.CAPTURE_FAULT
     dis = regs["kind"] == Kind.DISAGREE
@@ -412,16 +417,17 @@ def stability(regs, nrev, n):
     same = over & (regs["kind"][:, None] == regs["kind"][None])
     revs = (same @ (rev[:, None] == np.arange(nrev)) > 0).sum(axis=1)
     everywhere = (revs == nrev) & (nrev > 1)
-    read = fault & ~everywhere
     explains = (rev[:, None] == rev[None]) | (dis[:, None] & (rev[None] == 0))
-    by_read = (_overlap(_reach(regs), regs, n) & read[None] & explains).any(axis=1)
-    by_read &= ~everywhere & ((regs["cls"] != Cls.WEAK) | dis)
+    slips = _overlap(_reach(regs), regs, n) & explains & (fault & ~everywhere)[None]
+    odd = (regs["cls"] > Cls.STANDARD) & ~fault & ((regs["cls"] != Cls.WEAK) | dis)
+    odd &= ~np.isin(regs["kind"], [Kind.BLOCK_OTHER, Kind.DATA_MARK]) & ~everywhere
+    by_read = odd & slips.any(axis=1)
     shaky = (over & (dis & ~by_read)[None]).any(axis=1) | ((revs < nrev) & ~dis)
     st = np.full(len(regs), Stability.UNCONFIRMED if nrev == 1 else Stability.INTRINSIC)
     st[(shaky & (nrev > 1)) | dis] = Stability.UNSTABLE
-    st[by_read] = Stability.TRANSIENT
+    st[by_read | fault] = Stability.TRANSIENT
     regs["stability"] = st
-    return regs[~(fault & everywhere)]
+    return regs[~fault | slips[by_read].any(axis=0)]
 
 
 def _windows(cap, best):
@@ -489,11 +495,13 @@ def _track_map(track, thr, aligned):
     count = len(track.wide)
     wide = _rows(np.zeros(count), np.full(count, n), track.wide, 0)
     if track.best[2].kind != TrackKind.FORMATTED or Kind.EMPTY in track.wide:
-        regs, nrev = wide, 1
+        regs, nrev = wide, sum(max(c.revolutions, 1) for c in track.caps)
     else:
         local, nrev = _local(track, thr)
-        wide["stability"] = Stability.UNCONFIRMED if nrev == 1 else Stability.INTRINSIC
         regs = np.concatenate((wide, stability(local, nrev, n)))
+    regs["stability"][: len(wide)] = (
+        Stability.UNCONFIRMED if nrev == 1 else Stability.INTRINSIC
+    )
     if not aligned:
         width = regs["end_bit"] - regs["start_bit"]
         regs["start_bit"] = (regs["start_bit"] - _anchor(track.ref)) % n
@@ -576,7 +584,7 @@ class DiskMap:
         transient = r["stability"] == Stability.TRANSIENT
         cls = np.where(transient & (r["cls"] != Cls.FAULT), Cls.STANDARD, r["cls"])
         paint = cls != Cls.FAULT
-        layer = cls + len(Cls) * ~WIDE[r["kind"]]
+        layer = cls + len(Cls) * (~WIDE[r["kind"]] & (cls > Cls.STANDARD))
         shape = (2 * len(Cls), len(self.keys))
         cover = _cover(
             row[paint], start[paint], end[paint], layer[paint], shape, bins, n[paint]

@@ -167,14 +167,18 @@ def test_protection_tracks(rows):
     assert rows[2]["sim_half"] == 1 and np.isnan(rows[3]["sim_next"])
 
 
-def test_multipass_weak_region():
+def weak_nb2():
+    """NB2 of track 18 read four times with a weak region."""
     track_bits = gcr.to_bits(_gcr(18))
     data = np.zeros((4, 4, NIB_TRACK), np.uint8)
     for k in range(4):
         cap = simulate_capture(track_bits, 8 * NIB_TRACK, weak=(20000, 400), rng=k)
         data[2, k] = gcr.to_bytes(cap)
-    image = loads(write_nib(Nib([NibEntry(36, 2, data)], 2, False, 4)))
-    rows = survey.survey_image(image)[0]
+    return loads(write_nib(Nib([NibEntry(36, 2, data)], 2, False, 4)))
+
+
+def test_multipass_weak_region():
+    rows = survey.survey_image(weak_nb2())[0]
     assert rows["captures"][0] == 4 and 0 < rows["mp_disagree"][0] < 0.01
     assert 300 <= rows["mp_span"][0] <= 400 + 2 * regions.GROUP_BITS
 

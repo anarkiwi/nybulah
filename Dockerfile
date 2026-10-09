@@ -57,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
     && python3 -m venv /venv
 ENV PATH=/venv/bin:$PATH
 COPY pyproject.toml /tmp/
-RUN pip install --no-cache-dir $(python3 -c 'import tomllib;print(" ".join(tomllib.load(open("/tmp/pyproject.toml","rb"))["project"]["dependencies"]))')
+RUN pip install --no-cache-dir $(python3 -c 'import tomllib;p=tomllib.load(open("/tmp/pyproject.toml","rb"))["project"];print(" ".join(p["dependencies"]+p["optional-dependencies"]["viz"]))')
 
 FROM pydeps AS pydev
 RUN pip install --no-cache-dir $(python3 -c 'import tomllib;print(" ".join(tomllib.load(open("/tmp/pyproject.toml","rb"))["project"]["optional-dependencies"]["dev"]))')
@@ -67,7 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/venv/bin:$PATH \
     OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
-    NUMBA_CACHE_DIR=/tmp/numba-cache
+    NUMBA_CACHE_DIR=/tmp/numba-cache MPLCONFIGDIR=/tmp/matplotlib
 WORKDIR /app
 
 FROM base AS test

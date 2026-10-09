@@ -8,26 +8,14 @@ import pathlib
 
 import numpy as np
 import pytest
+from test_survey import _nib_disk, weak_nb2
 
 from nybulah import survey
-from nybulah.analysis import gcr
-from nybulah.analysis.synth import simulate_capture
-from nybulah.formats import Nib, NibEntry, loads, to_g64, write_g64, write_nib
-from nybulah.formats.nib import NIB_TRACK
-from test_survey import _gcr, _nib_disk
+from nybulah.formats import loads, to_g64, write_g64, write_nib
 
 DATA = pathlib.Path(__file__).parent / "data"
 GOLDEN = DATA / "survey_golden.npz"
 FLOATS = ("sim_half", "sim_half_z", "sim_next", "sim_next_z", "mp_disagree")
-
-
-def _weak_nb2():
-    track_bits = gcr.to_bits(_gcr(18))
-    data = np.zeros((4, 4, NIB_TRACK), np.uint8)
-    for k in range(4):
-        cap = simulate_capture(track_bits, 8 * NIB_TRACK, weak=(20000, 400), rng=k)
-        data[2, k] = gcr.to_bytes(cap)
-    return loads(write_nib(Nib([NibEntry(36, 2, data)], 2, False, 4)))
 
 
 def _images():
@@ -38,7 +26,7 @@ def _images():
         "nib": (nib, g64),
         "g64": (g64, None),
         "hw": (hw, None),
-        "nb2": (_weak_nb2(), None),
+        "nb2": (weak_nb2(), None),
     }
 
 
