@@ -37,7 +37,7 @@ def rows(image, jobs):
 
 def test_read_reports_error_bytes(make_rig, image, tmp_path):
     bad = with_errors(type(image)(image.data.copy()))
-    _, nib = make_rig("1541", Media.from_g64(d64_to_g64(bad, progress=False)))
+    drive, nib = make_rig("1541", Media.from_g64(d64_to_g64(bad, progress=False)))
     jobs = few_jobs()
     data, errors = disk.read_jobs(
         nib, jobs, retries=1, archive=tmp_path, progress=False
@@ -46,6 +46,7 @@ def test_read_reports_error_bytes(make_rig, image, tmp_path):
     assert (errors == bad.errors[want]).all()
     ok = errors == SectorError.OK
     assert (data[ok] == bad.data[want][ok]).all()
+    assert drive.mech.bumps == 0
     saved = sorted(tmp_path.glob("read-*.npz"))
     assert saved and Capture.load(saved[0]).halftrack in {2 * t for t in FEW}
 

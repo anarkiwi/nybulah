@@ -25,8 +25,8 @@ from .sim import (
     Drive1571,
     HostGone,
     IdleDOSDrive,
-    SimCBM,
 )
+from .simhost import SimCBM
 
 SEND_SCHEDULE = (0, 13, 25, 35, 47, 57)
 RECV_SCHEDULE = (0, 6, 12, 21, 34, 43)

@@ -35,11 +35,14 @@ them back.
   decoded through a 1541 read-circuit model (`nybulah convert`, `nybulah info`).
 - **Disk operations:** read and write D64 on the 1541 and 1571, and D71 on the
   1571, through the fast transport. Every write is verified by re-capture.
-- **Telemetry:** sync lengths are timed from the drive's SYNC line, to within
-  ±3 bits. On a stock
-  1571 the index sensor gives index-aligned captures and a measured RPM.
-  Every capture can be archived with its telemetry, so images can be
-  re-derived later.
+  The head is located without bumping it against the stop (1571 track 0
+  sensor; 1541 sector headers or DOS's track); bumping needs `--allow-bump`.
+- **Telemetry:** sync lengths from per-byte arrival times, each within
+  per-sync bounds and within ±1 bit for 99.95% of syncs in simulation
+  ([docs/disk.md](docs/disk.md)); no byte is lost for any sync length. The revolution
+  time comes from the 1571 index sensor or, on a 1541, from the track's own
+  repetition. Every capture can be archived with its raw passes, so images
+  can be re-derived later.
 
 ## Compared with existing tools
 
@@ -49,7 +52,7 @@ them back.
 | Raw tracks from a 1571 | serial IEC + 8 KB RAM expansion | SRQ or parallel | no | flux |
 | Other drives powered on the bus | yes | depends on transport | with S1 or original transfer | n/a |
 | Recovers from stalls without power cycling | yes (firmware v9) | no | no | n/a |
-| Sync lengths | timed from the SYNC line (±3 bits) | no | no | yes |
+| Sync lengths | per-byte arrival times, bounded per sync | no | no | yes |
 | Index alignment and RPM on a stock 1571 | WD1770 index sensor | needs an SC+-style sensor mod | no | yes |
 | Revolution detection | bit-level FFT autocorrelation with a significance test | byte matching within a fixed window | n/a | tool-dependent |
 | Licence | Apache-2.0 | GPL-3.0 | GPL-2.0 | various |
@@ -104,7 +107,8 @@ docker run --rm -v "$PWD:/app" -w /app nybulah:test python -m pytest -n auto
 ```
 
 The drive code is ca65 assembly in `drive/`. It is assembled in the Docker
-build.
+build. Tests run it on a compiled drive simulator (`nybulah.simfast`);
+`NYBULAH_SIM=py65` selects the py65 reference model it is checked against.
 
 ## Licence
 

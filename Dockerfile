@@ -77,6 +77,8 @@ ENV NYBULAH_DRIVECODE=/opt/nybulah/drivecode
 COPY . .
 COPY --from=drivecode /out/ nybulah/drivecode/
 RUN pip install --no-cache-dir --no-deps -e .
+RUN python -c "from nybulah import simfast; simfast.warm()" \
+    && chmod -R a+rwX "$NUMBA_CACHE_DIR"
 
 FROM base AS runtime
 COPY --from=pydeps /venv /venv

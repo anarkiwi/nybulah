@@ -55,13 +55,18 @@ class Session:
         self.emit({"step": name, "dev": dev, "ok": None, "skipped": reason})
 
 
-def disk_step(cbm, dev, proto, model):
+def disk_step(cbm, dev, proto, model, allow_bump=False):
     """Read one track per density zone without writing anything."""
-    with Monitor(cbm, dev, proto) as mon, Nibbler(mon, model) as nib:
+    with (
+        Monitor(cbm, dev, proto) as mon,
+        Nibbler(mon, model, allow_bump=allow_bump) as nib,
+    ):
         return disk.survey(nib)
 
 
-def check_dev(session, dev, protos, size, reps, disk_check=False):
+def check_dev(  # pylint: disable=too-many-arguments
+    session, dev, protos, size, reps, disk_check=False, allow_bump=False
+):
     """All steps for one drive."""
     cbm = session.cbm
     session.step("identify", dev, lambda: list(cbm.identify(dev)))
@@ -92,7 +97,9 @@ def check_dev(session, dev, protos, size, reps, disk_check=False):
         session.skip("disk", dev, f"{protos[0]} not supported here")
     else:
         model = probe["model"]
-        session.step("disk", dev, lambda: disk_step(cbm, dev, protos[0], model))
+        session.step(
+            "disk", dev, lambda: disk_step(cbm, dev, protos[0], model, allow_bump)
+        )
 
 
 def summarize(records):
@@ -133,6 +140,11 @@ def add_arguments(ap):
     ap.add_argument(
         "--disk", action="store_true", help="read one track per zone (no writes)"
     )
+    ap.add_argument(
+        "--allow-bump",
+        action="store_true",
+        help="bump the head against the stop if nothing else locates it",
+    )
 
 
 def execute(args, cbm):
@@ -143,7 +155,15 @@ def execute(args, cbm):
     with path.open("w") as log:
         session = Session(cbm, log, args.recover_timeout)
         for dev in args.devs:
-            check_dev(session, dev, protos, args.size, args.reps, args.disk)
+            check_dev(
+                session,
+                dev,
+                protos,
+                args.size,
+                args.reps,
+                args.disk,
+                args.allow_bump,
+            )
         summary = summarize(session.records)
         session.emit({"summary": summary, "log": str(path)})
     return summary

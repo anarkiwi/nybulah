@@ -15,15 +15,8 @@ from nybulah.monitor import (
 )
 from nybulah.opencbm import IEC_DATA
 from nybulah.simx import adapter
-from nybulah.sim import (
-    Bus,
-    Drive1541,
-    Drive1571,
-    HostGone,
-    SimCBM,
-    SimIOWrite,
-    SimTimeout,
-)
+from nybulah.sim import Bus, Drive1541, Drive1571, HostGone, SimIOWrite, SimTimeout
+from nybulah.simhost import SimCBM
 
 TIMEOUT = CLOCK_HZ * WATCHDOG_S
 IDLE = CLOCK_HZ * WATCHDOG_IDLE_S
