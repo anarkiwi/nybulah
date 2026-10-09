@@ -244,7 +244,9 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         if self.ts is None:
             return arr.read
         period = float(np.median(np.diff(arr.read)))
-        wraps, _ = passes.ts_wraps(arr, self.ts_syncs(), period, self.base >= 0)
+        wraps = passes.ts_wraps(arr, self.ts_syncs(), period, self.base >= 0, self.tb)[
+            0
+        ]
         return passes.tb_arrivals(self.tb, wraps).read
 
     @property

@@ -12,7 +12,7 @@ import numba
 import numpy as np
 
 from .analysis.capture import trailing_ones
-from .analysis.gcr import SYNC_MIN_BITS, to_bits
+from .analysis.gcr import NOMINAL_RPM, SYNC_MIN_BITS, bit_rate, to_bits
 
 TB_CHAIN = 12
 TB_BODY, TB_PAGE_BODY = 14, 27
@@ -25,6 +25,8 @@ TB_SEEN_TO_WAIT = TB_BVS + TB_BODY
 
 TS_FIRST_READ, TS_ITER, TS_WRAP_EXTRA = 11, 11, 34
 TS_PB7_GAP = 46
+TS_RESUME = 35
+DRIFT = 0.02
 
 MATCH_TO_TB = 41
 VWAIT_GAP = 7
@@ -37,6 +39,9 @@ RPM_MAX, RPM_MIN = 310.0, 285.0
 PRE_ONES = SYNC_MIN_BITS - 1
 MIN_LATCHED = SYNC_MIN_BITS - 8
 CELLS = 8
+CPU_HZ = 1_000_000
+FASTEST_BYTE = CELLS * CPU_HZ / bit_rate(3) * NOMINAL_RPM / RPM_MAX
+TS_LATE_MERGE = int(np.ceil((TS_ITER + TS_WRAP_EXTRA + TS_RESUME) / FASTEST_BYTE)) - 1
 PIN = 4
 P_SPAN = 256
 BAND = 8
@@ -77,11 +82,23 @@ class Arrivals:
     valid: np.ndarray
 
 
-def tb_arrivals(tb, wraps=None):
-    """Arrival windows of a TB pass; ``wraps`` adds 256-cycle timer wraps per byte."""
+def tb_intervals(tb):
+    """T2 cycles of each TB wait (mod 256), and the loop body before it."""
     tb = np.asarray(tb, np.int64)
     body = np.where(np.arange(len(tb)) % 256 == 255, TB_PAGE_BODY, TB_BODY)[:-1]
-    e = (tb[:-1] - tb[1:] - body - TB_BVS) % 256 + TB_BVS
+    return (tb[:-1] - tb[1:] - body - TB_BVS) % 256 + TB_BVS, body
+
+
+def explained(e):
+    """Whether a TB wait of e cycles ends on a T2 read of the drive loop."""
+    e = np.asarray(e, np.int64)
+    _, ready = tb_schedule(e.max(initial=TB_BVS))
+    return np.isin(e, ready)
+
+
+def tb_arrivals(tb, wraps=None):
+    """Arrival windows of a TB pass; ``wraps`` adds 256-cycle timer wraps per byte."""
+    e, body = tb_intervals(tb)
     if wraps is not None:
         e = e + 256 * np.asarray(wraps, np.int64)[1:]
     sample, ready = tb_schedule(e.max(initial=TB_BVS))
@@ -263,26 +280,30 @@ def best_offset(events, mask):
     return int(offsets[i]), int(vals[i])
 
 
-def align(consistent):
+def align(consistent, free=None):
     """Offsets (columns ``-band..band``) per event, by dynamic programming.
 
     Minimises inconsistent events plus the total change of offset between
-    consecutive events, from offset 0. Returns ``(offsets, matched)``.
+    consecutive events, from offset 0; an increase of up to ``free[i]`` just
+    before event i costs nothing. Returns ``(offsets, matched)``.
     """
     consistent = np.asarray(consistent, bool)
     n, width = consistent.shape
     if not n:
         return np.zeros(0, np.int64), np.zeros(0, bool)
+    free = np.zeros(n, np.int64) if free is None else np.asarray(free, np.int64)
     o = np.arange(width)
-    step = np.abs(o[:, None] - o[None, :])
-    cost = np.abs(o - width // 2) + ~consistent[0]
-    back = np.zeros((n, width), np.int64)
+    delta = o[:, None] - o[None, :]
+    miss = (~consistent).astype(np.int64)
+    steps = [np.where((delta >= 0) & (delta <= f), 0, np.abs(delta)) for f in free]
+    fwd, back = np.zeros((n, width), np.int64), np.zeros((n, width), np.int64)
+    fwd[0] = np.abs(o - width // 2) + miss[0]
     for i in range(1, n):
-        total = cost[None, :] + step
+        total = fwd[i - 1][None, :] + steps[i]
         back[i] = np.argmin(total, axis=1)
-        cost = total[o, back[i]] + ~consistent[i]
+        fwd[i] = total[o, back[i]] + miss[i]
     path = np.zeros(n, np.int64)
-    path[-1] = int(np.argmin(cost))
+    path[-1] = int(np.argmin(fwd[-1]))
     for i in range(n - 1, 0, -1):
         path[i - 1] = back[i, path[i]]
     return path - width // 2, consistent[np.arange(n), path]
@@ -373,8 +394,28 @@ def run_range(excess, cells, latched):
     )
 
 
-def ts_wraps(arr, ts, period, anchored):
-    """Extra TB timer wraps at the bytes after TS syncs, and unmatched TS syncs."""
+def wrap_fits(waits, fine, xlo, xhi):
+    """``(w, fits)``: candidate wrap counts per TB wait and which fit.
+
+    ``waits`` and ``fine`` are a TB byte's wait and extra cycles; a count fits
+    when the extra cycles land in ``[xlo, xhi]`` on a T2 read of the loop.
+    """
+    lo = np.maximum(np.ceil((xlo - fine) / 256), 0).astype(np.int64)
+    hi = np.floor((xhi - fine) / 256).astype(np.int64)
+    w = lo[..., None] + np.arange(max(int((hi - lo).max(initial=0)) + 1, 1))
+    return w, (w <= hi[..., None]) & explained(waits[..., None] + 256 * w)
+
+
+def ts_wraps(arr, ts, period, anchored, tb):
+    """TB timer wraps after each TS sync: ``(fewest, spread, unmatched)``.
+
+    A sync's TB wait is its TS release wait, within the poll and sample
+    slack and ``DRIFT`` of motor speed between the passes, plus 256-cycle
+    wraps that leave a wait the drive loop can end on. ``spread`` counts
+    the further wrap counts that also fit. A release seen on TS's wrap path
+    (iterations a multiple of 256) can merge up to ``TS_LATE_MERGE`` byte
+    readies, so later counts may run that many short.
+    """
     count, iters = ts
     n = len(arr.read)
     fine = np.diff(arr.read, prepend=0.0) - period
@@ -382,17 +423,27 @@ def ts_wraps(arr, ts, period, anchored):
         count = count + best_offset(count, fine > period / CELLS)[0]
     plo, phi = ts_pulse(iters)
     slack = TB_LOOP + TB_OUT[-1][0]
-    xlo, xhi = plo - slack, phi + PRE_ONES * period / CELLS + slack
     k = count[:, None] + np.arange(-BAND, BAND + 1)[None, :]
     kk = np.clip(k, 1, n - 1)
-    need = np.maximum(np.ceil((xlo[:, None] - fine[kk]) / 256), 0)
-    inside = (k >= 1) & (k < n)
-    offs, matched = align(~inside | (fine[kk] + 256 * need <= xhi[:, None]))
-    wraps = np.zeros(n, np.int64)
+    waits = np.concatenate(([TB_BVS], tb_intervals(tb)[0]))[kk]
+    w, fits = wrap_fits(
+        waits,
+        fine[kk],
+        (plo * (1 - DRIFT) - slack)[:, None],
+        (phi * (1 + DRIFT) + PRE_ONES * period / CELLS + slack)[:, None],
+    )
+    late = (iters >= 256) & (iters % 256 == 0)
+    free = np.concatenate(([0], np.where(late[:-1], TS_LATE_MERGE, 0)))
+    offs, matched = align((k < 1) | (k >= n) | fits.any(axis=2), free)
+    rows, col = np.arange(len(count)), offs + BAND
+    first = np.argmax(fits[rows, col], axis=1)
+    last = fits.shape[2] - 1 - np.argmax(fits[rows, col, ::-1], axis=1)
     hit = count + offs
     sel = matched & (hit >= 1) & (hit < n)
-    wraps[hit[sel]] = need[np.arange(len(hit)), offs + BAND][sel].astype(np.int64)
-    return wraps, int((~matched).sum())
+    fewest, spread = np.zeros(n, np.int64), np.zeros(n, np.int64)
+    fewest[hit[sel]] = w[rows, col, first][sel]
+    spread[hit[sel]] = (last - first)[sel]
+    return fewest, spread, int((~matched).sum())
 
 
 def _runs(arr, breaks, hidden):
@@ -438,34 +489,38 @@ def _local_period(arr, breaks, hidden, span=P_SPAN):
     return CELLS * sums[0] / sums[1], CELLS * sums[2] / sums[1]
 
 
-def pinned(arr, period, error, breaks, step):
+def pinned(arr, period, error, breaks, step, hidden):
     """Arrival windows; a waiting byte's comes from its nearest timed neighbour.
 
     ``step`` -1 looks before, 1 after; the neighbour counts only with no
-    possible sync (``breaks[j]``: before byte j) between them.
+    possible sync (``breaks[j]``: before byte j) between them, and the
+    ``hidden`` cells of the known syncs crossed shift it on.
     """
     n = len(arr.read)
     lo, hi = arr.lo.copy(), arr.hi.copy()
     todo = ~np.isfinite(lo) & np.isfinite(hi)
     alive = np.ones(n, bool)
+    cells = np.zeros(n)
     idx = np.arange(n)
     for i in range(1, PIN + 1):
         j = idx + step * i
         jj = np.clip(j, 0, n - 1)
         edge = np.maximum(jj, np.clip(jj - step, 0, n - 1))
         alive &= (j >= 0) & (j < n) & ~breaks[edge] & arr.valid[jj]
+        cells += hidden[edge]
         hit = todo & alive & np.isfinite(arr.lo[jj])
-        slack = i * error
-        lo = np.where(hit, arr.lo[jj] - step * i * period - slack, lo)
-        hi = np.where(hit, np.minimum(hi, arr.hi[jj] - step * i * period + slack), hi)
+        shift = step * (i * period + cells * period / CELLS)
+        slack = (i + cells / CELLS) * error
+        lo = np.where(hit, arr.lo[jj] - shift - slack, lo)
+        hi = np.where(hit, np.minimum(hi, arr.hi[jj] - shift + slack), hi)
         todo &= ~hit
     return lo, hi
 
 
-def tb_excess(arr, breaks, period, error):
+def tb_excess(arr, breaks, period, error, hidden):
     """``(lo, hi)`` extra cycles in the byte interval before each TB byte."""
-    pre_lo, pre_hi = pinned(arr, period, error, breaks, -1)
-    post_lo, post_hi = pinned(arr, period, error, breaks, 1)
+    pre_lo, pre_hi = pinned(arr, period, error, breaks, -1, hidden)
+    post_lo, post_hi = pinned(arr, period, error, breaks, 1, hidden)
     lo = post_lo[1:] - pre_hi[:-1] - period[1:] - error[1:]
     hi = post_hi[1:] - pre_lo[:-1] - period[1:] + error[1:]
     return np.concatenate(([-np.inf], lo)), np.concatenate(([np.inf], hi))
@@ -482,19 +537,24 @@ def _tb_positions(arr, base, ok, anchored):
     return pos, int((~matched).sum())
 
 
-def _classify(arr, capable_k, latched_k, ts_end):
+def _classify(arrs, capable_k, latched_k, ts_end):
     """Run ranges at every capable TB boundary, and the local byte period.
 
-    Boundaries that surely hold no sync, or a sync of one possible length,
-    join the period estimate on the next round, refining it.
+    ``arrs`` are the arrivals for each fitting wrap count; a boundary's
+    excess spans them all. Boundaries that surely hold no sync, or a sync
+    of one possible length, join the period estimate on the next round.
     """
+    arr = arrs[0]
     n = len(arr.read)
     breaks = capable_k.copy()
     hidden = np.zeros(n)
     runs = {}
     for _ in range(PERIOD_ROUNDS):
         period, error = _local_period(arr, breaks, hidden)
-        ex_lo, ex_hi = tb_excess(arr, breaks, period, error)
+        ex = [tb_excess(a, breaks, period, error, hidden) for a in arrs]
+        ex_lo, ex_hi = np.min([x[0] for x in ex], axis=0), np.max(
+            [x[1] for x in ex], axis=0
+        )
         for k in np.flatnonzero(capable_k[1:]) + 1:
             cells = ((period[k] - error[k]) / CELLS, (period[k] + error[k]) / CELLS)
             run = run_range((ex_lo[k], ex_hi[k]), cells, latched_k[k])
@@ -521,17 +581,21 @@ def merge_tb(  # pylint: disable=too-many-arguments
     tb = np.asarray(tb, np.int64)
     ok, latched = capable(data)
     arr = tb_arrivals(tb)
-    unmatched = 0
+    unmatched, arrs = 0, [arr]
     if ts is not None and len(ts[0]):
-        wraps, unmatched = ts_wraps(
-            arr, ts, float(np.median(np.diff(arr.read))), anchored
+        wraps, spread, unmatched = ts_wraps(
+            arr, ts, float(np.median(np.diff(arr.read))), anchored, tb
         )
-        arr = tb_arrivals(tb, wraps)
+        arrs = [
+            tb_arrivals(tb, wraps + np.minimum(spread, j))
+            for j in range(spread.max() + 1)
+        ]
+        arr = arrs[0]
     pos, missed = _tb_positions(arr, base, ok, anchored)
     steady = np.where(pos < len(data), pos, pos - (revolution or len(data)))
     inside = (steady > 0) & (steady < len(data))
     at = np.clip(steady, 0, len(data) - 1)
-    runs, byte_cycles = _classify(arr, inside & ok[at], latched[at], ts_end)
+    runs, byte_cycles = _classify(arrs, inside & ok[at], latched[at], ts_end)
     rows = [
         (int(q), *run)
         for k, run in runs.items()

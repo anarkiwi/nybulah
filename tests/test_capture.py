@@ -21,6 +21,9 @@ CASES = [
     ("1571", 2, 297.0, 0.0, "sync"),
     ("1571", 1, 300.0, 3.0, "now"),
     ("1571", 0, 303.0, 3.0, "index"),
+    ("1571", 2, 297.0, 3.0, "index"),
+    ("1571", 0, 297.0, 3.0, "index"),
+    ("1541", 1, 297.0, 0.0, "now", 25),
 ]
 
 
@@ -34,8 +37,8 @@ def sync_media(zone, rpm, wander, seed=0):
 def sync_capture_fixture(request):
     from conftest import rig
 
-    model, zone, rpm, wander, start = request.param
-    drive, nib = rig(model, sync_media(zone, rpm, wander))
+    model, zone, rpm, wander, start, *seed = request.param
+    drive, nib = rig(model, sync_media(zone, rpm, wander, *seed))
     nib.halftrack = 36
     drive.mech.log = []
     cap = nib.capture(ZONE_HALFTRACK[zone], density=zone, start=start)
@@ -75,7 +78,7 @@ def test_tb_windows_hold_every_arrival(sync_capture):
 def _wraps(cap):
     arr = passes.tb_arrivals(cap.tb)
     period = float(np.median(np.diff(arr.read)))
-    return passes.ts_wraps(arr, cap.ts_syncs(), period, True)[0]
+    return passes.ts_wraps(arr, cap.ts_syncs(), period, True, cap.tb)[0]
 
 
 def squash(bits):
@@ -220,3 +223,22 @@ def test_agreements_count_equal_bytes_per_lag():
     ]
     for fn in (passes.agreements, passes.agreements.py_func):
         assert fn(data, 1, 3).tolist() == want == [0, 3, 0]
+
+
+def test_late_ts_release_counts_are_followed():
+    """Releases TS sees on its wrap path merge byte readies; the merge follows."""
+    from conftest import rig
+
+    track = sync_track([818, 1000] * 3, int(round(bits_per_revolution(2))), 1, (2, 3))
+    drive, nib = rig("1541", Media({(0, 40): track}))
+    nib.halftrack = 36
+    drive.mech.log = []
+    cap = nib.capture(40, density=2, start="sync")
+    count, iters = cap.ts_syncs()
+    late = (iters >= 256) & (iters % 256 == 0)
+    pos, runs = true_syncs(drive.mech.log, cap.data)
+    assert late.sum() >= 3 and np.diff(count).min() < np.diff(pos).min()
+    lo, hi = cap.sync_bounds
+    assert np.array_equal(cap.positions, pos)
+    assert (lo <= runs).all() and ((hi < 0) | (runs <= hi)).all()
+    assert (np.abs(cap.sync_bits - runs) <= 1).all()

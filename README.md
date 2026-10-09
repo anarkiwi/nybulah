@@ -37,9 +37,9 @@ them back.
   1571, through the fast transport. Every write is verified by re-capture.
   The head is located without bumping it against the stop (1571 track 0
   sensor; 1541 sector headers or DOS's track); bumping needs `--allow-bump`.
-- **Telemetry:** sync lengths from per-byte arrival times, each with bounds,
-  almost always within ±1 bit ([docs/disk.md](docs/disk.md)); no byte is lost
-  for any sync length. The revolution
+- **Telemetry:** sync lengths from per-byte arrival times, each within
+  per-sync bounds and within ±1 bit for 99.95% of syncs in simulation
+  ([docs/disk.md](docs/disk.md)); no byte is lost for any sync length. The revolution
   time comes from the 1571 index sensor or, on a 1541, from the track's own
   repetition. Every capture can be archived with its raw passes, so images
   can be re-derived later.
