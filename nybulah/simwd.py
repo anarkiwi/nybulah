@@ -54,6 +54,9 @@ SPINUP_IP = 6  # ds: h = 0 with MO low waits 6 index pulses
 MO_IDLE_IP = 9  # ds: MO drops after 9 idle revolutions
 DAM_WINDOW = 43  # ds read sector: DAM within 43 bytes of the ID CRC (MFM)
 WSEC_DRQ, WSEC_GAP = 2, 22  # ds write sector flowchart and text (MFM)
+# first byte loaded within 9 byte times of its DRQ, else lost data ends the command
+# (VICE src/drive/iec/wd1770.c:538-544; the ds lets it wait to WSEC_GAP)
+WSEC_LD = WSEC_DRQ + 9
 WT_FIRST = 3  # ds write track: first byte within 3 byte times
 # ds status register table, MFM (sm sheet 2: DDEN grounded), WD CLK 8 MHz from the same
 # Y1 as the CPU: command write -> busy bit, -> status bits 1-7; register write -> read-back
@@ -523,11 +526,11 @@ def write_event(w, m, b, n, t):
         w[WN] += 1
         if w[WN] == WSEC_DRQ:
             w[WSTAT] |= DRQ
-        if w[WN] < WSEC_GAP:
-            return
-        if w[WSTAT] & DRQ:
+        if w[WN] == WSEC_LD and not loaded(w, t):
             w[WSTAT] |= LD
             done(w, t)
+            return
+        if w[WN] < WSEC_GAP:
             return
         w[WPH], w[WN] = WDATA, 0
         sector_slot(w, m, j, t)

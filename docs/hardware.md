@@ -513,12 +513,13 @@ The datasheet allows a write up to the next byte boundary; the DOS (`fmtrk`)
 writes within about 21 cycles of a DRQ, an unrolled loop per field. nybulah's
 Write Track feed (`writetrk`) decodes its run-length image between writes and
 keeps every write-to-write path, a token decode included, under a byte time, so
-a DRQ is written within one poll pass and the write (33 cycles) whatever the
-image, 31 or more cycles before the WD takes the byte; a decode between a DRQ
+a DRQ is written within one poll pass and the write (40 cycles) whatever the
+image, 24 or more cycles before the WD takes the byte; Write Sector's feed is
+built the same way; a decode between a DRQ
 and its write would eat into that margin, and on hardware a thin margin sets
 Lost Data (`$84`). `simwd` measures that margin (`drq_slack`) and can make
-the WD take each byte early (`drq_lead`); the tests run Write Track with the
-WD taking bytes 31 cycles early.
+the WD take each byte early (`drq_lead`); the tests run Write Track and Write
+Sector with the WD taking bytes 24 cycles early.
 
 The DOS issues every command through `wdbusy` (`msub.src`): write, poll until busy
 reads set, then `delay16`; `wdunbusy` polls until it reads clear; `wdabort` waits

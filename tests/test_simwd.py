@@ -387,6 +387,25 @@ def test_write_track_first_byte_due_three_byte_times_after_its_start(phase, late
     assert bool(st & LD) == bool(late) and bool(st & BUSY) != bool(late)
 
 
+@pytest.mark.parametrize("lost", [False, True])
+def test_write_sector_first_byte_within_nine_byte_times_of_its_drq(media, lost):
+    """DRQ rises WSEC_DRQ bytes after the ID; the first byte loaded later than
+    WSEC_LD bytes after the ID ends the command with lost data, nothing written."""
+    wd = drive(media)
+    c = seek(wd, 4)
+    before = wd.media.track(4, 1)[0]
+    wd.write(2, 5, c)
+    wd.write(0, WRITE_SECTOR, c + 40)
+    c += 40 + simwd.STATUS_VALID
+    while not wd.read(0, c) & DRQ:
+        c += 1
+    due = c + (simwd.WSEC_LD - simwd.WSEC_DRQ) * 64
+    wd.write(3, 0x5A, due - 1 + lost)
+    _, _, _, st = service(wd, due + 1, np.full(511, 0x5A, np.uint8))
+    assert bool(st & LD) == lost and not st & BUSY
+    assert np.array_equal(wd.media.track(4, 1)[0], before) == lost
+
+
 def test_crc_preset_and_c2_marks():
     assert simwd.SYNC3 == 0xCDB4
     wd = drive(MfmMedia(cylinders=1))

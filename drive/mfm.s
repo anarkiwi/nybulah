@@ -483,28 +483,38 @@ wsl:    lda P_SEC
         ora #WD_WRITESEC
         jsr precomp
         jsr wdcmd
-wsb:    WDTEST
-        lda WDSTAT
+        lda P_LEN
+        sta len
+        lda (ptr),y
+        tax
+; Each byte is made ready right after the last write and written on DRQ, as
+; in Write Track's feed: a DRQ is written within 40 cycles, 24 or more before
+; the WD takes the byte.
+        WDTEST                          ; outside the loop
+wsb:    lda WDSTAT
+        and #ST_BUSY | ST_DRQ
         lsr
         bcc wsd
-        and #ST_DRQ >> 1
-        bne :+
+        bne wsput
         bit CIA_ICR
         bpl wsb
-        jsr spend
+        dec tmo
         bne wsb
         jsr restrk
         jmp tmout
-:       lda (ptr),y
-        WDTEST
-        sta WDDAT
+        WDALIGN
+wsput:  WDTEST
+        stx WDDAT
         iny
         bne :+
         inc ptr + 1
-:       dex
-        bne wsb
+:       dec len
+        bne :+
         dec pages
-        bne wsb
+        beq wsd
+:       lda (ptr),y
+        tax
+        jmp wsb
 wsd:    jsr wait
         jsr restrk
         WDTEST
@@ -532,9 +542,9 @@ wsd:    jsr wait
 ; after the last write and written on DRQ. From one write to the next takes
 ; less than a byte time (64 cycles) on every path, a token decoded between
 ; them included (59 at most), so no token boundary eats into the next byte's
-; margin: a DRQ is written within one poll pass and the write, 33 cycles, and
-; the data register is loaded 31 or more cycles before the WD takes the byte
-; whatever the image. Wraps only spend the timeout.
+; margin: a DRQ is written within one poll pass (27 cycles when it spends a
+; wrap) and the write, 40 cycles, and the data register is loaded 24 or more
+; cycles before the WD takes the byte whatever the image.
 cnt      = len
 
 ; The next token from (ptr),y: X its first byte, cnt its length, on to rep or
@@ -569,8 +579,8 @@ literal:
 ; Poll for DRQ (to put) while busy (else wtd), spending the timeout.
 .macro WPOLL put
         .local poll
-poll:   WDTEST
-        lda WDSTAT
+        WDTEST                          ; outside the loop
+poll:   lda WDSTAT
         and #ST_BUSY | ST_DRQ
         lsr
         bcc wtd
@@ -604,6 +614,7 @@ wtd:    jmp wait
 tok:    DECODE wpoll_r, wpoll_l, wend
 wend:   sta cnt                         ; A = 0: the last byte from now on
         beq wpoll_r
+        WDALIGN
 wput_r: WDTEST
         stx WDDAT
 wloop_r:
@@ -611,6 +622,7 @@ wloop_r:
         beq tok
 wpoll_r:
         WPOLL wput_r
+        WDALIGN
 wput_l: WDTEST
         stx WDDAT
 wloop_l:

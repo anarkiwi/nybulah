@@ -194,8 +194,9 @@ def test_read_sector_ram(media):
     no_stops(sim)
 
 
-# drive/mfm.s writetrk: a DRQ is written within 33 cycles of the 64-cycle byte.
-WT_LEAD = 64 - 33
+# drive/mfm.s writetrk and writesec: a DRQ is written within 40 cycles of the
+# 64-cycle byte.
+WT_LEAD = 64 - 40
 
 
 @pytest.mark.parametrize("layout", ["short_tokens", "cylinder_0"])
@@ -214,6 +215,24 @@ def test_write_track_loads_every_byte_wt_lead_ahead(layout):
     data, _, _ = sim.wd.media.track(0, 1)
     assert not status & mfm.ST_LOST and sim.wd.drq_slack >= WT_LEAD
     assert np.array_equal(data, stream_track(dr, len(data))[0])
+    no_stops(sim)
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_write_sectors_load_every_byte_wt_lead_ahead(deleted):
+    """Ten sectors back to back with the WD taking each byte WT_LEAD cycles early:
+    all written, data and data mark ($F8 deleted, $FB normal) as given."""
+    media = MfmMedia.formatted(cylinders=2)
+    sim, drive = ram_rig(media, cylinder=0, drq_lead=WT_LEAD)
+    drive.motor(True)
+    drive.home(0)
+    rows = np.random.default_rng(int(deleted)).integers(0, 256, (10, 512), np.uint8)
+    sim.wd.drq_slack = NEVER
+    status, written = drive.write_sectors(0, 1, rows, deleted)
+    assert (written, status & mfm.ST_LOST) == (10, 0) and sim.wd.drq_slack >= WT_LEAD
+    for r in (1, 10):
+        data, st = drive.read_sector(0, r)
+        assert np.array_equal(data, rows[r - 1]) and bool(st & 0x20) == deleted
     no_stops(sim)
 
 
