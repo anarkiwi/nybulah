@@ -44,7 +44,8 @@ VIA1PA, T2CL, ACR1 = 0x1801, 0x1808, 0x180B
 DOS_TRACK = 0x22
 SENSE_CODE, SN_TRK00 = "sense_1571", 0x04
 SEEK_CODE, STREAM_CODE = "seek_1571", "stream_1571"
-STREAM_ZP, ZP_STREAM_SIZE = 0x84, 0x100 - ZP  # stream.s ZPCODE; ZP saved through $FF
+STREAM_ZP, ZP_STREAM_SIZE = 0x60, 0x100 - ZP  # stream.s ZPCODE (revs first); ZP saved
+STREAM_TICKS = CODE_BASE + 3  # stream.s ticksp
 SENSE_STREAM = CODE_BASE + 0x100  # inside the seek code's padding (no expansion RAM)
 STREAM_HZ = 2_000_000
 T1_PERIOD = 62_500  # monitor.s WD_PERIOD: VIA1 T1 cycles per tick
@@ -156,7 +157,7 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         keep = self.positions < self.valid_bytes
         pos = self.positions[keep]
         _, _, extra = _hidden(to_bits(self.data), pos, self.sync_bits[keep])
-        before = np.searchsorted(pos, self.index, side="right")
+        before = np.minimum(self.parsed.index_syncs, len(pos))
         cum = np.concatenate(([0], np.cumsum(extra)))
         return 8 * self.index + cum[before]
 
@@ -802,7 +803,8 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
     def _stream(self, density, side, revolutions):
         self._load(STREAM_CODE)
         ticks = math.ceil(2 * 60 / RPM_MIN * STREAM_HZ / T1_PERIOD) + 1
-        self._params(mode=ticks, npages=revolutions + 1)
+        self.mon.write(STREAM_TICKS, bytes([ticks]))
+        self.mon.write(STREAM_ZP, bytes([revolutions + 1]))
         size = stream_size(revolutions)
         mon = self.mon
         mon.set_fast(True)
