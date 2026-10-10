@@ -818,3 +818,40 @@ def test_drive_code_stays_out_of_the_bam(name):
     code = drivecode(name)
     assert r1581.CODE2 + len(code) - r1581.SPLIT <= BAM
     assert r1581.TAGS[name] in code[: r1581.SPLIT]
+
+
+def test_edge_times_resolve_borrows_and_late_wraps():
+    """A stamp's high byte from the low read's side of a borrow; a wrap after the last
+    poll (bit 15 risen since) counted."""
+    log = np.array(
+        [
+            [0x80, 0xFF, 0xFF, 0xFF, 0, 0xFF],
+            [0x82, 0x13, 0x80, 0x12, 1, 0x13],
+            [0x80, 0x12, 0x00, 0x11, 1, 0x12],
+            [0x82, 0xFF, 0xF0, 0xFF, 1, 0x00],
+        ],
+        np.uint8,
+    )
+    t, st = r1581.edge_times(log)
+    assert st.tolist() == [0x80, 0x82, 0x80, 0x82]
+    assert t.tolist() == [0, 0x1ED7F, 0x1EDFF, 0x2000F]
+
+
+def test_status_edges_follow_the_index_after_a_seek(media):
+    """drive/ipprobe.s after a zero-step Seek: IP rises once a revolution, busy and MO
+    logged; the log replaces the DOS cache; mfm code reloads after it."""
+    _, sim, drive = stream_rig(media)
+    drive.motor(True)
+    track = drive.sense()["track_register"]
+    t, st = drive.status_edges([0xD0, 0x19], 0x87, 3)
+    on = (st & r1581.ST_IP) != 0
+    rises = t[1:][on[1:] & ~on[:-1]]
+    assert len(rises) >= 2
+    assert np.all(np.abs(np.diff(rises) - drive.period_us) < 1000)
+    assert drive.cache_used
+    assert drive.sense()["track_register"] == track
+    t, st = drive.status_edges([0xD0, 0xE8], r1581.ST_BUSY, 2)
+    assert st[0] & r1581.ST_BUSY and not st[-1] & r1581.ST_BUSY
+    with pytest.raises(ValueError):
+        drive.status_edges([0xD0] * 5, 0x87, 1)
+    no_stops(sim)
