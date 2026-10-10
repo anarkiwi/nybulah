@@ -584,7 +584,7 @@ restores the timers and reads ICR.
 
 The per-byte X monitor does not fit beside the CIA code (`$0500-$07FF`); on a 1581
 `s3` is burst X (firmware v10). The monitor is at most `$0290` bytes, so the 1581
-drive code can use `$0790-$09FF` as well as `$0300-$04FF`.
+drive code can use `$0782-$09FF` as well as `$0300-$04FF`.
 
 `ciaprobe_1581` measures the 8520's SDR-write-to-ICR-flag latency exactly as on the
 1571 (`tools/xprobe.py --cia`); the 40-cycle send period needs it at 39 or less, as
@@ -633,7 +633,7 @@ Cycle tables (t = 0 at an SDR write, from the code):
 
 | path | status reads | data register read | next SDR write |
 |---|---|---|---|
-| `dl` data loop | 24 (28 with a count carry), then every 21 | 37 | 41 (45) |
+| `dl` data loop | 24 (28 with a count carry), then every 27 (ATN on each pass) | 37 | 41 (45) |
 | `w0` before the first DRQ | every 30 or less | 11 or less after the read that sees DRQ | 11 after the read |
 | `send` (one metadata byte, w0) | -14, 4, 28 | 13 (DRQ at 4), 37 (at 28) | metadata at 0, data at 40 or 48 |
 | `plain` (WD idle) | | | 40 |
@@ -645,12 +645,12 @@ kbit/s):
 | quantity | worst case | budget | margin |
 |---|---|---|---|
 | SDR write spacing | 40 (`send` s4 path), 41 (`dl`) | > 39 | 1 cycle |
-| byte waiting in `dl` | 34 (21 + 13) | 64 | 30 |
+| byte waiting in `dl` | 40 (27 + 13) | 64 | 24 |
 | first byte, from `w0` | read 41 after arrival; second byte read 106 after the first's arrival | 128 (third arrival) | 22 |
 | first byte during a metadata write | arrival after -14; second byte read at 94 | > 114 | 20 |
 | backlog | writes 40 apart against bytes 64 apart | | drains 24 cycles a byte |
 | CLK for metadata | asserted at -4, released at 16 to 24 | adapter samples 4-14 | 2 cycles |
-| ATN seen | every byte in `dl`, every pass of `w0` | adapter holds ATN 8622 us | |
+| ATN seen | every pass of `dl` and `w0` | adapter holds ATN 8622 us | |
 
 A stamp reads ICR 4 cycles and timer B low 22 cycles after its reference (the
 first byte's SDR write, the status read that saw the command end, or the one that
@@ -678,6 +678,13 @@ how long the receive took (the adapter's 20 ms gap timeout against its I/O timeo
 for no first fall). `streamprobe` stops after such a Read Track stream. A reply that is neither an END
 code nor `ST_NOGO` was read from a stream still running: `StreamLost` ends the
 session with no further transfer and the monitor is recovered by a bus reset.
+
+The last 20 bytes of the first block (`$04EC-$04FF`, `r1581.STATE_AT`) hold the
+stream's state: entries started, the entry and repeats left, and the last record
+(both stamps, WD status, flags, data bytes). An incomplete stream reads it through
+the monitor; an out-of-step one, after the drive's longest remaining stream and its
+monitor's watchdog, over DOS M-R before the recovery's bus reset, which the ROM's
+RAM test (dskint.src) would overwrite. It appears as `diagnosis.drive_state`.
 
 ### Without streaming
 

@@ -14,10 +14,10 @@ import numpy as np
 from . import mfmstream as ms
 from .analysis import mfm
 from .formats.mfmcap import MfmCapture
-from .link import HandshakeTimeout
+from .link import WATCHDOG_S, HandshakeTimeout
 from .monitor import Monitor, drivecode
 
-CODE_BASE, CODE2, SPLIT = 0x0300, 0x0790, 0x0200
+CODE_BASE, CODE2, SPLIT = 0x0300, 0x0782, 0x0200
 CIA_PA = 0x4000
 MFM_CODE, STREAM_CODE = "mfm_1581", "mfmstream_1581"
 TAGS = {MFM_CODE: b"NYMF", STREAM_CODE: b"NYMS"}
@@ -40,6 +40,9 @@ FIELDS = {
 }
 PB_AT, T0_AT, T1_AT, ID_AT, RS_AT = 10, 11, 14, 17, 23
 LIST_TMO = 4 * ms.LIST_ENTRIES  # drive/mfmstream.s: TMO after the list
+STATE_LEN = 20  # drive/mfmstream.s state: issued, op, rep, lp, trksave, sc, stamps...
+STATE_AT = CODE_BASE + SPLIT - STATE_LEN  # ... status, flags, count: the block's end
+FORCE_WRAPS = 2  # drive/mfmstream.s: busy wait after the timeout's force interrupt
 BUFFER, BUFFER_END = 0x0C00, 0x2000  # the DOS track cache (equate.src buffcache)
 MAX_CYL = 80  # drive/mfm.inc: DOS pmaxtrk 79, cylinder 80 used by Wheels
 STEP_US = 12_000  # WD r1r0 = 01 on WD1770 and WD1772
@@ -344,9 +347,10 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         revs = 2 + sum(_revs(e) * (e[3] & ms.REP_MAX) for e in entries)
         self._load(STREAM_CODE)
         self.mon.write(self._p, ms.command_list(entries))
-        self.mon.write(self._p + LIST_TMO, bytes([self._tmo(RNF_REVS + 1)]))
         size = 64 * math.ceil(2 * revs * (TRACK_BYTES + 64) / 64)
         mon = self.mon
+        tmo = self._tmo(RNF_REVS + 1)
+        self.mon.write(self._p + LIST_TMO, bytes([tmo]))
         mon.transact(b"J" + struct.pack("<H", CODE_BASE))
         t0 = mon.clock()
         raw = mon.cbm.srq2_stream(size)
@@ -357,10 +361,27 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         got.elapsed_s = round(elapsed, 6)
         if not got.in_step:
             mon.running = False
+            reps = sum(e[3] & ms.REP_MAX for e in entries)
+            got.state = self._dos_state((reps * tmo + FORCE_WRAPS) * TB_WRAP_US)
             raise StreamLost(
                 f"stream ended {got.adapter}, drive out of step", _meta(got)
             )
+        if not got.complete:
+            got.state = stream_state(mon.read(STATE_AT, STATE_LEN))
         return got
+
+    def _dos_state(self, stream_us):
+        """The stream state over DOS M-R once the drive can have finished its stream
+        (stream_us at most) and its monitor left for DOS (WATCHDOG_S unanswered), or
+        why it could not be read; an adapter on a virtual clock advances it instead."""
+        wait = getattr(self.mon.cbm, "host_wait", None) or self.sleep
+        wait(stream_us / 1e6 + WATCHDOG_S)
+        try:
+            return stream_state(
+                self.mon.cbm.download(self.mon.dev, STATE_AT, STATE_LEN)
+            )
+        except (IOError, ValueError) as e:
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def read_track(self, revolutions=1):
         """Read Track ``revolutions`` times: a "track" MfmCapture."""
@@ -420,6 +441,23 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
 def _revs(e):
     """Revolutions an entry may take: Read Track waits for an index and reads one."""
     return {ms.OP_READ_TRACK: 2, ms.OP_INDEX: 1}.get(e[0], 1)
+
+
+def stream_state(raw):
+    """drive/mfmstream.s's state block: entries started, the list position, the last
+    record (stamps in microseconds, WD status, flags, data bytes)."""
+    b = bytes(raw)
+    return {
+        "entries_started": b[0],
+        "op": b[1],
+        "rep_left": b[2],
+        "list_at": b[3],
+        "t_first_us": ms.stamp_us(b[6:11]),
+        "t_end_us": ms.stamp_us(b[11:16]),
+        "wd_status": b[16],
+        "flags": b[17],
+        "count": b[18] | b[19] << 8,
+    }
 
 
 def _meta(got):

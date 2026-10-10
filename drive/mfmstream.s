@@ -2,7 +2,7 @@
 ; commands and sends every byte the WD delivers out through the 8520 shift
 ; register as it arrives, with no host handshake, plus metadata with CLK
 ; asserted at the byte's bit 7 (the adapter samples CLK 4 to 14 cycles after
-; the SDR write). Loaded at $0300 (512 bytes) and $0790 (the rest) in place
+; the SDR write). Loaded at $0300 (512 bytes) and $0782 (the rest) in place
 ; of mfm_1581 and called through J of monitor_s4_1581, the head placed.
 ;
 ; List L (the "NYMS" tag + 4): up to four entries of four bytes, op $FF
@@ -109,15 +109,6 @@ force:  lda #WD_FORCE
         WDIDLE
         rts
 
-; Z set when a wrap used up the timeout.
-tick:   lda CIA_ICR
-        and #ICR_TB
-        beq :+
-        inc wraps
-        dec tmo
-        rts
-:       lda #1
-        rts
 
 ; Send one queued byte, the WD idle: CLK from 4 before the write to 16
 ; after; returns 40 after it.
@@ -209,10 +200,10 @@ dstamp: STAMP first                     ; 34
         jmp dl                          ; 3     the status read at 41
 
 ; Data loop: from a write at t = 0 the status is read at 24 (28 when the
-; count carries) and every 21 cycles while no DRQ; a DRQ seen (before BUSY:
-; a command's last byte may wait after BUSY clears) is written 17 cycles
-; after its status read: writes are 41 or more apart and a byte waits at most
-; 21 + 13 cycles in the data register.
+; count carries) and every 27 cycles while no DRQ, ATN checked on each pass;
+; a DRQ seen (before BUSY: a command's last byte may wait after BUSY clears)
+; is written 17 cycles after its status read: writes are 41 or more apart and
+; a byte waits at most 27 + 13 cycles in the data register.
         ALIGN4 2
 dl:     WDOK
         lda WDSTAT                      ; 4     t = 24
@@ -220,9 +211,11 @@ dl:     WDOK
         and #ST_DRQ >> 1                ; 2     C: BUSY
         BR bne, dd                      ; 3
         BR bcc, dend                    ; 2
+        bit CIA_PB                      ; 4
+        BR bmi, dabort                  ; 2
         lda CIA_ICR                     ; 4
         and #ICR_TB                     ; 2
-        BR beq, dl                      ; 3     status every 21 cycles
+        BR beq, dl                      ; 3     status every 27 cycles
         inc wraps
         dec tmo
         bne dl
@@ -313,6 +306,12 @@ put:    sty py
         ldy py
         rts
 
+; State at the end of the first block (nybulah.r1581.STATE), readable after
+; the stream ends, also over DOS M-R once the monitor has left.
+STATE_LEN = 20
+        .res $0500 - STATE_LEN - *
+state:
+issued: .res 1
 op:     .res 1
 rep:    .res 1
 lp:     .res 1
@@ -324,12 +323,13 @@ stat:   .res 1                  ; the REC payload continues: status, flags,
 flags:  .res 1                  ; count
 count:  .res 2
 REC_LEN = * - first
+.assert * - state = STATE_LEN && * = $0500, error, "state block"
 ; Queued at once at most: a KEEP not yet sent, a REC, END.
 .assert 1 + 1 + (8 * REC_LEN + 5) / 6 + 1 <= QMASK, error, "queue too short"
 
 
         .segment "CODE2"
-        .org $0790
+        .org $0782
 
 q:      .res QMASK + 1
         .assert >q = >(q + QMASK), error, "q crosses a page"
@@ -338,7 +338,16 @@ bits:   .res 1
 nb:     .res 1
 py:     .res 1
 sm:     .res 1
-issued: .res 1
+
+; Z set when a wrap used up the timeout.
+tick:   lda CIA_ICR
+        and #ICR_TB
+        beq :+
+        inc wraps
+        dec tmo
+        rts
+:       lda #1
+        rts
 
 ; Add the first stamp's wrap flag to wraps.
 seen:   lda first + 1

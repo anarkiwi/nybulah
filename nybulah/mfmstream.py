@@ -89,6 +89,7 @@ class MfmStream:  # pylint: disable=too-many-instance-attributes
     raw_bytes: int = 0
     data_bytes: int = 0
     elapsed_s: float | None = None
+    state: dict | None = None
 
     @property
     def complete(self):
@@ -123,6 +124,7 @@ class MfmStream:  # pylint: disable=too-many-instance-attributes
             "raw_bytes": self.raw_bytes,
             "data_bytes": self.data_bytes,
             "elapsed_s": self.elapsed_s,
+            "drive_state": self.state,
         }
 
     @classmethod
