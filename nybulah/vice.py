@@ -39,6 +39,8 @@ DELAY = bytes([0xA2, 0x00, 0xCA, 0xD0, 0xFD, 0x88, 0xD0, 0xF8, 0x60])
 DELAY_LOOP = 2 + 256 * 5 - 1 + 2 + 3
 FLAG_I = 0x04
 STACK = 0x0100
+IRQ_VECTOR = 0xFFFE
+TCP_LISTEN = "0A"
 PARK = 0x0500  # the monitor's own load address: free while it is not loaded
 CIA1581 = 0x4000
 # drive/monitor.s ciasave: timer A latch 1 continuous, timer B counting its underflows
@@ -330,15 +332,27 @@ def available(machine="x64sc"):
     return shutil.which(machine) is not None
 
 
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def listening_port(pid):
+    """The TCP/IPv4 port a process listens on (Linux /proc), None while it has none."""
+    inodes = set()
+    for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir():
+        with contextlib.suppress(OSError):
+            link = os.readlink(fd)
+            if link.startswith("socket:["):
+                inodes.add(link[8:-1])
+    for line in (
+        pathlib.Path(f"/proc/{pid}/net/tcp").read_text("ascii").splitlines()[1:]
+    ):
+        field = line.split()
+        if field[3] == TCP_LISTEN and field[9] in inodes:
+            return int(field[1].rsplit(":", 1)[1], 16)
+    return None
 
 
 def command_line(machine, port, drives, history_lines, warp=True):
     """Emulator arguments for {unit: (model, image)} with true drive emulation, every
-    other unit off, no sound, a fixed random seed, the binary monitor on port."""
+    other unit off, no sound, a fixed random seed, the binary monitor on port (0: one
+    the system picks)."""
     args = [shutil.which(machine) or machine, "-default", "+logcolorize", "+sound"]
     args += ["-seed", "1", "-binarymonitor"]
     args += ["-binarymonitoraddress", f"ip4://127.0.0.1:{port}"]
@@ -362,10 +376,10 @@ class Vice:
         self, drives, machine="x64sc", history_lines=200_000, timeout=60.0, warp=True
     ):
         self.machine, self.drives = machine, dict(drives)
-        self.port = _free_port()
+        self.port = None
         self._tmp = pathlib.Path(tempfile.mkdtemp(prefix="vice-"))
         self.log = self._tmp / "vice.log"
-        args = command_line(machine, self.port, self.drives, history_lines, warp)
+        args = command_line(machine, 0, self.drives, history_lines, warp)
         env = os.environ | {"HOME": str(self._tmp)}
         with open(self.log, "wb") as log:
             self.proc = subprocess.Popen(  # pylint: disable=consider-using-with
@@ -388,12 +402,12 @@ class Vice:
                 raise ViceError(
                     f"{self.machine} exited: {self.log.read_text()[-2000:]}"
                 )
-            try:
+            self.port = listening_port(self.proc.pid)
+            if self.port is not None:
                 return socket.create_connection(("127.0.0.1", self.port), timeout=1)
-            except OSError as e:
-                if time.monotonic() > deadline:
-                    raise ViceError(f"no binary monitor on port {self.port}") from e
-                time.sleep(0.1)
+            if time.monotonic() > deadline:
+                raise ViceError(f"{self.machine} opened no binary monitor")
+            time.sleep(0.1)
 
     def names(self, space):
         """{register name: id} of a memspace."""
@@ -421,14 +435,16 @@ class Vice:
         return int(h["clock"][-1]) if len(h) else 0
 
     def run_until(self, space, addr, timeout):
-        """Run until the memspace's CPU executes addr; False, stopped, on timeout."""
+        """Run until the memspace's CPU executes addr; False, stopped, on timeout or
+        any other stop. A drive stopped there runs on to the main CPU's clock at the
+        next command, so only a loop at addr holds it there."""
         cp = self.mon.checkpoint(addr, space=space)
         try:
             self.mon.resume()
             if not self.mon.wait_stopped(timeout):
                 self.mon.stop()
                 return False
-            return self.registers(space)["PC"] == addr
+            return cp in self.mon.hits
         finally:
             self.mon.delete(cp)
 
@@ -467,7 +483,11 @@ class DriveMonitor:
         self.running = False
 
     def start(self):
-        """Park the drive CPU, interrupts masked, and set up its timers."""
+        """Once the DOS has finished its reset (its interrupt handler has run), park
+        the drive CPU, interrupts masked, and set up its timers."""
+        irq = struct.unpack("<H", self.read(IRQ_VECTOR, 2))[0]
+        if not self.vice.run_until(self.space, irq, self.call_timeout):
+            raise ViceError("the drive DOS did not finish its reset")
         park = bytes([JMP, self.park & 0xFF, self.park >> 8])
         self.write(self.park, park + DELAY)
         regs = self.vice.registers(self.space)
@@ -506,7 +526,8 @@ class DriveMonitor:
         """Set the drive up to run the routine at addr (see :meth:`finish`)."""
         regs = self.vice.registers(self.space)
         sp, ret = regs["SP"], self.park - 1
-        self.write(STACK + ((sp - 1) & 0xFF), bytes([ret & 0xFF, ret >> 8]))
+        self.write(STACK + sp, bytes([ret >> 8]))
+        self.write(STACK + ((sp - 1) & 0xFF), bytes([ret & 0xFF]))
         fl = regs["FL"] | FLAG_I
         self.vice.set_registers(
             self.space, pc=addr, a=a, x=x, y=y, sp=(sp - 2) & 0xFF, fl=fl

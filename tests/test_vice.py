@@ -127,7 +127,8 @@ def test_1581_read_track_streams_to_c128():
 
 
 def test_1571_via_registers_match_cpu(tmp_path):
-    """On a 1571 the CPU's VIA reads equal the monitor's peeks; cycles at 1 MHz."""
+    """On a 1571 the CPU's VIA reads equal the monitor's peeks; a call returns
+    with the stack pointer at $00; cycles at 1 MHz."""
     path = tmp_path / "disk.d71"
     path.write_bytes(d71.write_d71(d71.D71(np.zeros((d71.D71_SECTORS, 256)))))
     with vice.Vice({8: ("1571", path)}) as v:
@@ -144,6 +145,9 @@ def test_1571_via_registers_match_cpu(tmp_path):
             mon.read(0x1C03, 1)[0],
         )
         space = vice.memspace(8)
+        v.set_registers(space, sp=0)
+        mon.jsr(SCRATCH)
+        assert v.registers(space)["SP"] == 0
         c0 = v.clock(space)
         mon.sleep(0.05)
         assert v.clock(space) - c0 >= 50_000
