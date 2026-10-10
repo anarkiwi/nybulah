@@ -174,7 +174,7 @@ def _angles(pos, revolution, index):
 
 def _check(truth, name, cap, refs):
     bits, byte_bit, begins = pt.capture_bits(cap)
-    al = pt.align(bits, truth, period=truth.cells)
+    al = pt.align(bits, truth, period=truth.cells, sync_error=cap.sync_error)
     rep = pt.region_report(truth, al, begins)
     entry = {
         "name": name,
@@ -350,7 +350,7 @@ def crosstalk(truth, name, cap):
     """A capture of any halftrack aligned to the truth: copies found, bit errors,
     slips and the fraction of covered exact bits read as written."""
     bits, _, begins = pt.capture_bits(cap)
-    al = pt.align(bits, truth, period=truth.cells)
+    al = pt.align(bits, truth, period=truth.cells, sync_error=cap.sync_error)
     out = {"name": name, "path": _path(cap), "found": al.found, "bits": len(bits)}
     if not al.found:
         return out | {"bit_errors": None, "slips": None, "match": None}

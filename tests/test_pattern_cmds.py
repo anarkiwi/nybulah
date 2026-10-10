@@ -72,18 +72,12 @@ def test_write_density_lead_and_weak_region(monkeypatch, tmp_path):
     assert rec["variant"] == "weak"
     argv = ["pattern", "verify", "--dev", "9", *opts, *BASE, "--repeats", "2"]
     v8 = cli.main(argv + ["--cells", str(out["cells"])], cbm)
-    assert v8["summary"]["ram"]["bit_errors"] == v8["summary"]["ram"]["slips"] == 0
-    assert v8["summary"]["stream"]["slips"] == 0
+    for path in ("stream", "ram"):
+        assert v8["summary"][path]["bit_errors"] == v8["summary"][path]["slips"] == 0
     for cap in v8["captures"]:
-        errors = sum(
-            g["errors"] for g in cap["groups"].values() if g["kind"] == "exact"
-        )
-        long_by = 0
         for sync in cap["syncs"]:
-            off = np.array(sync["found"]) - sync["written"]
-            assert len(off) and np.abs(off).max() <= cap["sync_error"]
-            long_by += int(np.maximum(off, 0).sum())
-        assert errors <= (long_by if cap["path"] == "stream" else 0)
+            off = np.abs(np.array(sync["found"]) - sync["written"])
+            assert len(off) and off.max() <= cap["sync_error"]
     groups = {f"{k}{n}" for n in pt.weak_runs(3) for k in ("noflux", "badgcr")}
     assert set(v8["summary"]["unstable_all"]) == groups
     assert all(u["copies"] >= 2 for u in v8["summary"]["unstable_all"].values())

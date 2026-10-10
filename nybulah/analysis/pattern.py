@@ -481,13 +481,17 @@ def stretch_shifts(c, truth, offsets, alpha=DEFAULT_ALPHA):
     return np.array(out, np.int64)
 
 
-def align(c, truth, period=None, band=None, alpha=DEFAULT_ALPHA):
+def align(  # pylint: disable=too-many-arguments
+    c, truth, period=None, band=None, alpha=DEFAULT_ALPHA, sync_error=1
+):
     """Align capture bits to the pattern (see :class:`Alignment`).
 
-    Substitutions and indels cost alike, a sync's indels half (runs are measured),
-    weak and filler bits nothing. ``band``, the starting half width (default:
-    a bit per pattern sync), widens by the farthest stable stretch's shift
-    (:func:`stretch_shifts`) and doubles while the best path touches its edge.
+    A sync's indel costs 1 and any other bit's substitution or indel
+    ``sync_error`` + 1 (at least 2), so a run measured within ``sync_error`` bits
+    never outweighs a data bit; weak and filler bits cost nothing. ``band``, the
+    starting half width (default: a bit per pattern sync), widens by the farthest
+    stable stretch's shift (:func:`stretch_shifts`) and doubles while the best
+    path touches its edge.
     """
     c = np.asarray(c, np.uint8)
     offsets, found = placements(c, truth, period, alpha)
@@ -496,7 +500,9 @@ def align(c, truth, period=None, band=None, alpha=DEFAULT_ALPHA):
         return Alignment(c, none, none, none, none, none, offsets, 0, 0)
     e, pos, region, copy = _expected(truth, offsets, len(c))
     kinds = [r.kind for r in truth.regions] + [FILLER]
-    sub, indel = np.array([COSTS[k] for k in kinds], np.uint8)[region].T.copy()
+    w = max(COSTS[EXACT][0], sync_error + 1)
+    costs = COSTS | {EXACT: (w, w), SYNC: (w, COSTS[SYNC][1])}
+    sub, indel = np.array([costs[k] for k in kinds], np.int64)[region].T.copy()
     shifts = stretch_shifts(c, truth, offsets, alpha)
     band = (band or sum(r.kind == SYNC for r in truth.regions)) + int(
         np.abs(shifts).max(initial=0)
