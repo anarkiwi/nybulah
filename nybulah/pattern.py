@@ -7,6 +7,7 @@ revolution at each density on a scratch halftrack (writing it); halftracks reads
 other halftracks against a written truth (cross-talk).
 """
 
+import argparse
 import json
 import pathlib
 
@@ -60,6 +61,16 @@ def _count(text):
     return value
 
 
+class _WriteOnly(argparse.Action):
+    """An option of write that verify refuses: it finds the pattern by alignment."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(
+            f"{option_string} is write's only: verify aligns each capture to the"
+            " pattern wherever it lies"
+        )
+
+
 def add_arguments(ap):
     """Command line options: write, verify, compare, cells and halftracks actions."""
     sub = ap.add_subparsers(dest="action", required=True)
@@ -70,6 +81,7 @@ def add_arguments(ap):
     _pattern_options(verify)
     _capture_options(verify)
     verify.add_argument("--cells", type=int, help="cells per revolution written")
+    verify.add_argument("--lead", action=_WriteOnly, help="refused: write only")
     cmp = sub.add_parser("compare", help="saved captures against a truth record")
     cmp.add_argument("--truth", type=pathlib.Path, required=True)
     cmp.add_argument("--window", type=int, default=WINDOW, help="speed trace bytes")
