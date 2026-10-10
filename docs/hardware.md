@@ -887,3 +887,15 @@ CIA (CRA, timer A latch), VIA1 PA1/PA5 and clears the CIA's flags. The host rest
 transparently when a command follows a longer pause. A 1571 running at 2 MHz
 halves both windows; pass `idle_s=WATCHDOG_IDLE_S / 2 * 0.9` to `Monitor`
 there.
+
+A `Nibbler` session is different: from `open` to `close` its parameters and
+code occupy zero page `$60-$FF`, including DOS's listen and talk addresses
+(`$77`/`$78`, compared with every ATN command byte). A drive that returns to
+DOS then (idle window passed, or a routine that never answers) ignores its
+own device number, so no upload can restart the monitor. While a session
+holds the monitor (`Monitor.holding`), a pause past the idle window or a
+failed command resets the bus instead and raises `DriveLost`, naming the
+command and, for a `J`, the routine (`prep`, `read`, `write`, `sense`,
+`stream`); the session then has nothing left to restore. Host work that may
+outlast the idle window (alignment, comparison) runs after `close`, as
+`pattern` does.

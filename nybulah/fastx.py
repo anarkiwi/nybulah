@@ -86,13 +86,23 @@ class XLink(S1Link):
             raise ValueError("no room for the clock switch after the monitor")
         self.write(addr, code)
         self.send(b"J" + struct.pack("<H", addr))
+        self._use(fast)
+        self.response(3)
+        self.mon.touch()
+
+    def _use(self, fast):
+        """Transfer at the drive's clock; its watchdog windows scale with it."""
+        if fast != self.fast:
+            self.mon.idle_s *= 0.5 if fast else 2.0
         self.fast = fast
         speed = self.speeds[fast]
         self.rx = getattr(self.cbm, f"{speed}_read")
         self.tx = getattr(self.cbm, f"{speed}_write")
-        self.mon.idle_s *= 0.5 if fast else 2.0
-        self.response(3)
-        self.mon.touch()
+
+    def drive_reset(self):
+        """After a drive reset: a 1571 runs at 1 MHz again."""
+        if getattr(self.mon, "model", None) != "1581":
+            self._use(False)
 
     @property
     def xread(self):
@@ -215,19 +225,21 @@ class XBLink(XLink):
         return [m for m in (head, n - head) if m]
 
     def _block(self, op, addr, n, data=None):
-        cmd = self.packet(op + struct.pack("<HH", addr, n))
-        self.mon.transact(op + struct.pack("<HH", addr, n))
-        if data is None:
-            got = b"".join(self.rx(m) for m in self._split(addr, n))
-            check = self.check(cmd, sent=got)
-        else:
-            got = None
-            at = 0
-            for m in self._split(addr, n):
-                self.tx(data[at : at + m])
-                at += m
-            check = self.check(cmd, data)
-        reply = self.rx(3)
+        payload = op + struct.pack("<HH", addr, n)
+        cmd = self.packet(payload)
+        self.mon.transact(payload)
+        with self.mon.guard(self.mon.describe(payload)):
+            if data is None:
+                got = b"".join(self.rx(m) for m in self._split(addr, n))
+                check = self.check(cmd, sent=got)
+            else:
+                got = None
+                at = 0
+                for m in self._split(addr, n):
+                    self.tx(data[at : at + m])
+                    at += m
+                check = self.check(cmd, data)
+            reply = self.rx(3)
         self.mon.touch()
         return check == tuple(reply[:2]), got
 

@@ -10,6 +10,7 @@ other halftracks against a written truth (cross-talk).
 import argparse
 import json
 import pathlib
+import sys
 
 import numpy as np
 from tqdm import tqdm
@@ -368,20 +369,30 @@ def crosstalk(truth, name, cap):
 
 
 def halftracks(nib, truth, args):
-    """Captures of each requested halftrack the head reaches without bumping,
-    each aligned to the truth (:func:`crosstalk`)."""
+    """Captures of each requested halftrack the head reaches without bumping, and
+    the work aligning each to the truth (:func:`crosstalk`) after the session."""
     reach = range(HOME_HALFTRACK, MAX_HALFTRACK + 1)
     wanted = sorted(set(args.halftracks))
     out = {
         "max_halftrack": reach[-1],
         "skipped": [h for h in wanted if h not in reach],
-        "halftracks": [],
     }
-    for h in tqdm([h for h in wanted if h in reach], desc="halftracks", unit="ht"):
-        named = captures(nib, h, truth.density, args)
-        rows = [crosstalk(truth, name, cap) for name, cap in named]
-        out["halftracks"].append({"halftrack": h, "captures": rows})
-    return out
+    taken = [
+        (h, captures(nib, h, truth.density, args))
+        for h in tqdm([h for h in wanted if h in reach], desc="halftracks", unit="ht")
+    ]
+
+    def align():
+        rows = [
+            {
+                "halftrack": h,
+                "captures": [crosstalk(truth, name, cap) for name, cap in named],
+            }
+            for h, named in taken
+        ]
+        return out | {"halftracks": rows}
+
+    return align
 
 
 def cells(nib, args):
@@ -407,24 +418,49 @@ def cells(nib, args):
     return {"halftrack": args.halftrack, "densities": rows}
 
 
+def _take(nib, args, truth):
+    """The action's drive work; returns its host work, run after the session."""
+    if args.action == "write":
+        done = write(nib, truth, Archive(args.save), args.lead)
+        done["truth"] = {"bits": len(truth.bits), "regions": layout(truth)}
+        return lambda: done
+    if args.action == "verify":
+        named = captures(nib, truth.halftrack, truth.density, args, index=True)
+        return lambda: compare(truth, named, args.window)
+    if args.action == "cells":
+        done = cells(nib, args)
+        return lambda: done
+    return halftracks(nib, truth, args)
+
+
+def _close(nib):
+    """Close the session; the error, if any, for the report."""
+    try:
+        nib.close()
+    except OSError as e:
+        print(f"close: {type(e).__name__}: {e}", file=sys.stderr)
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
 def _drive(args, cbm, truth):
+    """Locate and do the action's drive work, close the session, then do its host
+    work: a session never idles while the host computes, and a failed close
+    still reports what the drive work took (``close_error``)."""
     model = identify_model(cbm, args.dev)
-    with (
-        Monitor(cbm, args.dev, args.transport) as mon,
-        Nibbler(mon, model, settle_ms=args.settle_ms) as nib,
-    ):
-        located = locate(nib, args.max_steps, args.search_steps)
-        report = {"model": model, "located": located, "streaming": nib.streaming}
-        if args.action == "write":
-            report |= write(nib, truth, Archive(args.save), args.lead)
-            report["truth"] = {"bits": len(truth.bits), "regions": layout(truth)}
-        elif args.action == "verify":
-            named = captures(nib, truth.halftrack, truth.density, args, index=True)
-            report |= compare(truth, named, args.window)
-        elif args.action == "cells":
-            report |= cells(nib, args)
-        else:
-            report |= halftracks(nib, truth, args)
+    with Monitor(cbm, args.dev, args.transport) as mon:
+        nib = Nibbler(mon, model, settle_ms=args.settle_ms).open()
+        try:
+            located = locate(nib, args.max_steps, args.search_steps)
+            host = _take(nib, args, truth)
+        except BaseException:
+            _close(nib)
+            raise
+        closed = _close(nib)
+    report = {"model": model, "located": located, "streaming": nib.streaming}
+    report |= host()
+    if closed is not None:
+        report |= {"close_error": closed, "ok": False}
     return report
 
 
