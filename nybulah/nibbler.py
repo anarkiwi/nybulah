@@ -525,11 +525,31 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
         mon.write(T2CL, b"\xff\xff")
         pcr = mon.read(PCR2, 1)[0]
         mon.write(PCR2, bytes([pcr & PCR_SOE_MASK | PCR_SOE_OFF]))
+        mon.holding = self
         return self
 
+    def __str__(self):
+        return f"the {self.model} nibbler"
+
+    @property
+    def routines(self):
+        """Names of the drive routines at the addresses a 'J' calls."""
+        names = {PREP: "prep", READ: "read", self.buffer + NPAGES * 256: "write"}
+        if self._overlay == STREAM_CODE:
+            names = {CODE_BASE: "stream"}
+        names[SENSE_STREAM if self.streaming else self.buffer] = "sense"
+        return names
+
     def close(self):
-        """Stop the motor, leave DOS's track ($22) on the head's, restore the rest."""
+        """Stop the motor, leave DOS's track ($22) on the head's, restore the rest.
+
+        Nothing is left to restore once the monitor lost the drive (a bus reset
+        reinitialised DOS).
+        """
         if self._saved is None:
+            return
+        if getattr(self.mon, "holding", self) is not self:
+            self._saved = self._overlay = self.halftrack = None
             return
         self.motor = False
         self._prep(0, 0, (self.halftrack or 0) & 1)
@@ -538,7 +558,7 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
             self.mon.write(DOS_TRACK, bytes([self.halftrack // 2]))
         for addr, value in self._saved:
             self.mon.write(addr, value)
-        self._saved = None
+        self._saved = self.mon.holding = None
 
     def __enter__(self):
         return self.open()
@@ -788,11 +808,13 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
         mon.set_fast(True)
         try:
             mon.transact(b"J" + struct.pack("<H", CODE_BASE))
-            raw = mon.cbm.srq2_stream(size)
-            reply = mon.link.response(3)
+            with mon.guard("the stream"):
+                raw = mon.cbm.srq2_stream(size)
+                reply = mon.link.response(3)
             mon.touch()
         finally:
-            mon.set_fast(False)
+            if mon.holding is self:
+                mon.set_fast(False)
         parsed = fmt.Stream.parse(raw)
         return Capture(
             parsed.data,

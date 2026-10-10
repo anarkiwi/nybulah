@@ -33,6 +33,9 @@ ICR_TB, ICR_FLAG = 0x02, 0x10
 CRB_START, CRB_ONESHOT, CRB_LOAD, CRB_INMODE = 0x01, 0x08, 0x10, 0x60
 INMODE_PHI2, INMODE_TA = 0x00, 0x40
 PB_FSDIR, PB_WPRT = 0x20, 0x40
+# DOS's listen and talk addresses (LSNADR, TLKADR): set from the device number at
+# initialisation, compared with each ATN command byte (1541/1571 $E8A9, 1581 $AC2C)
+LSNADR, TLKADR, LISTEN, TALK = 0x77, 0x78, 0x20, 0x40
 
 
 WAIT, SET, REL, PUT, SAMPLE, SHL, SHR = range(7)
@@ -495,11 +498,23 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         self.mech = None
         self._pc = -1
         self.fast = os.environ.get("NYBULAH_SIM") != "py65"
+        self.dos_addresses()
+
+    def dos_addresses(self):
+        """Set LSNADR and TLKADR from the device number, as DOS initialisation does."""
+        self.store[self._phys[LSNADR]] = LISTEN | self.device
+        self.store[self._phys[TLKADR]] = TALK | self.device
 
     @property
     def responsive(self):
-        """Whether DOS would answer on the bus."""
-        return self.halted and not self._pending
+        """Whether DOS would answer on the bus: running, and still matching its
+        device number's LISTEN and TALK commands."""
+        return (
+            self.halted
+            and not self._pending
+            and self.read(LSNADR) == LISTEN | self.device
+            and self.read(TLKADR) == TALK | self.device
+        )
 
     def read(self, addr):
         """CPU read."""
@@ -593,6 +608,7 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         if self.cia is not None:
             self.cia.reset()
         self._pending = max(self._pending - 1, 0)
+        self.dos_addresses()
 
     def step(self):
         """Execute one instruction unless halted; return cycles used."""

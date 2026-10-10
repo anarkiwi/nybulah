@@ -16,6 +16,8 @@ from nybulah.analysis import pattern as pt
 from nybulah.analysis.gcr import bit_rate, bits_per_revolution, decode_bits
 from nybulah.analysis.gcr import track_capacity
 from nybulah.analysis.sector import SectorError, decode_track
+from nybulah.link import WATCHDOG_IDLE_S
+from nybulah.monitor import DriveLost
 from nybulah.nibbler import BITS, TB, TS, Capture, Nibbler, TrackError
 from nybulah.simdisk import Media, disk_drive, true_syncs
 from nybulah.simhost import SimCBM, SimMonitor
@@ -71,7 +73,15 @@ def test_write_then_verify_on_1571_and_1541(monkeypatch, capsys, tmp_path):
 
     argv = ["pattern", "verify", "--dev", "9", *base, "--repeats", "1"]
     argv += ["--cells", str(out["cells"]), "--save", str(tmp_path / "v8")]
+    host_compare = pattern.compare
+
+    def slow_compare(*a):
+        cbm.host_wait(1.2 * WATCHDOG_IDLE_S)
+        return host_compare(*a)
+
+    monkeypatch.setattr(pattern, "compare", slow_compare)
     v8 = cli.main(argv, cbm)
+    assert "close_error" not in v8 and nib.mon.holding is None
     assert v8["streaming"] and set(v8["summary"]) == {"stream", "ram", "unstable_all"}
     clean(v8, "ram")
     clean(v8, "stream")
@@ -95,7 +105,14 @@ def test_write_then_verify_on_1571_and_1541(monkeypatch, capsys, tmp_path):
     drive = disk_drive("1541", media, 10, halftrack=50)
     patch(monkeypatch, "1541", SimMonitor(drive))
     argv = ["pattern", "verify", "--dev", "10", "--transport", "s1", *base]
+
+    def lost(self):
+        raise DriveLost("device 10: no command")
+
+    monkeypatch.setattr(Nibbler, "close", lost)
     v10 = cli.main(argv + ["--repeats", "2"], SimCBM(drive))
+    assert v10["close_error"] == "DriveLost: device 10: no command"
+    assert v10["ok"] is False and "close: DriveLost" in capsys.readouterr().err
     assert not v10["streaming"] and v10["located"] == 50
     assert set(v10["summary"]) == {"ram", "unstable_all"}
     clean(v10, "ram")

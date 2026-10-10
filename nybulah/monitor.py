@@ -1,5 +1,6 @@
 """Host side of the drive-resident command loop (drive/monitor.s)."""
 
+import contextlib
 import os
 import pathlib
 import re
@@ -30,6 +31,7 @@ __all__ = [
     "WATCHDOG_S",
     "BusError",
     "BusNotIdle",
+    "DriveLost",
     "DriveUnresponsive",
     "HandshakeTimeout",
     "Monitor",
@@ -44,6 +46,12 @@ __all__ = [
 
 class BusNotIdle(BusError):
     """Another device holds a line the monitor needs."""
+
+
+class DriveLost(BusError):
+    """The drive left the monitor (stuck in a routine, or idled out) while a session
+    held DOS's zero page; DOS cannot answer its device number then (its listen and
+    talk addresses are overwritten), so only a bus reset brings it back."""
 
 
 RECOVERABLE = (BusError, OpenCBMError)
@@ -160,6 +168,7 @@ class Monitor:
         self.code = code if code is not None else drivecode(name)
         self.link = cls(self)
         self.running = False
+        self.holding = None
         self.timeout, self.idle_s, self.clock = timeout, idle_s, clock
         self._last = clock()
 
@@ -203,16 +212,72 @@ class Monitor:
         self.start()
 
     def transact(self, payload, size=None):
-        """Send one command and return its size-byte response (for links)."""
-        if self.clock() - self._last > self.idle_s:
+        """Send one command and return its size-byte response (for links).
+
+        While ``holding`` (a session's state is in DOS's zero page) a drive that
+        idled out or does not complete the command is lost (:meth:`guard`).
+        """
+        idle = self.clock() - self._last
+        if idle > self.idle_s:
+            if self.holding is not None:
+                self.lost(
+                    f"no command for {idle:.1f} s, past the drive's idle window",
+                    None,
+                )
             self.restart()
-        elif not self.alive():
-            self.running = False
-            raise HandshakeTimeout("drive left the monitor")
-        self.link.send(payload)
-        data = b"" if size is None else self.link.response(size)
+        with self.guard(self.describe(payload)):
+            if not self.alive():
+                self.running = False
+                raise HandshakeTimeout("drive left the monitor")
+            self.link.send(payload)
+            data = b"" if size is None else self.link.response(size)
         self._last = self.clock()
         return data
+
+    def describe(self, payload):
+        """A monitor command for reports, a 'J' with the holder's name for the
+        routine it calls: 'J $0303 (read)', 'W $0060+17'."""
+        op = payload[:1].decode("latin-1")
+        if len(payload) < 3:
+            return op
+        addr = struct.unpack_from("<H", payload, 1)[0]
+        text = f"{op} ${addr:04X}"
+        if op in "RW" and len(payload) >= 5:
+            text += f"+{struct.unpack_from('<H', payload, 3)[0]}"
+        routine = getattr(self.holding, "routines", {}).get(addr) if op == "J" else None
+        return f"{text} ({routine})" if routine else text
+
+    @contextlib.contextmanager
+    def guard(self, what):
+        """Run the transfers of ``what``; while ``holding``, a bus or adapter error
+        means the drive is lost (:meth:`lost`)."""
+        try:
+            yield
+        except DriveLost:
+            raise
+        except RECOVERABLE as e:
+            if self.holding is None:
+                raise
+            self.lost(f"{what} failed ({e})", e)
+
+    def lost(self, why, cause):
+        """Bring back a drive that left the monitor while ``holding`` by a bus
+        reset (DOS no longer matches its device number), end the session and
+        raise DriveLost saying why."""
+        holder, self.holding = self.holding, None
+        getattr(self.link, "drive_reset", lambda: None)()
+        try:
+            status = self.recover()
+        except DriveUnresponsive as e:
+            raise DriveLost(
+                f"device {self.dev}: {why} while {holder} held DOS's zero page; {e}"
+            ) from e
+        error = DriveLost(
+            f"device {self.dev}: {why} while {holder} held DOS's zero page; bus"
+            f" reset, drive status {status}"
+        )
+        setattr(error, "recovered", status)
+        raise error from cause
 
     def touch(self):
         """Restart the idle window after a command sent outside transact."""
@@ -263,6 +328,8 @@ class Monitor:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        if isinstance(exc, DriveLost):
+            return
         if isinstance(exc, RECOVERABLE):
             setattr(exc, "recovered", self.recover())
         else:

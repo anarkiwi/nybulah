@@ -224,6 +224,7 @@ def test_capture_through_monitor_transport(g64, image, proto):
     else:
         cbm = make("1541", dev=10, timeout_us=5e6)
     Mechanism(cbm.drive, Media.from_g64(g64))
+    zp = cbm.drive.dump(0x60, ZP_SIZE)
     with (
         Monitor(cbm, 10, proto) as mon,
         Nibbler(
@@ -234,4 +235,4 @@ def test_capture_through_monitor_transport(g64, image, proto):
     dec = decode_track(cap.bits(), 18, image.disk_id)
     assert (dec.data == image.data[image.span(18)]).all()
     cbm.settle()
-    assert cbm.drive.dump(0x60, ZP_SIZE) == bytes(ZP_SIZE)
+    assert cbm.drive.dump(0x60, ZP_SIZE) == zp and cbm.drive.responsive
