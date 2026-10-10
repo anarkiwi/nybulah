@@ -834,7 +834,7 @@ def test_edge_times_resolve_borrows_and_late_wraps():
     )
     t, st = r1581.edge_times(log)
     assert st.tolist() == [0x80, 0x82, 0x80, 0x82]
-    assert t.tolist() == [0, 0x1EC7F, 0x1EEFF, 0x2000F]
+    assert t.tolist() == [0, 0x1ED7F, 0x1EDFF, 0x2000F]
 
 
 def test_status_edges_follow_the_index_after_a_seek(media):

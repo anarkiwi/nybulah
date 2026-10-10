@@ -52,7 +52,7 @@ SETTLE_S = 0.018  # DOS setval (mrout.src reset_ctl)
 SPINUP_S = 0x50 * 20_000 / 2_000_000  # DOS motoracc ticks x the controller timer
 TB_WRAP_US = 1 << 16
 NOMINAL_US = 200_000  # 300 rpm
-BYTE_US = 32  # 250 kbit/s MFM
+BYTE_US = 32  # one MFM byte at the double-density data rate
 TRACK_BYTES = mfm.TRACK_BYTES
 RNF_REVS = 5  # datasheet: Read Sector / Read Address give up after 5 revolutions
 ST_BUSY, ST_T0, ST_IP, ST_WP, ST_MO = 0x01, 0x04, 0x02, 0x40, 0x80
@@ -61,7 +61,7 @@ PA_SIDE, PA_RDY, PA_MOTOR, PA_LED, PA_CHANGE = 0x01, 0x02, 0x04, 0x40, 0x80
 PB_WPRT = 0x40
 DOS_JOBS, JOB_RESET, JOB_DONE = 0x0002, 0x82, 0x80
 DOS_FLUSH_S = 32 * 0.010  # sieeeset controller ticks before DOS writes its cache back
-JOB_WAIT_S = 3 * 0.255 + 1.0  # reset_ctl's two 255 ms delays and its register test
+JOB_WAIT_S = 3 * 0.255 + 1.0  # reset_ctl: two delays and its register test
 STATUS = {"t0": ST_T0, "index": ST_IP, "wprot": ST_WP, "motor": ST_MO}
 
 
@@ -466,12 +466,12 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
 
 def edge_times(log):
     """drive/ipprobe.s log rows (status, timer B high, low, high again, wraps, timer B
-    high at the last poll): (microseconds, status). The high read on the low read's side
-    of a borrow is the stamp's (mfm.s time); a wrap after the last poll (bit 15 risen
-    since) is counted."""
+    high at the last poll): (microseconds, status), stamps resolved as
+    mfmstream.stamp_us does (the high read on the low read's side of a borrow, a wrap
+    after the last poll counted)."""
     log = log.astype(np.int64)
     st, h1, lo, h2, wraps, phase = log.T
-    hi = np.where(lo & 0x80, h1, h2)
+    hi = np.where(lo & 0x80, h2, h1)
     wraps = wraps + ((hi & 0x80) > (phase & 0x80))
     return wraps << 16 | 0xFFFF - (hi << 8 | lo), st
 
