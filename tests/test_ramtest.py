@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from nybulah import ramtest
+from nybulah import cli, ramtest
 from nybulah.monitor import drivecode
 from nybulah.sim import Drive1541, Drive1571, Drive1581
 from nybulah.simhost import SimMonitor
@@ -185,8 +185,9 @@ def test_relocation_only_moves_address_high_bytes(monkeypatch):
 
 def test_cli_over_the_monitor(capsys):
     cbm = adapter("s1", device=8)
-    out = ramtest.main(
-        ["--dev", "8", "--transport", "s1", "--backgrounds", "addr_lo"], cbm=cbm
+    out = cli.main(
+        ["ramtest", "--dev", "8", "--transport", "s1", "--backgrounds", "addr_lo"],
+        cbm=cbm,
     )
     assert json.loads(capsys.readouterr().out) == json.loads(json.dumps(out))
     assert out["ok"] and out["model"] == "1541" and out["transport"] == "s1"

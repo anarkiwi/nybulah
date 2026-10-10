@@ -7,12 +7,10 @@ written and read back over the link separate link faults from RAM faults.
 
 import functools
 import json
-import sys
 
 import numpy as np
 from tqdm import tqdm
 
-from . import tool
 from .link import BASE
 from .monitor import Monitor, drivecode, protocols
 from .nibbler import BUFPG
@@ -348,12 +346,3 @@ def execute(args, cbm):
         out |= test.run(args.repeats, args.seed)
     print(json.dumps(out))
     return out
-
-
-def main(argv=None, cbm=None):
-    """CLI entry point."""
-    return tool.standalone(sys.modules[__name__], argv, cbm)
-
-
-if __name__ == "__main__":
-    main()
