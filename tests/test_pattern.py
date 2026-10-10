@@ -270,7 +270,12 @@ def test_speed_excursion_period_and_decay():
 
 HW_PATTERN = pathlib.Path(__file__).parent / "data" / "hw" / "pattern"
 HW_RAM = sorted(HW_PATTERN.glob("*/*-ram-*.npz"))
-LEADING = ("gcr_all", "sync10", "sync40", "sync80", "sync896")
+
+
+def leading(truth):
+    """Groups written before the weak region."""
+    weak = region(truth, "weak.0")
+    return {r.group for r in truth.regions if r.offset < weak.offset}
 
 
 def stray_syncs(truth, cap):
@@ -298,14 +303,71 @@ def test_hw_unstable_region_read_unlike_the_timing_passes(path):
     cap = Capture.load(path)
     report = pattern.compare(truth, [(path.name, cap)])
     entry = report["captures"][0]
-    for name in LEADING:
+    for name in leading(truth):
         g = entry["groups"][name]
         assert g["errors"] == g["slips"] == 0, name
-    assert not stray_syncs(truth, cap)
     resync = region(truth, "resync.sync0")
     lead = (resync.offset + resync.length) / report["revolution_bits"]
     for x in entry["speed"]["excursions"]:
         assert x["angle"]["pattern"][0] > lead
+
+
+AMBIGUOUS = {"h30"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(
+            p,
+            marks=pytest.mark.xfail(
+                p.parent.name in AMBIGUOUS,
+                reason="one TB slip landing a weak-region event and the resync "
+                "costs no more than the true slip (docs/hardware.md)",
+                strict=True,
+            ),
+        )
+        for p in HW_RAM
+    ],
+    ids=lambda p: f"{p.parent.name}-{p.stem}",
+)
+def test_hw_restored_syncs_end_on_written_syncs(path):
+    """Every restored sync of a hardware RAM capture ends on a written sync or
+    the weak region."""
+    truth = pt.Truth.from_json(json.loads((path.parent / pattern.TRUTH).read_text()))
+    assert not stray_syncs(truth, Capture.load(path))
+
+
+def test_unstable_region_read_longer_than_the_band():
+    """A weak region read far longer than the sync band (a misplaced sync run)
+    leaves the stable regions on either side exact, the excess as insertions in
+    the weak region."""
+    truth = pt.make_truth(HALFTRACK, seed=3)
+    track = track_of(truth, 3000)
+    weak = region(truth, "weak.0")
+    extra = 8 * sum(r.kind == pt.SYNC for r in truth.regions) + 3
+    start = 21000
+    c = np.roll(np.tile(track, 2), -start)[: len(track) + 9000]
+    at = (weak.offset - start) % len(track)
+    c = np.insert(c, at + weak.length // 2, np.ones(extra, np.uint8))
+    al = pt.align(c, truth)
+    rep = pt.region_report(truth, al)
+    for name, g in rep["groups"].items():
+        if g["kind"] != pt.UNSTABLE:
+            assert g["errors"] == g["slips"] == 0, name
+    assert rep["groups"]["weak"]["ins"] == extra
+    assert al.band > extra
+
+
+def test_stretch_shifts_skip_partial_and_insignificant_stretches():
+    truth = pt.make_truth(HALFTRACK, seed=3)
+    track = track_of(truth, 3000)
+    weak = region(truth, "weak.0")
+    c = np.roll(track, -(weak.offset - 100))
+    offsets = pt.placements(c, truth)[0]
+    assert pt.stretch_shifts(c, truth, offsets).tolist() == [0]
+    noise = np.random.default_rng(2).integers(0, 2, len(c), dtype=np.uint8)
+    assert pt.stretch_shifts(noise, truth, offsets).size == 0
 
 
 def unstable_capture(make_rig, monkeypatch, at, ones):

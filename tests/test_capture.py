@@ -234,6 +234,34 @@ def test_align_slips_bounded_free_and_weighed():
     assert passes.align(last, weight=weight)[0].tolist() == [0, 0, -6]
 
 
+def test_nearest_turn_maps_outside_positions_only():
+    u = np.array([-70, -1, 0, 99, 100, 159, 160, 230])
+    assert passes.nearest_turn(u, 100, 60).tolist() == [50, 59, 0, 99, 40, 99, 40, 50]
+
+
+def test_events_inside_the_bytes_do_not_alias_a_turn_away():
+    """Over a known revolution an event inside the BITS bytes lands on the
+    byte it reaches there, not on a capable byte a turn away."""
+    ok = np.zeros(100, bool)
+    ok[10] = True
+    weight = np.ones(100)
+    offs, matched = passes._events_offsets(  # pylint: disable=protected-access
+        np.array([69]), 0, (ok, weight), True, 60
+    )
+    assert not matched.any() and offs.tolist() == [0]
+    ok[75] = True
+    offs, matched = passes._events_offsets(  # pylint: disable=protected-access
+        np.array([69]), 0, (ok, weight), True, 60
+    )
+    assert matched.all() and offs.tolist() == [6]
+    ok[80] = True
+    known = (np.array([80]), np.ones((1, 1), bool))
+    offs, matched = passes._events_offsets(  # pylint: disable=protected-access
+        np.array([69]), 0, (ok, weight), True, 60, known=known
+    )
+    assert matched.all() and offs.tolist() == [11]
+
+
 def test_recurs_on_either_side_of_a_boundary():
     rng = np.random.default_rng(1)
     turn = rng.integers(0, 256, 100, dtype=np.uint8)

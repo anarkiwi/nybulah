@@ -41,7 +41,7 @@ def main(paths):
         report = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
         print(f"== {path}")
         for p, s in report["summary"].items():
-            if p != "weak_all":
+            if "bit_errors" in s:
                 print(f"  {p}: bit_errors={s['bit_errors']} slips={s['slips']}")
         for line in rows(report):
             print("  " + line)

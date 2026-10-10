@@ -419,12 +419,75 @@ def _expected(truth, offsets, n):
     return bits, pos, region, copy
 
 
+def _stable(truth):
+    """Pattern bit ranges between unstable regions, and the unstable bits before
+    each."""
+    out, gaps, start, gap = [], [], 0, 0
+    for r in truth.regions + [Region("", "", UNSTABLE, len(truth.bits), 0)]:
+        if r.kind != UNSTABLE:
+            continue
+        if r.offset > start:
+            out.append((start, r.offset))
+            gaps.append(gap)
+            gap = 0
+        gap += r.length
+        start = r.offset + r.length
+    return out, np.array(gaps, np.int64)
+
+
+def _peaks_near(c, p, w, offsets, window, alpha):
+    """Per copy offset: the shift off it, within ``window``, of the most
+    significant correlation peak of the ``w`` bits of ``p`` read whole."""
+    agree, overlap = _correlate(c, p, w)
+    pp, pc = p[w > 0].mean(), c.mean()
+    z = _zscore(agree, overlap, pc * pp + (1 - pc) * (1 - pp))
+    thr = _threshold(alpha, len(z))
+    out = []
+    for off in offsets:
+        lo = max(off + window[0] + len(p) - 1, 0)
+        hi = min(off + window[1] + len(p), len(z))
+        if lo < hi:
+            best = lo + int(np.argmax(z[lo:hi]))
+            if z[best] >= thr and overlap[best] >= w.sum():
+                out.append(best + 1 - len(p) - off)
+    return out
+
+
+def stretch_shifts(c, truth, offsets, alpha=DEFAULT_ALPHA):
+    """``c`` shifts of each stable stretch of each copy off the copy's offset.
+
+    Unstable regions read at any length, but none shorter than nothing, so a
+    stretch sits at its exact bits' most significant correlation peak among
+    the shifts that leave every unstable region between it and the copy's
+    stretch of most exact bits at least empty, within half a copy spacing.
+    Only stretches read whole, at a significant peak, count.
+    """
+    p = truth.bits.astype(float)
+    exact = np.array([r.kind == EXACT for r in truth.regions], float)
+    exact = exact[truth.kinds()]
+    spacing = np.diff(offsets)
+    half = int(np.median(spacing)) // 2 if len(spacing) else len(p)
+    stretches, gaps = _stable(truth)
+    cum = np.cumsum(gaps)
+    ref = int(np.argmax([exact[a:b].sum() for a, b in stretches]))
+    out = []
+    for s, (a, b) in enumerate(stretches):
+        w = np.zeros(len(p))
+        w[a:b] = exact[a:b]
+        if w.any():
+            low = -half if s <= ref else -int(cum[s] - cum[ref])
+            high = half if s >= ref else int(cum[ref] - cum[s])
+            out += _peaks_near(c.astype(float), p, w, offsets, (low, high), alpha)
+    return np.array(out, np.int64)
+
+
 def align(c, truth, period=None, band=None, alpha=DEFAULT_ALPHA):
     """Align capture bits to the pattern (see :class:`Alignment`).
 
     Substitutions and indels cost alike, a sync's indels half (runs are measured),
-    weak and filler bits nothing. ``band``, the starting half width (default: a bit
-    per pattern sync), doubles while the best path touches its edge.
+    weak and filler bits nothing. ``band``, the starting half width (default:
+    a bit per pattern sync), widens by the farthest stable stretch's shift
+    (:func:`stretch_shifts`) and doubles while the best path touches its edge.
     """
     c = np.asarray(c, np.uint8)
     offsets, found = placements(c, truth, period, alpha)
@@ -434,7 +497,10 @@ def align(c, truth, period=None, band=None, alpha=DEFAULT_ALPHA):
     e, pos, region, copy = _expected(truth, offsets, len(c))
     kinds = [r.kind for r in truth.regions] + [FILLER]
     sub, indel = np.array([COSTS[k] for k in kinds], np.uint8)[region].T.copy()
-    band = band or sum(r.kind == SYNC for r in truth.regions)
+    shifts = stretch_shifts(c, truth, offsets, alpha)
+    band = (band or sum(r.kind == SYNC for r in truth.regions)) + int(
+        np.abs(shifts).max(initial=0)
+    )
     while True:
         match, ins, edge = _banded(c, e, sub, indel, band)
         if not edge or band >= len(c):
