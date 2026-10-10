@@ -443,7 +443,8 @@ reports `XUM1541_CAP_STREAM`, and D64/D71 reads then use it. Firmware v12
 keeps the v9-v11 commands.
 
 Sources: drive `drive/stream.s` (`stream_1571.bin`, loaded at `$0300` over
-`seek_1571.bin`, the `SEEK` build of `track.s`, whose prep placed the head),
+`seek_1571.bin`, the `SEEK` build of `track.s`, whose prep placed the head
+and left the WD1770 in type I status for the index),
 host `Nibbler.stream`, decoding `nybulah/stream.py`, adapter model
 `SimSRQ.srq2_stream`; adapter `srq_stream_loop`/`srq_stream8` in
 `xum1541/x.c`, plugin `opencbm_plugin_srq2_stream` (asynchronous IN
@@ -485,10 +486,13 @@ shows within 39 (see s4 above), so:
   flag;
 - a waiting byte is read at the first V sample after a write and held in X;
   X and the VIA latch are the only buffers;
-- data goes first: metadata waits for an idle shifter and no waiting byte,
-  except SYNC_START and SYNC_CONT, which no byte can be waiting behind; a
-  metadata slot is given up when V appears by t = 22 (24 after a timed
-  write) and the byte goes out at 41 (45);
+- due metadata goes at the first write that finds no byte waiting (V clear
+  at t = 1 after a timed write, or a write from `nw`): a byte arriving by
+  t = 22 (24 after a timed write) is read and held in X while the metadata
+  goes at 44 to 50, then written 42 after it; SYNC_START and SYNC_CONT go at
+  once, as no byte can be waiting behind them. Metadata therefore never waits
+  for a run of back-to-back bytes to end, and neither does the index poll in
+  `pwo`, which runs only with no metadata due;
 - CLK changes 14 or more cycles after a write and 2 or more before the next:
   the adapter samples it 4 to 14 cycles after a write;
 - inside a sync only SYNC_CONT is sent; metadata due then waits for the
@@ -499,11 +503,11 @@ shows within 39 (see s4 above), so:
 | path | entered | V samples | write of the next byte | otherwise |
 |---|---|---|---|---|
 | `nw` idle poll | 28+ | 0 and 6 of 15, SYNC at 5 | 12 after the `bvs` | ATN, T1 every 256 polls |
-| `pwo` after a write from `nw` | 0 | | (due metadata at 40) | `nw` at 29 |
-| `pwm` metadata slot | 12 | 12, 18, 22 | 41 / 45 (`pv`) | metadata at 40 |
-| `pwb` after a timed write | 1 | 1, 28 | 43 | `nw` at 33 |
-| `mpw` after metadata | 4 | 4, 28 | 46 / 43 | `nw` at 33 |
-| `ee` byte already waiting | 1-24 | | 42 after the read | |
+| `pwo` after a write from `nw` | 0 | | (due metadata at 40) | index poll, `nw` at 29 |
+| `pwm` metadata slot | 12 | 12, 18, 22 | held: metadata at 44 / 46 / 50, the byte 42 after it (`mh`) | metadata at 40 |
+| `pwb` after a timed write | 1 | 1, 28 | 42 / 43 | `nw` at 33 |
+| `mpw` after metadata | 4 | 4, 28 | 45 / 43 | `nw` at 33 |
+| `ee` byte already waiting | 1-4 | | 39 after the read, then `mpw` | |
 | sync loop `sp` | | SYNC every 11 | | ATN, T1, index, SYNC_CONT |
 | `se` sync end | 7-8 after the read | each poll until ICR | at the ICR flag | |
 
@@ -515,14 +519,18 @@ The shortest byte period is zone 3 at 310 rpm, 52 x 300 / 310 = 50.3 cycles.
 |---|---|---|---|
 | write spacing | 40 (`pwm`), 43 (`tv`) | ICR flag at 39 or less | 1 cycle |
 | byte ready to read | 21 (V at 23, read at `mpw` 4) | 50.3 | 29 cycles |
-| back-to-back writes | 43 | 50.3 | backlog drains 7.3 cycles per byte |
+| back-to-back writes | 42 (`ee`), 43 (`tv`) | 50.3 | backlog drains 7.3 cycles per byte |
+| held byte (`pwm` from `pwb`) | the next byte read at 98 | the one after it lands at 2 + 2 x 50.3 = 102.6 | 4.6 cycles |
 | adapter frame | 264-296 clocks | SRQ_FRAME 256 | 8 clocks |
 | adapter next poll | 303 clocks | SRQ_WAIT 306 | 3 clocks |
 
-A metadata byte goes out only when nothing is waiting, so it delays at most
-the byte that lands during its 40-cycle slot (the slot is abandoned up to t =
-22), and that delay drains by the next metadata slot. INDEX lands within 4
-bytes of the edge. `misc/x_timing.py` steps the compiled `srq_stream8` (6-clock
+A metadata byte goes out at the first write with no byte waiting, so it
+delays at most the one byte that lands after that write (held in X, the next
+one waits in the VIA latch), and that delay drains before the backlog lets
+another metadata slot open. INDEX lands within 4 bytes of the edge, also in a
+revolution-long run without syncs (`test_index_lands_at_its_edge_in_a_run_without_syncs`);
+when a run of back-to-back bytes held due metadata until the next sync, the
+index went unpolled for that long and a hole passing meanwhile was missed. `misc/x_timing.py` steps the compiled `srq_stream8` (6-clock
 fall wait) against these bounds and `misc/srq_timing_test.c` checks them.
 
 ### Host decoding

@@ -25,7 +25,7 @@ from .sim import HOST_LENGTHS, HOST_PROGRAMS, PUT, REL, SAMPLE, SET, SHL, WAIT
 from .simdisk import CA1_FLAG, CELL_EPS, CPU_HZ, HT_MAX, HT_STOP
 from .simdisk import INDEX_FRACTION, PB_INPUTS, PB_MOTOR, PB_PHASE, PB_SYNC, PB_WE
 from .simdisk import PCR_MODE, PCR_SOE, PCR_WRITE, PHASE_OFFSET, SYNC_ONES, V_FLAG
-from .simdisk import WANDER_NEWTON, WD_INDEX, Mechanism, Media, disk_drive
+from .simdisk import WANDER_NEWTON, Mechanism, Media, disk_drive, wd71_read, wd71_write
 from .simcia import CCRA, END, cia81_lines, cia81_read, cia81_write, cia_atn
 from .simcia import cia_lines, cia_read, cia_write, kernel, pack_cia, unpack_cia
 from .simwd import W0, WEND, wd_read, wd_write
@@ -340,8 +340,8 @@ def mech_read(s, f, cells, ev, fdc, reg):
     now = s[CYC] + IO_ACCESS_CYCLE
     update(s, f, cells, ev, now)
     if fdc:
-        hole = turns(f, now) % 1.0 < INDEX_FRACTION
-        return WD_INDEX if reg == 0 and hole and s[MPB] & PB_MOTOR else 0
+        hole = turns(f, now) % 1.0 < INDEX_FRACTION and (s[MPB] & PB_MOTOR) != 0
+        return wd71_read(s, W0, reg & 3, hole, s[OPPC])
     if reg == 0:
         v = s[MPB] & ~PB_INPUTS & 0xFF | (0 if s[WPROT] else PB_WE)
         return v | (0 if not writing(s) and s[ONES] >= SYNC_ONES else PB_SYNC)
@@ -383,7 +383,7 @@ def mech_write(s, f, cells, ev, fdc, reg, value):
     now = s[CYC] + IO_ACCESS_CYCLE
     update(s, f, cells, ev, now)
     if fdc:
-        s[WD] = value
+        wd71_write(s, W0, reg & 3, value, s[OPPC])
     elif reg == 0:
         port_b_write(s, value)
     elif reg in (1, 15):
@@ -408,7 +408,7 @@ def readable(s, amap, addr):
     k, phys = amap[addr] & 7, amap[addr] >> KIND_BITS
     if k == VIA1 and phys & 0xF == 0 or s[M81] and k == CIA and phys == 1:
         return s[EXT] >= 0
-    if k in (VIA2, FDC) and s[MECH] and phys < 16:
+    if k in (VIA2, FDC) and s[MECH] and (k == FDC or phys < 16):
         return can_update(s)
     return True
 
@@ -421,7 +421,7 @@ def writable(s, amap, addr):
         return phys < 16
     if k == CIA or s[M81] and k == FDC:
         return True
-    if s[MECH] and k in (VIA2, FDC) and phys < (16 if k == VIA2 else 1):
+    if s[MECH] and k in (VIA2, FDC) and (k == FDC or phys < 16):
         return can_update(s)
     return k in (RAM, ROM, OPEN)
 
@@ -443,7 +443,7 @@ def rd(s, f, amap, store, cells, ev, addr):
         return wd_read(s, cells, phys, c, s[OPPC])
     if k == CIA:
         return cia_read(s, phys, c)
-    if k in (VIA2, FDC) and s[MECH] and phys < 16:
+    if k in (VIA2, FDC) and s[MECH] and (k == FDC or phys < 16):
         return mech_read(s, f, cells, ev, k == FDC, phys)
     return np.int64(addr >> 8 if k == OPEN else 0)
 
@@ -710,7 +710,7 @@ def step(s, f, amap, store, cells, ev):
         return PYTHON
     if s[M81]:
         cia_atn(s, s[HOSTL] & IEC_ATN)
-        s[OPPC] = pc
+    s[OPPC] = pc
     s[PC] = (pc + 1) & 0xFFFF
     n = execute(s, f, amap, store, cells, ev, peek(amap, store, pc))
     if n < 0:
@@ -851,7 +851,7 @@ def pack_mech(mech, s, f):
     fresh = mech.media.tracks.get(cur)
     held = key == cur and k is not None
     cells = mech._cells if held else fresh  # pylint: disable=protected-access
-    s[[MECH, KNONE, K, KSIDE, KHT, CSIDE, CHT, FRESH, CORRUPT, LOGGING, WD]] = (
+    s[[MECH, KNONE, K, KSIDE, KHT, CSIDE, CHT, FRESH, CORRUPT, LOGGING]] = (
         1,
         k is None,
         k or 0,
@@ -860,8 +860,8 @@ def pack_mech(mech, s, f):
         cells is not None and cells is fresh,
         mech.corrupt is not None,
         mech.log is not None,
-        -1 if mech.wd_command is None else mech.wd_command,
     )
+    s[W0 : W0 + len(mech.wd)] = mech.wd
     s[MREGS : MREGS + 16] = memoryview(mech.regs)
     start = mech._sync_start  # pylint: disable=protected-access
     f[:] = (
@@ -877,6 +877,7 @@ def pack(drive, steps, lines):
     """(s, f, amap, store, cells, ev) for run."""
     s, f, ev = BUFFERS
     s[:] = 0
+    s[OPPC] = -1
     for (idx, get, _), obj in ((MPU_GROUP, drive.mpu), (VIA_GROUP, drive.via1)):
         s[idx] = get(obj)
     s[[CYC, HALT, STEPS, PBOUT, DEVICE, EXT, EXTA, HOSTL, LINES, TRK0, DEFER]] = (
@@ -924,7 +925,7 @@ def unpack(drive, s, f, cells, ev):
     if not s[KNONE] and key != mech._key:  # pylint: disable=protected-access
         mech._key, mech._cells = key, cells  # pylint: disable=protected-access
     mech._k = None if s[KNONE] else int(s[K])  # pylint: disable=protected-access
-    mech.wd_command = None if s[WD] < 0 else int(s[WD])
+    mech.wd[:] = s[W0 : W0 + len(mech.wd)]
     mech.due = math.inf if math.isinf(f[DUE]) else int(f[DUE])
     start = None if math.isnan(f[SYNC_START]) else float(f[SYNC_START])
     mech._sync_start = start  # pylint: disable=protected-access

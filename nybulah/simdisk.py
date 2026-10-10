@@ -13,6 +13,7 @@ from .analysis.gcr import NOMINAL_RPM, bit_rate, bits_per_revolution, speed_zone
 from .analysis.gcr import encode_bits, to_bits
 from .sim import IO_ACCESS_CYCLE, Drive1541, Drive1571, Drive1581
 from .simwd import INDEX_FRACTION
+from .simwd71 import W71_CMD, W71_VIOL, wd71_read, wd71_state, wd71_write
 
 CPU_HZ = 1_000_000
 HT_STOP, HT_MAX, HT_TRACK1 = 0, 84, 2
@@ -29,7 +30,6 @@ PB_PHASE, PB_MOTOR, PB_WE, PB_SYNC = 0x03, 0x04, 0x10, 0x80
 PB_INPUTS = PB_WE | PB_SYNC
 CA1_FLAG = 0x02
 PCR_SOE, PCR_MODE, PCR_WRITE = 0x0E, 0xE0, 0xC0
-WD_INDEX = 0x02
 DOS_PCR, DOS_DDRB = 0xEE, 0x6F
 
 
@@ -113,7 +113,7 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         self.bumps = self.inner_stops = 0
         self.ora = self.ddra = 0
         self.regs = bytearray(16)
-        self.wd_command = None
+        self.wd = wd71_state()
         self.overruns = self.underruns = 0
         self.log = self.corrupt = None
         self.latch = 0
@@ -122,6 +122,17 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         self._n = 1
         self._ones = self._count = self._shreg = self._pending = 0
         self._ca1 = self._written = self._armed = False
+
+    @property
+    def wd_command(self):
+        """The last value written to the WD1770 command register, else None."""
+        cmd = int(self.wd[W71_CMD])
+        return None if cmd < 0 else cmd
+
+    @property
+    def wd_violations(self):
+        """WD1770 accesses by instructions at addresses ending in %00."""
+        return int(self.wd[W71_VIOL])
 
     @property
     def side(self):
@@ -247,13 +258,14 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
         v |= 0 if self.write_protect else PB_WE
         return v | (0 if self.sync else PB_SYNC)
 
-    def read(self, fdc, reg, cycles):
-        """Register read by the instruction starting at cycles."""
+    def read(self, fdc, reg, cycles, pc=-1):
+        """Register read by the instruction at pc starting at cycles."""
         now = cycles + IO_ACCESS_CYCLE
         self.update(now)
         if fdc:
             hole = self.angle(self.media_time(now)) % 1.0 < INDEX_FRACTION
-            return WD_INDEX if reg == 0 and hole and self.pb & PB_MOTOR else 0
+            hole = bool(hole and self.pb & PB_MOTOR)
+            return int(wd71_read(self.wd, 0, reg, hole, pc))
         if reg == 0:
             return self._port_b()
         if reg in (1, 15):
@@ -265,12 +277,12 @@ class Mechanism:  # pylint: disable=too-many-instance-attributes
             return CA1_FLAG if self._ca1 else 0
         return {2: self.ddrb, 3: self.ddra, 12: self.pcr}.get(reg, self.regs[reg])
 
-    def write(self, fdc, reg, value, cycles):
-        """Register write by the instruction starting at cycles."""
+    def write(self, fdc, reg, value, cycles, pc=-1):
+        """Register write by the instruction at pc starting at cycles."""
         now = cycles + IO_ACCESS_CYCLE
         self.update(now)
         if fdc:
-            self.wd_command = value
+            wd71_write(self.wd, 0, reg, value, pc)
         elif reg == 0:
             self._port_b_write(value)
         elif reg in (1, 15):

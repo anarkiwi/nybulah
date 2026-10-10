@@ -3,6 +3,7 @@
 import contextlib
 import functools
 import json
+import math
 import struct
 
 import numpy as np
@@ -18,7 +19,7 @@ from nybulah.formats.image import revolution
 from nybulah.link import BASE
 from nybulah.monitor import Monitor, drivecode
 from nybulah.nibbler import CODE_BASE, CODE_SIZE, SENSE_STREAM, STREAM_ZP
-from nybulah.nibbler import Capture, Nibbler, TrackError
+from nybulah.nibbler import Capture, Nibbler, TrackError, index_sense
 from nybulah.simdisk import DOS_TRACK, Media, Mechanism, log_bytes, sync_track
 from nybulah.simsrq import SR_PERIOD, UsbIn
 from nybulah.simx import XError
@@ -93,7 +94,9 @@ def test_streams_every_byte_and_sync(g64, zone, rpm):
     assert cap.status == 0 and len(cap.index) == 2
     check_stream(mech, cap)
     assert np.diff(writes).min() >= SR_PERIOD
-    assert mech.bumps == mech.inner_stops == 0
+    assert mech.bumps == mech.inner_stops == mech.wd_violations == 0
+    wd_status, level = index_sense(cap)
+    assert wd_status & 1 == 0 and level in (0, 1)
     dec = decode_track(cap.bits(), track)
     assert (dec.errors == SectorError.OK).all()
 
@@ -144,7 +147,8 @@ def test_capture_record_round_trips(g64, tmp_path):
     cap = nib.stream(36)
     cap.save(tmp_path / "s.npz")
     back = Capture.load(tmp_path / "s.npz")
-    assert back.version == 3 and (back.data == cap.data).all()
+    assert back.version == 4 and (back.data == cap.data).all()
+    assert index_sense(back) == index_sense(cap)
     assert (back.positions == cap.positions).all() and (back.index == cap.index).all()
     assert (back.bits() == cap.bits()).all() and back.rpm is None
 
@@ -178,6 +182,43 @@ def test_overrun_is_reported_and_the_drive_stops(g64):
     assert cbm.count["atn_stops"] == 1
     cbm.srq2_stream = stream
     assert nib.stream(36).stream_status == {"adapter": "done", "drive": "done"}
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_index_lands_at_its_edge_in_a_run_without_syncs(seed):
+    """One sync, then a revolution of GCR: the SYNC_END due after the sync goes
+    ahead of the next byte instead of waiting for the next sync, so the index is
+    polled through the run and every INDEX lands within INDEX_SLACK bytes of its
+    edge."""
+    cells = int(round(bits_per_revolution(3, FASTEST)))
+    track = np.roll(sync_track([40], cells, seed=seed, gaps=(4, 5)), cells // 2)
+    media = Media({(0, 2): track}, rpm=FASTEST)
+    _, mech, nib = rig(media, halftrack=4)
+    mech.log = []
+    cap = nib.stream(2, revolutions=2)
+    assert cap.stream_status == {"adapter": "done", "drive": "done"}
+    data, times = log_bytes(mech.log)
+    first = data.find(bytes(cap.data[:32]))
+    turns = media.turns(times[first])
+    edges = [media.time_at(k) for k in range(math.ceil(turns), math.ceil(turns) + 3)]
+    want = np.searchsorted(times, edges) - first
+    assert len(cap.index) == 3
+    assert np.abs(cap.index - want).max() <= INDEX_SLACK
+
+
+@pytest.mark.parametrize("stray", [0x80, 0xC0, 0xE0])
+def test_index_after_a_stray_wd_command(g64, stray):
+    """A WD1770 left running a type II/III command shows no index; prep's force
+    interrupt and Seek bring type I status back for the stream and the index start."""
+    cbm, mech, nib = rig(Media.from_g64(g64), timeout_us=RAM_PASS_US)
+    cbm.drive.write(0x2000, stray)
+    cap = nib.stream(36)
+    assert cap.stream_status == {"adapter": "done", "drive": "done"}
+    assert len(cap.index) == 2 and index_sense(cap)[0] & 3 == 0
+    cbm.drive.write(0x2000, stray)
+    ram = nib.capture(36, start="index", timing="none")
+    assert ram.status == 0 and index_sense(ram) == (0, None)
+    assert mech.wd_violations == 0 and mech.wd_command == 0x18
 
 
 def test_killer_track_ends_at_the_index():

@@ -21,9 +21,9 @@ from .monitor import drivecode
 CPU_HZ = 1_000_000
 CODE_BASE, CODE_SIZE = 0x0300, 0x0200
 PREP, READ = CODE_BASE, CODE_BASE + 3
-ZP, ZP_PARAMS, ZP_SIZE = 0x60, 17, 33
+ZP, ZP_PARAMS, ZP_SIZE = 0x60, 17, 34
 RESULT = {"status": 17, "endpg": 18, "endy": 19, "tfirst": 20, "tlast": 22}
-RESULT |= {"idx1": 24, "idx2": 26, "count": 28}
+RESULT |= {"idx1": 24, "idx2": 26, "count": 28, "wdst": 33}
 RESULT_V1 = {"status": 9, "endpg": 12, "endy": 13, "tfirst": 14, "tlast": 16}
 RESULT_V1 |= {"idx1": 18, "idx2": 20}
 BUFPG = {"1541": 0x80, "1571": 0x60}
@@ -37,7 +37,8 @@ USER_STARTS = ("now", "sync", "index")
 BITS, TB, TS = 0, 1, 2
 TIMING = {"full": (TB, TS), "syncs": (TS,), "none": ()}
 CAPTURE_VERSION = 2
-STREAM_VERSION = 3
+STREAM_VERSION = 4
+WD_INDEX = 0x02
 
 VIA1PA, T2CL, ACR1 = 0x1801, 0x1808, 0x180B
 DOS_TRACK = 0x22
@@ -347,6 +348,20 @@ class Capture:  # pylint: disable=too-many-instance-attributes
 
 
 CELLS_PER_BYTE = 8
+
+
+def index_sense(cap):
+    """1571 ``(wd_status, index_level)``: the WD1770 status a capture's index sensing
+    began from (a stream's first read, or prep's after taking type I status) and a
+    version 4 stream's index level (status bit 1) at its end; None where unknown."""
+    if cap.model != "1571":
+        return None, None
+    if cap.parsed is not None:
+        if cap.version < 4:
+            return None, None
+        return int(cap.result[1]), int(cap.result[2] & WD_INDEX) >> 1
+    at = RESULT["wdst"]
+    return (int(cap.result[at]) if len(cap.result) > at else None), None
 
 
 def v1_syncs(cap):

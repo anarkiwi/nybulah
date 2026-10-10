@@ -493,6 +493,7 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         self.halted = True
         self.resets_to_boot, self._pending = resets_to_boot, 0
         self.mech = None
+        self._pc = -1
         self.fast = os.environ.get("NYBULAH_SIM") != "py65"
 
     @property
@@ -509,8 +510,10 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
             return self.via1.read(self._phys[addr] & 0xF)
         if k == CIA:
             return self.cia.read(self._phys[addr], self.cycles + IO_ACCESS_CYCLE)
-        if k in (VIA2, FDC) and self.mech is not None and self._phys[addr] < 16:
-            return self.mech.read(k == FDC, self._phys[addr], self.cycles)
+        if k == FDC and self.mech is not None:
+            return self.mech.read(True, self._phys[addr] & 3, self.cycles, self._pc)
+        if k == VIA2 and self.mech is not None and self._phys[addr] < 16:
+            return self.mech.read(False, self._phys[addr], self.cycles)
         return addr >> 8 if k == OPEN else 0
 
     def write(self, addr, value):
@@ -526,8 +529,9 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
             )
         elif k == VIA2 and self.mech is not None and self._phys[addr] < 16:
             self.mech.write(False, self._phys[addr], value & 0xFF, self.cycles)
-        elif k == FDC and self.mech is not None and self._phys[addr] == 0:
-            self.mech.write(True, 0, value & 0xFF, self.cycles)
+        elif k == FDC and self.mech is not None:
+            reg = self._phys[addr] & 3
+            self.mech.write(True, reg, value & 0xFF, self.cycles, self._pc)
         elif k not in (ROM, OPEN):
             raise SimIOWrite(f"write ${value & 0xFF:02x} to I/O ${addr:04x}")
 
@@ -597,7 +601,11 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         if self.mech is not None and self.cycles >= self.mech.due:
             self.mech.update(self.cycles)
         before = self.mpu.processorCycles
-        self.mpu.step()
+        self._pc = self.mpu.pc
+        try:
+            self.mpu.step()
+        finally:
+            self._pc = -1
         n = self.mpu.processorCycles - before
         self.cycles += n
         if self.mpu.pc == RETURN_TRAP:

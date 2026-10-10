@@ -464,12 +464,14 @@ edge (`ram-index-H.npz`); its aligned start places the index on the pattern.
 Every capture start (`start_angle.index`) and speed excursion (`angle.index`)
 then gets its angle after the index, and `index.pattern_angle` is the pattern
 start's. Stream INDEX metadata is reported per stream (`index`: edges, their
-track positions, how the stream ended) and against that reference
-(`index.stream_edge_offsets`) but not used for it: `drive/stream.s` checks the
-index only while no metadata is due, so behind a SYNC_END waiting out
-continuous data an INDEX can trail its edge by hundreds of bytes. A stream
-whose drive saw no index edge ends `noindex` (END_NOINDEX after its
-two-revolution timeout) with no INDEX; `index.drive_end` lists the ends.
+track positions, how the stream ended, `wd_status`: the WD1770 status the
+stream began from, `index_level`: the index level at its end) and against that
+reference (`index.stream_edge_offsets`) but not used for it; `index.ram_index`
+lists each index-started RAM capture's status and the WD1770 status prep left.
+A stream whose drive saw no index edge ends `noindex` (END_NOINDEX after its
+two-revolution timeout) with no INDEX; `index.drive_end` lists the ends. A
+`noindex` stream whose `wd_status` has bit 0 set (busy) never had the WD1770
+in type I status; with it clear, the index signal itself did not toggle.
 
 BITS, TB and TS each read their own revolution, so the no-flux `weak` region can
 read as bytes in one pass and as ones run into the `resync` sync in another,

@@ -15,26 +15,35 @@
 ;
 ; Parameters: revs (stop at that rising index edge), ticks (VIA1 T1 periods
 ; without an index edge before END_NOINDEX). Returns A = the END value sent,
-; or ST_SLOW (not at 2 MHz) or ST_NOGO (no host go) without streaming.
+; or ST_SLOW (not at 2 MHz) or ST_NOGO (no host go) without streaming; X =
+; the WD1770 status read at the start, Y = the index level (bit 1) at the end.
+; The index is WD1770 status bit 1, live in type I status, which track.s's
+; prep (always run before) leaves; every WD access keeps the DOS's address
+; rule (wdtest.inc).
 ;
 ; Rules, t = 0 at an SDR write (protocol.md derives them):
 ; - a write follows the previous one by SR_PERIOD (40) or more cycles, or by
 ;   the shifter's ICR flag: the shifter is idle;
 ; - a waiting byte is read at the first V sample after a write and held in X
 ;   until its write; X and the VIA latch are the only buffers;
-; - data goes first: metadata waits for an idle shifter and no waiting byte,
-;   except SYNC_START and SYNC_CONT, which no byte can be waiting for;
+; - due metadata goes at the first write with no byte waiting, ahead of a
+;   byte arriving after that write (held in X), so a run of back-to-back
+;   bytes never holds it, nor the index poll that waits for it (pwo);
+;   SYNC_START and SYNC_CONT go at once, as no byte can be waiting for them;
 ; - CLK changes 14 or more cycles after a write and 2 or more before the
 ;   next write: the adapter samples it 4 to 14 cycles after a write.
 ;
 ;   nw   V at 0 and 6 of 15, SYNC at 5; entered 28+ after a write; writes 12
 ;        cycles after the bvs that sees V; ATN and T1 every 256 idle polls.
-;   pwo  after a write from nw: due metadata at 40 unless V by 22, the
-;        index, every 256th byte ATN and T1; else nw at 29.
-;   pwb  after a timed write: V at 1 -> read, write at 43; due metadata at
-;        42 unless V by 24; V at 28 -> write at 43; else nw at 33.
+;   pwo  after a write from nw: due metadata at 40, the index, every 256th
+;        byte ATN and T1; else nw at 29.
+;   pwb  after a timed write: V at 1 -> read, write at 42; due metadata at
+;        42; V at 28 -> write at 43; else nw at 33.
+;   pwm  due metadata: a byte seen by V at 12, 18 or 22 (14, 20, 24 from
+;        pwb) is read and held while the metadata goes at 44, 46 or 50 (+2),
+;        then written 42 after it (mh); else the metadata at 40 (42).
 ;   mpw  after metadata (entered at 4): V at 4 -> read, CLK released at 18,
-;        write at 46; else CLK released at 22, V at 28 -> write at 43, else
+;        write at 45; else CLK released at 22, V at 28 -> write at 43, else
 ;        nw at 33.
 
         .setcpu "6502"
@@ -81,9 +90,7 @@ VIA2PA   = $1C01
 PCR2     = $1C0C
 T2CL     = $1808
 WD       = $2000
-WD_FORCE_INT = $D0
 WD_INDEX = $02
-WD_SETTLE = 16                  ; x 5 cycles before trusting WD1770 status
 PCR_SOE_MASK = $F1
 PCR_SOE_OFF  = $0C
 PCR_READ_SOE = $EE
@@ -97,10 +104,14 @@ cnt     = ZP + 19
 pm      = ZP + 20                       ; due metadata, then a second
 pm2     = ZP + 21
 tse     = ZP + 22
+wst     = ZP + 23
+
+        .include "wdtest.inc"
 
         .segment "CODE"
 
         jmp stream
+        .res 2                          ; WD accesses off addresses ending in 00
 
         .segment "ZPCODE"
 
@@ -109,14 +120,12 @@ stream: lda VIA1PA_NH
         bne :+
         lda #ST_SLOW
         rts
-:       lda #WD_FORCE_INT
-        sta WD
-        ldy #WD_SETTLE
-:       dey
-        bne :-
-        sty pm                          ; Y = 0
-        sty pm2
+:       WDOK
         lda WD
+        sta wst
+        ldy #0
+        sty pm
+        sty pm2
         and #WD_INDEX
         sta ilev
         lda PCR2
@@ -142,6 +151,16 @@ gw:     lda IEC                         ; host go: CLK
         sta tmo
         clv
         jmp nw
+
+; Z set when a VIA1 T1 period passed and tmo ran out.
+tick:   lda IFR1
+        and #IRQ_T1
+        beq :+
+        lda T1CL
+        dec tmo
+        rts
+:       lda #1
+        rts
 
 ; Metadata byte A 45 or more cycles after any write, CLK released at 16.
 meta:   sta tse
@@ -175,6 +194,7 @@ nv:     ldx VIA2PA
         stx CIA_SDR                     ; t = 0
 pwo:    lda pm
         BR bne, pwm                     ; due metadata
+        WDOK
         lda WD
         eor ilev
         and #WD_INDEX
@@ -184,28 +204,30 @@ pwo:    lda pm
         nop
         jmp nw                          ; 29
 
-; Due metadata at 40 (42 from pwb), CLK at 17; a byte arriving by 22 goes
-; first (ee, or pv writing it as soon as allowed) and the metadata stays due.
+; Due metadata at 40 (42 from pwb), CLK at 17; a byte arriving by 22 is held
+; (C set) while it goes at 44 (ph), 46 or 50 (pv), then written 42 after it.
 pwm:    ldy pm
         lda #CLK_OUT
-        BR bvs, ee                      ; t = 12
+        BR bvs, ph                      ; t = 12
         sta IEC                         ; t = 17
         BR bvs, pv                      ; t = 18
         nop
         BR bvs, pv                      ; t = 22
-        nop
-        lda pm2
+        clc
+pvm:    lda pm2
         sta pm
         lda #0
         sta pm2
         sty CIA_SDR                     ; t = 40
-        jmp mpw
-pv:     lda #0                          ; the byte first, at 41 (45)
-        sta IEC
-        ldx VIA2PA
+        BR bcc, mpw
+mh:     nop                             ; the held byte: CLK released at 15,
+        nop                             ; written at 42, mpw at 46
+        jmp ee2
+ph:     sta IEC                         ; t = 18
+pv:     ldx VIA2PA
         clv
-        nop
-        jmp tv
+        sec
+        jmp pvm
 
 pwe:    jsr edge
         jmp nw
@@ -244,16 +266,19 @@ mpw:    BR bvs, ee                      ; t = 4
         jmp *+3                         ; 3 cycles, V untouched
         BR bvs, bl                      ; t = 28
         jmp nw                          ; 33
-; A byte already waiting after a write (pwb at 1, mpw at 4, pwm at 12-24):
-; read it now, release CLK 11 cycles after the bvs and write it 42 later.
+; A byte already waiting after a write (pwb at 1, mpw at 4): read it now,
+; release CLK 11 cycles after the bvs and write it 39 after the read; mpw then
+; takes the next (no metadata until a write finds no byte waiting).
 ee:     ldx VIA2PA
         clv
-        lda #0
+ee2:    lda #0
         sta IEC
         ldy #4
 :       dey
         BR bne, :-
-        jmp tv
+        nop
+        stx CIA_SDR                     ; t = 0
+        jmp mpw
 
 ; SYNC low, from nw (no byte waiting, shifter idle): SYNC_START; SYNC polled
 ; every 11 cycles until high, with T1, the index and SYNC_CONT whenever the
@@ -284,6 +309,7 @@ sp:     ldy #SYNC_POLLS
         jmp lost
 :       lda VIA2PB
         bmi se
+        WDOK
         lda WD
         eor ilev
         and #WD_INDEX
@@ -385,15 +411,6 @@ due:    ldy pm
 :       sta pm2
         rts
 
-; Z set when a VIA1 T1 period passed and tmo ran out.
-tick:   lda IFR1
-        and #IRQ_T1
-        beq :+
-        lda T1CL
-        dec tmo
-        rts
-:       lda #1
-        rts
 
 abort:  lda #END_ATN
         bne end
@@ -413,10 +430,12 @@ end:    jsr meta
         and #<~PA_FSDIR
         sta VIA1PA_NH
         lda tse
-done:   tax
+done:   pha
         lda PCR2
         and #PCR_SOE_MASK
         ora #PCR_SOE_OFF
         sta PCR2
-        txa
+        ldx wst
+        ldy ilev
+        pla
         rts
