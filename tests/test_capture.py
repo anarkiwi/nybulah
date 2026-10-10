@@ -299,6 +299,8 @@ def test_sync_weights_favour_rare_latched_ones():
     assert w[0] == 0 and w[4] > w[1] == w[2] == w[3] > 0
     fold = passes._fold  # pylint: disable=protected-access
     assert fold(np.arange(7), 5, np.maximum).tolist() == [5, 6, 2, 3, 4]
+    assert fold(np.arange(12), 5, np.maximum).tolist() == [10, 11, 7, 8, 9]
+    assert fold(np.arange(9) == 7, 3, np.logical_or).tolist() == [False, True, False]
 
 
 def test_hw_ts_anchor_drawn_off_its_angle():
