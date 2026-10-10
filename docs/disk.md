@@ -184,8 +184,12 @@ track's.
 **Writing:**
 
 1. `revolution_cells` writes filler with one sync at the end, at density 0, on
-   the first track. It measures the cells between the sync's passes, which
-   gives the drive's RPM.
+   the first track. It measures the cells from the capture start (the end of
+   the sync) to the end of the sync's next pass, which gives the drive's RPM.
+   A sync counts only when the capture holds it whole: its run starts after a
+   latched zero (not cut by the capture start), it lies in the bytes whose
+   sync context is known, and its length is bounded. A capture without such a
+   pass is retaken up to `PROBE_TRIES` times, then the probe fails.
 2. Each track is formatted with `format_track` to the measured capacity, less
    2% (`MEASURED_TOLERANCE`).
 3. Filler is prepended, so the stream covers a revolution at +2% speed and

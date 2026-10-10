@@ -126,6 +126,55 @@ def test_cells_per_density(monkeypatch, tmp_path, model):
     assert len(list(tmp_path.glob("index-*.npz"))) == 2 * (model == "1571")
 
 
+CLIPPED = HW_PATTERN / "cells" / "h73-d1-clipped.npz"
+WHOLE = HW_PATTERN / "cells" / "h72-d1.npz"
+
+
+class ProbeNib:
+    """Writes nothing; returns saved probe captures in turn."""
+
+    def __init__(self, *paths):
+        self.caps = [Capture.load(p) for p in paths]
+        self.taken = 0
+
+    def write_track(self, *_, **__):
+        """The probe write."""
+
+    def capture(self, *_, **__):
+        """The next saved capture."""
+        self.taken += 1
+        return self.caps[self.taken - 1]
+
+
+def test_probe_sync_cut_by_the_capture_start_is_not_a_mark():
+    """Hardware: a 1541 probe whose timing put a sync at byte 1, its run reaching
+    back past the capture start, and whose sync context ends before the next
+    pass. Neither sync is whole, so the capture measures nothing."""
+    cap = Capture.load(CLIPPED)
+    assert cap.positions.tolist() == [1, 6658] and cap.valid_bytes < 6658
+    assert cap.latched[0] == 8 * cap.positions[0]
+    assert cap.syncs.whole.tolist() == [False, False]
+    assert disk.probe_cells(cap) is None
+    whole = Capture.load(WHOLE)
+    assert whole.syncs.whole.tolist() == [True]
+    assert disk.probe_cells(whole) == 8 * 6659 + 41
+
+
+def test_probe_retakes_a_capture_without_the_next_pass(tmp_path, capsys):
+    """A clipped probe capture is retaken (and still saved); the retake measures."""
+    nib = ProbeNib(CLIPPED, WHOLE)
+    assert disk.revolution_cells(nib, 73, tmp_path, 1) == disk.probe_cells(nib.caps[1])
+    assert nib.taken == 2 and "capture 1/3" in capsys.readouterr().err
+    assert len(list(tmp_path.glob("probe-s0-t36-*.npz"))) == 2
+
+
+def test_probe_fails_after_bounded_retakes():
+    nib = ProbeNib(*[CLIPPED] * disk.PROBE_TRIES)
+    with pytest.raises(TrackError, match="next pass whole"):
+        disk.revolution_cells(nib, 73, None, 1)
+    assert nib.taken == disk.PROBE_TRIES
+
+
 def test_halftracks_crosstalk(monkeypatch, tmp_path):
     """The written halftrack matches exactly, a neighbour holding a corrupted
     copy matches partly, noise not at all; halftracks past the reach are skipped."""
@@ -192,3 +241,15 @@ def test_negative_lead_refused():
     argv = ["pattern", "write", "--halftrack", "36", "--lead", "-1"]
     with pytest.raises(SystemExit):
         cli.main(argv)
+
+
+def test_search_steps_bound_a_lost_1541(monkeypatch):
+    """--search-steps steps a 1541 DOS has lost no further outwards than it says."""
+    drive = disk_drive("1541", Media({}), 10, halftrack=74)
+    drive.write(0x22, 0)
+    patch(monkeypatch, "1541", SimMonitor(drive))
+    argv = ["pattern", "cells", "--dev", "10", "--halftrack", "72", *BASE]
+    with pytest.raises(TrackError, match="within 3 outward"):
+        cli.main(argv + ["--transport", "s1", "--search-steps", "3"], SimCBM(drive))
+    assert drive.mech.halftrack == 71
+    assert drive.mech.bumps == drive.mech.inner_stops == 0
