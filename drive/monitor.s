@@ -80,6 +80,8 @@ IER     = $180E
 
 ACR_T1_FREERUN = $40
 IRQ_T1   = $40
+LSNADR   = $77                  ; DOS's listen and talk addresses: a session's
+TLKADR   = $78                  ; zero page covers them
 
 ACK_HELD = ATNA
 CLOCK_HZ = 1000000
@@ -138,6 +140,12 @@ done:
 .endif
 
 start:  sei
+.ifndef M1581
+        lda LSNADR                      ; under savesp, back at every exit
+        pha
+        lda TLKADR
+        pha
+.endif
         tsx
         stx savesp
         ldx #zpsize - 1
@@ -220,6 +228,10 @@ exit:   ldx savesp
         lda viasave+1
         sta IER                 ; re-enables what was enabled (bit 7 reads 1)
         lda VIA1PA              ; clear CA1 (ATN) flag
+        pla
+        sta TLKADR
+        pla
+        sta LSNADR
 .endif
         cli
         rts

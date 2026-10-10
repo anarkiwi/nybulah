@@ -1,6 +1,6 @@
 """A Nibbler session holds DOS's zero page: a drive that leaves the monitor then (idle
-watchdog, stuck routine) no longer answers its device number, and is brought back
-by a bus reset with a DriveLost naming why."""
+watchdog, stuck routine) is reported by a DriveLost naming why and a bus reset; the
+monitor's exit puts DOS's listen and talk addresses back, so DOS answers meanwhile."""
 
 import functools
 
@@ -34,7 +34,7 @@ def test_idle_out_mid_session_is_lost_and_reset():
     nib.capture(HALFTRACK, timing="none")
     assert cbm.drive.read(LSNADR) != LISTEN | 9
     cbm.host_wait(1.2 * WATCHDOG_IDLE_S)
-    assert cbm.drive.halted and not cbm.drive.responsive
+    assert cbm.drive.halted and cbm.drive.responsive and answers(cbm.status(9))
     with pytest.raises(DriveLost, match="no command for .* the 1571 nibbler") as e:
         nib.close()
     assert answers(e.value.recovered) and answers(cbm.status(9))
