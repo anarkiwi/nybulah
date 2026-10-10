@@ -345,6 +345,21 @@ of 3.5 ms or more (their 20 ms count overflowed the AVR's 16-bit int to 3.6 ms;
 `docs/vice.md`), which is why every 1581 stream ended after START: the stream's
 keepalive comes 6.4 ms after the last byte.
 
+`tools/ipprobe.py` runs `drive/ipprobe.s` on a 1581 (or, with `--sim`, the
+simulated one): after each WD command sequence (`force` `$D0`; `seek` `$D0`, a
+zero-step Seek; `seek_force` those then `$D0`; `read_track` `$D0`, Read Track)
+it logs every change of busy, IP, T0 and MO with timer B stamps for
+`--revolutions`, and reports the IP rises, their spacing and when MO and busy
+changed:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" -v "$PWD/artifacts:/data/artifacts" --entrypoint python3 nybulah /tools/ipprobe.py --dev 9 --save /data/artifacts/ipprobe-1581.json
+```
+
+Measured on the 1581 (firmware v14, 12 revolutions): `seek` 12 IP rises 199992
+to 200517 us apart, IP high 2.9 to 3.4 ms, live after MO fell; `force` and
+`seek_force` no IP edge at all (status `$80`, then `$00` when MO fell).
+
 ## Disk survey (read-only)
 
 With a formatted disk in each drive, `--disk` adds one read-only step per
@@ -719,8 +734,10 @@ a force interrupt sooner. The simulator (`simwd`) returns the register as it was
 before a command write until each delay has passed and counts such reads in
 `early`; every 1581 drive-code test asserts none.
 
-Type I status (IP, MO) is shown after a type I command or a force interrupt
-while idle, but T0 is updated only by a type I command (datasheet status note 4):
+Type I status (MO) is shown after a type I command or a force interrupt while
+idle, but IP and T0 are updated only by a type I command (datasheet status note
+4 for T0; `tools/ipprobe.py` for IP: after an idle `$D0` the 1581's IP never
+rises, after a zero-step Seek it follows every index, MO on or off):
 on the 1581 an idle `$D0` reads `$80` with the head on cylinder 0
 (`artifacts/hw11/dry2.json`). TR00 reaches only the WD (sheet 2: drive pin 26 to
 WD pin 23, not the CIA), and the DOS never reads T0 (only Restore uses TR00). So
@@ -815,8 +832,8 @@ to lose only for step 5.
    stream `done`/`done`, 6254 and 6257 bytes, 200226 and 200232 us, Read Track
    status `$84` (Lost Data) on both revolutions and two sector errors in the
    decode; the ids stream ended `timeout` at its index wait (`op 0`): the type I
-   status never showed IP, as `homeprobe`'s `index` false on every run. Both are
-   open; the stamps of Read Track, which the WD starts at an index edge, place
+   status never showed IP: the index op polls after `$D0` only, which leaves IP
+   clear on this WD (`tools/ipprobe.py`, issue #57). The stamps of Read Track, which the WD starts at an index edge, place
    the index without the wait.
 5. A whole disk, read (and, on a scratch disk, written and verified):
 

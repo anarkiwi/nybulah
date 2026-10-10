@@ -20,8 +20,8 @@ from .monitor import Monitor, drivecode
 
 CODE_BASE, CODE2, SPLIT = 0x0300, 0x0782, 0x0200
 CIA_PA = 0x4000
-MFM_CODE, STREAM_CODE = "mfm_1581", "mfmstream_1581"
-TAGS = {MFM_CODE: b"NYMF", STREAM_CODE: b"NYMS"}
+MFM_CODE, STREAM_CODE, EDGE_CODE = "mfm_1581", "mfmstream_1581", "ipprobe_1581"
+TAGS = {MFM_CODE: b"NYMF", STREAM_CODE: b"NYMS", EDGE_CODE: b"NYIP"}
 ENTRY = dict(
     zip(
         "sense motor side restore seek index readaddr readsec writesec writetrk"
@@ -40,6 +40,7 @@ FIELDS = {
     "len": 8,
 }
 PB_AT, T0_AT, T1_AT, ID_AT, RS_AT = 10, 11, 14, 17, 23
+EDGE_CMDS, EDGE_LEN = 4, 6  # drive/ipprobe.s P_CMD, E_LEN
 LIST_TMO = 4 * ms.LIST_ENTRIES  # drive/mfmstream.s: TMO after the list
 STATE_LEN = 20  # drive/mfmstream.s state: issued, op, rep, lp, trksave, sc, stamps...
 STATE_AT = CODE_BASE + SPLIT - STATE_LEN  # ... status, flags, count: the block's end
@@ -152,7 +153,8 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         if self._overlay != name:
             code = self.loader(name)
             self.mon.write(CODE_BASE, code[:SPLIT])
-            self.mon.write(CODE2, code[SPLIT:])
+            if code[SPLIT:]:
+                self.mon.write(CODE2, code[SPLIT:])
             self._p = CODE_BASE + code.index(TAGS[name]) + len(TAGS[name])
             self._overlay = name
 
@@ -391,6 +393,22 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
             return stream_state(raw) | {"answered_s": i * WATCHDOG_S}
         return {"error": error, "waited_s": (tries - 1) * WATCHDOG_S}
 
+    def status_edges(self, cmds, mask, revolutions):
+        """drive/ipprobe.s: up to four WD commands (a Seek to the track register, no
+        step), then the status each time its ``mask`` bits change for ``revolutions``:
+        (microseconds on the probe's clock, status) arrays."""
+        if len(cmds) > EDGE_CMDS:
+            raise ValueError(f"at most {EDGE_CMDS} commands")
+        self._load(EDGE_CODE)
+        tmo = self._tmo(revolutions)
+        self.mon.write(
+            self._p, bytes(cmds).ljust(EDGE_CMDS, b"\0") + bytes([mask, tmo])
+        )
+        lo, hi, _ = self.mon.jsr(CODE_BASE)
+        self.cache_used = True
+        raw = self.mon.read(BUFFER, (hi << 8 | lo) * EDGE_LEN)
+        return edge_times(np.frombuffer(raw, np.uint8).reshape(-1, EDGE_LEN))
+
     def read_track(self, revolutions=1):
         """Read Track ``revolutions`` times: a "track" MfmCapture."""
         got = self.stream([ms.entry(ms.OP_READ_TRACK, self.cylinder, rep=revolutions)])
@@ -444,6 +462,18 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
 
     def _head(self):
         return mfm.head_side(self.select)
+
+
+def edge_times(log):
+    """drive/ipprobe.s log rows (status, timer B high, low, high again, wraps, timer B
+    high at the last poll): (microseconds, status). The high read on the low read's side
+    of a borrow is the stamp's (mfm.s time); a wrap after the last poll (bit 15 risen
+    since) is counted."""
+    log = log.astype(np.int64)
+    st, h1, lo, h2, wraps, phase = log.T
+    hi = np.where(lo & 0x80, h1, h2)
+    wraps = wraps + ((hi & 0x80) > (phase & 0x80))
+    return wraps << 16 | 0xFFFF - (hi << 8 | lo), st
 
 
 def _revs(e):
