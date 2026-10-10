@@ -1,8 +1,10 @@
 """The VICE binary monitor client and trace decoding against the documented wire
 format (VICE manual, "Binary Monitor"), with no emulator."""
 
+import os
 import socket
 import struct
+import subprocess
 import threading
 
 import numpy as np
@@ -181,6 +183,20 @@ def test_command_line_units():
     assert args[args.index("-9") + 1] == "d.d81"
     assert args[args.index("-drive8type") + 1] == "0"
     assert "ip4://127.0.0.1:6502" in args
+
+
+def test_listening_port_of_a_process():
+    """The port a process listens on, from its own sockets only."""
+    with socket.socket() as other, socket.socket() as srv:
+        other.bind(("127.0.0.1", 0))
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        assert vice.listening_port(os.getpid()) == srv.getsockname()[1]
+    with subprocess.Popen(["sleep", "30"]) as idle:
+        try:
+            assert vice.listening_port(idle.pid) is None
+        finally:
+            idle.kill()
 
 
 def response(kind, body=b"", rid=vice.EVENT, error=0):

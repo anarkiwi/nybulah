@@ -135,3 +135,49 @@ def test_sense_needs_a_1571(make_rig):
     _, nib = make_rig("1541")
     with pytest.raises(ValueError):
         nib.sense()
+
+
+def lost(make_rig, model, start, media=None, **kw):
+    """(drive, nib) with the head on start and DOS's track unknown."""
+    drive, nib = make_rig(model, media, halftrack=start, **kw)
+    drive.write(0x22, 0)
+    return drive, nib
+
+
+def test_1541_search_finds_headers_outwards(make_rig, g64):
+    drive, nib = lost(make_rig, "1541", 74, Media.from_g64(g64))
+    with pytest.raises(TrackError, match="allow_bump"):
+        nib.locate()
+    assert drive.mech.halftrack == 74
+    assert nib.locate(search=8) == 70 == drive.mech.halftrack == nib.halftrack
+    assert untouched(drive)
+
+
+@pytest.mark.parametrize("model", ["1541", "1571"])
+def test_search_gives_up_after_its_bound(make_rig, model):
+    drive, nib = lost(make_rig, model, 40)
+    with pytest.raises(TrackError, match="within 5 outward"):
+        nib.locate(search=5)
+    assert drive.mech.halftrack == 35 and nib.halftrack is None
+    assert untouched(drive)
+
+
+@pytest.mark.parametrize("edge", SENSOR_EDGES)
+def test_1571_search_finds_the_sensor_edge(make_rig, edge):
+    drive, nib = lost(make_rig, "1571", edge + 5, sensor_edge=edge)
+    with pytest.raises(TrackError, match="nothing places"):
+        nib.locate()
+    assert nib.locate(search=7) == HOME_HALFTRACK == drive.mech.halftrack
+    assert untouched(drive)
+
+
+def test_1571_search_finds_headers_before_the_sensor(make_rig, g64):
+    drive, nib = lost(
+        make_rig, "1571", 74, Media.from_g64(g64), sensor_edge=SENSOR_EDGES[0]
+    )
+    trace = []
+    nib.home = lambda estimate, _home=nib.home: trace.append(estimate) or _home(
+        estimate
+    )
+    assert nib.locate(search=8) == HOME_HALFTRACK == drive.mech.halftrack
+    assert trace == [70] and untouched(drive)

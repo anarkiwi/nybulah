@@ -34,15 +34,20 @@ the `vice` job builds this image and runs them.
   counting), read and set registers, read the CPU history, feed the keyboard,
   and stop, resume and quit the emulator.
 - `Vice` starts `x64sc` or `x128` with true drive emulation, sound off and every
-  other unit off, and connects to it. Its `run_until` resumes the emulator until
-  a CPU executes an address. Its `history` decodes the CPU history into a numpy
+  other unit off, and connects to it. VICE binds the binary monitor to a port the
+  system picks, and the harness reads that port from the process's own sockets in
+  `/proc`, so parallel sessions cannot race for a port. Its `run_until` resumes
+  the emulator until a CPU executes an address. Its `history` decodes the CPU history into a numpy
   array (`HISTORY_DTYPE`): the clock, PC, A, X, Y, SP and flags at the start of
   each instruction, and the instruction's bytes. `accesses` turns that history
   into register reads and writes, with the value each one loaded or stored.
 - `DriveMonitor` offers `read`, `write` and `jsr`, the same interface as
   `nybulah.monitor.Monitor`, on an emulated drive, so host code runs unchanged.
   `Mfm1581(DriveMonitor(...), sleep=mon.sleep)` drives the real `mfm_1581`
-  routines. A call:
+  routines. `start` first runs the drive until its DOS takes an interrupt (the
+  handler in the ROM's `$FFFE` vector). The DOS ROMs mask interrupts from reset
+  until their initialisation is done, so the drive is never taken over during
+  its RAM and ROM tests, before the DOS has set its stack pointer. A call:
   - pushes the address of a parked `jmp *` at `$0500` (the monitor's own load
     address) as the return address;
   - sets A, X, Y and the PC, with interrupts masked;
@@ -90,10 +95,16 @@ loads. `--under` names the build whose `mfm_1581` places the head.
   any port read since the byte before it. A bus fault at the bit level, such as
   an adapter sampling SRQ or CLK at the wrong cycle, cannot be reproduced on
   VICE. Everything inside the drive can be.
-- A drive checkpoint stops the emulator only when the main CPU next
-  synchronises with the drives, so the drive runs on for a while. The harness
-  therefore stops only at loops: the park and the C128 receiver, whose port
-  reads keep the drive in step.
+- A drive checkpoint stops the emulator at once, in the drive CPU
+  (`DO_INTERRUPT` in `src/6510core.c` calls `monitor_startup`). The drive then
+  lags the main CPU. Every binary monitor command first runs the drives up to the
+  main CPU's clock (`drive_cpu_execute_all` in
+  `monitor_binary_process_command`, `src/monitor/monitor_binary.c`). While the
+  monitor is open, checkpoints count hits but do not stop
+  (`monitor_startup` returns when `inside_monitor` is set). So the drive runs on
+  past the checkpoint at the next command. The harness therefore stops a drive
+  only at loops, such as the park, and `run_until` reports whether its
+  checkpoint was hit rather than where the drive is.
 - When VICE is stopped in drive context it reports stale main CPU registers.
   `C128Receiver.received` takes the 8502's X from the CPU history.
 - VICE starts running before the client connects, so each session begins at a
