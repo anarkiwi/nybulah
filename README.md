@@ -46,6 +46,7 @@ nybulah read --dev 10 --transport s3 disk.d64   # 1541: read with error bytes
 nybulah read --dev 8 --transport s4 disk.d71    # 1571: both sides, streamed
 nybulah write --dev 8 --transport s4 disk.d71   # format, write, verify every track
 nybulah read --dev 9 --transport s4 disk.d81    # 1581: D81 with error bytes
+nybulah pattern verify --dev 8 --halftrack 36  # test track against its truth
 nybulah info disk.g64                           # per-track kind, cycle, errors
 nybulah convert disk.nbz disk.g64               # to .g64, .g71, .d64 or .p64
 nybulah map disk.nib -o disk.html               # disk map: .png, .apng, .svg/.html

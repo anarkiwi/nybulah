@@ -334,6 +334,64 @@ The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
 its other subcommands (`nybulah <command> --help`), e.g.
 `nybulah bench --dev 10 --protocol s3`.
 
+## Test pattern
+
+`nybulah pattern` writes a known track and checks every capture path against
+it (`nybulah/analysis/pattern.py`). The pattern is one revolution, regenerated
+from `--halftrack`, `--density` (default: the track's zone) and `--seed`:
+
+| group | contents | expected |
+|---|---|---|
+| `gcr_all` | GCR of every byte $00-$FF | exact |
+| `sync<n>` | four syncs: n = 10, the hardware minimum; 40, DOS's; one just past the TB pass's T2 low byte span and one past the TS release-wait counter span, each tagged and followed by $55 | exact, runs measured |
+| `weak` | 32 $00 bytes (no flux) | unstable |
+| `resync` | a 40-one sync and tag | exact |
+| `random` | seeded GCR filling the revolution | exact |
+| `gap55` | 64+ $55 bytes ending on a byte boundary | exact, framing |
+| `dos` | 4 DOS sectors (header track `H/2`, ID `NY`) | exact |
+
+It is sized for the shortest revolution within the unmeasured speed tolerance;
+the write measures the drive's cells per revolution, puts $55 filler first and
+the pattern last, so the rest of the revolution is filler starting at the
+write splice. `truth.json` (under `--save`) holds each region's bit offset,
+length and expected bits.
+
+`verify` aligns each capture to the pattern: FFT cross-correlation places each
+revolution's copy, a banded edit distance then counts per group bit errors,
+insertions and deletions (sync length differences reported apart, per sync as
+written against found), the drift and the $55 byte framing, the revolution
+length read against `--cells`, and the weak region's reads across repeats. Each
+capture is also digested against the latched truth and, for RAM captures, the
+streams (`ramcheck`). RAM captures with a TB pass get a speed trace (byte period
+over `--window` bytes against byte index) with each excursion's start byte,
+peak percent, oscillation period and decay in ms, and its angle from the
+pattern start and, with streams, from the index.
+
+1. Write on #8 (homes within `--max-steps` outward steps, never bumps; seeks to
+   H; writes a probe then the pattern on halftrack H side 0 only). Note `cells`.
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern write --dev 8 --transport s4 --halftrack H --max-steps N --save /data/artifacts/pattern/write
+   ```
+
+2. Verify on #8 (same homing; reads H only: `--repeats` streams and RAM captures).
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern verify --dev 8 --transport s4 --halftrack H --max-steps N --repeats 3 --cells C --save /data/artifacts/pattern/dev8
+   ```
+
+3. The user moves the disk to #10.
+
+4. Verify on #10 (locates from DOS's track and the headers under the head,
+   never bumps, refuses if neither places it; reads H only by RAM captures).
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern verify --dev 10 --transport s3 --halftrack H --repeats 3 --cells C --save /data/artifacts/pattern/dev10
+   ```
+
+Saved captures are compared again offline with
+`nybulah pattern compare --truth artifacts/pattern/dev8/truth.json artifacts/pattern/dev8/*.npz`.
+
 ## 1571 head homing probe
 
 `nybulah homeprobe` reads the 1571's track 00 sensor (VIA1 PA0, 16 raw reads

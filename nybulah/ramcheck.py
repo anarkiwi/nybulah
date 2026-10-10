@@ -19,23 +19,28 @@ from .nibbler import MAX_HALFTRACK, SETTLE_MS, Capture, Nibbler
 from .ramprobe import identify_model
 
 
-def add_arguments(ap):
-    """Command line options."""
+def drive_options(ap):
+    """Options of a tool that locates a drive's head and saves its captures."""
     ap.add_argument("--dev", type=int, default=8)
     ap.add_argument("--transport", choices=protocols() or ("s1",), default="s4")
-    ap.add_argument("--halftracks", type=int, nargs="+", default=[36, 50])
-    ap.add_argument("--repeats", type=int, default=3)
-    ap.add_argument("--start", choices=("now", "sync"), default="now")
     ap.add_argument("--settle-ms", type=int, default=SETTLE_MS)
-    ap.add_argument(
-        "--reference", type=pathlib.Path, nargs="*", default=[], help="saved captures"
-    )
     ap.add_argument("--save", type=pathlib.Path, help="directory for every capture")
     ap.add_argument(
         "--max-steps",
         type=int,
         default=MAX_HALFTRACK,
         help="1571: refuse when homing needs more outward steps",
+    )
+
+
+def add_arguments(ap):
+    """Command line options."""
+    drive_options(ap)
+    ap.add_argument("--halftracks", type=int, nargs="+", default=[36, 50])
+    ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--start", choices=("now", "sync"), default="now")
+    ap.add_argument(
+        "--reference", type=pathlib.Path, nargs="*", default=[], help="saved captures"
     )
 
 
@@ -49,17 +54,25 @@ def headers(cap, track):
     return dec, dict(zip(found[exact].tolist(), seg.first[k[exact]].tolist()))
 
 
+def _valid(cap):
+    return getattr(cap, "valid_bytes", len(cap.data))
+
+
 def compare(cap, ref, track):
-    """Per sector headed in both, over its span in ``cap`` (to the next header):
+    """Per sector headed in both, over its span in both (to the next header):
     bytes compared and differing, and syncs (bytes after the header) one lacks."""
     dec, mine = headers(cap, track)
     ref_dec, theirs = headers(ref, track)
-    starts = np.array(sorted(mine.values()) + [cap.valid_bytes])
+    starts = np.array(sorted(mine.values()) + [_valid(cap)])
+    ref_starts = np.array(sorted(theirs.values()) + [_valid(ref)])
     rows = []
     for s in sorted(set(mine) & set(theirs)):
         a, b = mine[s], theirs[s]
         n = int(
-            min(starts[np.searchsorted(starts, a, "right")] - a, ref.valid_bytes - b)
+            min(
+                starts[np.searchsorted(starts, a, "right")] - a,
+                ref_starts[np.searchsorted(ref_starts, b, "right")] - b,
+            )
         )
         diff = np.flatnonzero(cap.data[a : a + n] != ref.data[b : b + n])
         here = cap.positions[(cap.positions > a) & (cap.positions < a + n)] - a
@@ -109,7 +122,8 @@ def digest(cap, track, refs=()):
     }
 
 
-def _locate(nib, max_steps):
+def locate(nib, max_steps):
+    """1571: home within max_steps outward steps (never bumping); 1541: locate."""
     if nib.model != "1571":
         return nib.locate()
     plan = homeprobe.dry(nib)
@@ -150,7 +164,7 @@ def execute(args, cbm):
         report = {
             "model": model,
             "streaming": nib.streaming,
-            "located": _locate(nib, args.max_steps),
+            "located": locate(nib, args.max_steps),
         }
         report["tracks"] = {h: check_track(nib, h, args, refs) for h in args.halftracks}
     print(json.dumps(report))

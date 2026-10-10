@@ -147,20 +147,32 @@ def revolution_cells(nib, halftrack, archive=None):
     return 8 * int(cap.positions[0]) + int(cap.hidden[0])
 
 
-def track_stream(job, data, errors, disk_id, cells0):
-    """Formatted track for a drive writing cells0 cells per revolution at density 0.
+def cells_at(cells0, density):
+    """Cells per revolution at a density, from those measured at density 0."""
+    return cells0 * bit_rate(density) / bit_rate(0)
+
+
+def revolution_stream(payload, cells):
+    """Bytes to write so ``payload`` lands last on a revolution of ``cells``.
 
     Filler goes first so the stream covers a fast revolution in whole pages.
     """
-    zone = speed_zone(job.track)
-    cells = cells0 * bit_rate(zone) / bit_rate(0)
+    capacity = int(cells * (1 - MEASURED_TOLERANCE) // 8)
+    if len(payload) > capacity:
+        raise TrackError(f"{len(payload)} bytes exceed a {capacity} byte revolution")
+    cover = int(np.ceil(cells * (1 + MEASURED_TOLERANCE) / 8))
+    total = -(-max(cover, len(payload)) // 256) * 256
+    if total > NPAGES * 256:
+        raise TrackError(f"{total} bytes exceed the drive RAM")
+    return bytes([GAP_BYTE]) * (total - len(payload)) + bytes(payload)
+
+
+def track_stream(job, data, errors, disk_id, cells0):
+    """Formatted track for a drive writing cells0 cells per revolution at density 0."""
+    cells = cells_at(cells0, speed_zone(job.track))
     capacity = int(cells * (1 - MEASURED_TOLERANCE) // 8)
     gcr = format_track(job.header, data, disk_id, errors, capacity)
-    cover = int(np.ceil(cells * (1 + MEASURED_TOLERANCE) / 8))
-    total = -(-max(cover, len(gcr)) // 256) * 256
-    if total > NPAGES * 256:
-        raise TrackError(f"track {job.track} needs {total} bytes of drive RAM")
-    return bytes([GAP_BYTE]) * (total - len(gcr)) + gcr.tobytes()
+    return revolution_stream(gcr.tobytes(), cells)
 
 
 REPRODUCED = [
