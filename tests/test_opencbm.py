@@ -210,3 +210,55 @@ def test_usb_reset_failures(tmp_path, monkeypatch):
         cbm.usb_reset(sysfs, "/u")
     assert lib.calls[-2:] == ["cbm_driver_close", "cbm_driver_open_ex"]
     assert cbm.fd is not None
+
+
+class ArgsLib(FakeLib):
+    """FakeLib recording cbm_adapter_reset's arguments; absent when missing."""
+
+    def __init__(self, missing=(), **rc):
+        super().__init__(**rc)
+        self.missing, self.args = set(missing), []
+
+    def __getattr__(self, name):
+        if name in self.missing:
+            raise AttributeError(name)
+        fn = super().__getattr__(name)
+        if name != "cbm_adapter_reset":
+            return fn
+        return lambda *a: self.args.append(a[1:]) or fn(*a)
+
+
+def test_adapter_reset_passes_the_bus_flag_and_checks_zero():
+    lib = ArgsLib()
+    cbm = OpenCBM(lib=lib)
+    cbm.adapter_reset()
+    cbm.adapter_reset(reset_bus=False)
+    assert lib.args == [(1,), (0,)]
+    for rc in (-1, 1):
+        with pytest.raises(OpenCBMError, match=f"cbm_adapter_reset returned {rc}"):
+            OpenCBM(lib=ArgsLib(cbm_adapter_reset=rc)).adapter_reset()
+
+
+def test_adapter_reset_missing_from_an_older_library():
+    cbm = OpenCBM(lib=ArgsLib(missing={"cbm_adapter_reset"}))
+    with pytest.raises(OpenCBMError, match="lacks cbm_adapter_reset"):
+        cbm.adapter_reset()
+
+
+def test_load_library_tolerates_only_optional_symbols(monkeypatch):
+    class Sym:  # pylint: disable=too-few-public-methods
+        """A ctypes function pointer's prototype slots."""
+
+        restype = argtypes = None
+
+    def dll(missing):
+        names = set(opencbm._PROTOS) - {missing}  # pylint: disable=protected-access
+        return type("Dll", (), {n: Sym() for n in names})()
+
+    monkeypatch.setattr(opencbm.ctypes, "CDLL", lambda _: dll("cbm_adapter_reset"))
+    lib = opencbm.load_library()
+    assert not hasattr(lib, "cbm_adapter_reset")
+    assert lib.cbm_reset.argtypes == [ctypes.c_ssize_t]
+    monkeypatch.setattr(opencbm.ctypes, "CDLL", lambda _: dll("cbm_reset"))
+    with pytest.raises(OpenCBMError, match="libopencbm lacks cbm_reset"):
+        opencbm.load_library()

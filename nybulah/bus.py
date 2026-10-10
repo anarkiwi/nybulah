@@ -32,7 +32,9 @@ from .opencbm import (
 
 STEPS = """steps (one per argument or per --script line, # comments):
   reset                  pulse RESET; wait until no drive holds CLK or DATA
-                         (a wedged adapter is USB-reset once, then RESET again)
+                         (a wedged adapter is reset with the bus, else
+                         USB-reset, once each)
+  adapterreset           reset the adapter and the bus (firmware v13)
   usbreset               USB-reset the adapter, then reset
   wait DEV...            until each drive's DOS answers its error channel
   status DEV...          read the error channel
@@ -48,10 +50,11 @@ T_AT = 1e-3
 RESET_HOLD_S = 0.1
 DETECT = range(8, 31)
 JOB_QUEUE = range(0x00, 0x0B)
-OPS = ("reset", "usbreset", "detect", "wait", "status", "command", "dir", "identify")
+RECOVERY = {"adapterreset": "adapter_reset", "usbreset": "usb_reset"}
+OPS = ("reset", *RECOVERY, "detect", "wait", "status", "command", "dir", "identify")
 LINES = {"ATN": IEC_ATN, "CLK": IEC_CLOCK, "DATA": IEC_DATA, "RESET": IEC_RESET}
 LINES["SRQ"] = IEC_SRQ
-RESET_ORIGINS = ("reset", "usb reset")
+RESET_ORIGINS = ("reset", "adapter reset", "usb reset")
 
 
 def diagnostic_cycles(rom_pages, ram_pages):
@@ -88,7 +91,10 @@ class DeviceHung(BusError):
 
 
 class BusHeld(BusError):
-    """A device still holds CLK or DATA at the outer limit."""
+    """A device still holds CLK or DATA at the outer limit; ``recovery`` maps
+    each adapter recovery step tried to its outcome."""
+
+    recovery = None
 
 
 class DriveUnresponsive(IOError):
@@ -343,10 +349,14 @@ class Bus:  # pylint: disable=too-many-instance-attributes
         seen = f"{len(tl['transitions'])} line states seen, released at {released}"
         who = "a drive is holding the bus and needs a power cycle"
         if self.adapter_held():
-            who = "the adapter is holding the bus; " + (
-                "a USB reset did not clear it and it needs a power cycle"
-                if tl["from"] == "usb reset"
-                else "a USB reset of the adapter (bus step usbreset) clears it"
+            who = "the adapter is holding the bus; " + {
+                "usb reset": "a USB reset did not clear it and it needs a power cycle",
+                "adapter reset": "an adapter reset did not clear it; "
+                "a USB reset of the adapter (bus step usbreset) clears it",
+            }.get(
+                tl["from"],
+                "an adapter reset (bus step adapterreset) or a USB reset of the "
+                "adapter (bus step usbreset) clears it",
             )
         return (
             f"{names} still held {self.clock() - self.base():.2f} s after {start}, past "
@@ -376,10 +386,12 @@ class Bus:  # pylint: disable=too-many-instance-attributes
         if dev not in self.known:
             self.ready(dev, self.boot_limit(), self.outer_s)
 
-    def _reset(self, origin):
-        """Pulse RESET and settle within the outer limit from it."""
+    def _reset(self, origin, pulse=True):
+        """Pulse RESET (unless the caller already reset the bus) and settle
+        within the outer limit from it."""
         self.idle()
-        self.cbm.reset()
+        if pulse:
+            self.cbm.reset()
         self.known.clear()
         self.low, self.reset_at, self.first_sample = {}, self.clock(), None
         self._timeline(origin)
@@ -388,13 +400,36 @@ class Bus:  # pylint: disable=too-many-instance-attributes
 
     def reset(self, _dev=None, _arg=None):
         """Pulse RESET; watch the lines until every drive has released them. A
-        wedged adapter holding them (adapter_held) is USB-reset once."""
+        wedged adapter holding them (adapter_held) gets each RECOVERY step the
+        adapter offers, in order, until one frees the bus; ``recovery`` maps
+        each step tried to "ok" or its error."""
         try:
             return self._reset("reset")
-        except BusHeld:
-            if not (self.adapter_held() and hasattr(self.cbm, "usb_reset")):
-                raise
-        return self.usbreset()
+        except BusHeld as e:
+            held = e
+        recovery = {}
+        for step, method in RECOVERY.items():
+            if not self.adapter_held():
+                break
+            if not hasattr(self.cbm, method):
+                continue
+            try:
+                rec = getattr(self, step)()
+            except (BusHeld, OpenCBMError) as e:
+                held = e if isinstance(e, BusHeld) else held
+                recovery[step] = f"{type(e).__name__}: {e}"
+                continue
+            return rec | {"recovery": recovery | {step: "ok"}}
+        held.recovery = recovery
+        raise held
+
+    def adapterreset(self, _dev=None, _arg=None):
+        """Reset the adapter and the bus from its control endpoint, then settle."""
+        if not hasattr(self.cbm, "adapter_reset"):
+            raise ValueError("adapter cannot be reset by command")
+        self.cbm.adapter_reset(reset_bus=True)
+        self.hands_off = False
+        return self._reset("adapter reset", pulse=False) | {"adapter_reset": True}
 
     def usbreset(self, _dev=None, _arg=None):
         """USB-reset the adapter, then pulse RESET and settle."""
@@ -474,8 +509,8 @@ def recover(cbm, dev, resets=2, timeout=None):
     """Release the host's lines, reset the bus and wait until dev answers.
 
     Returns the drive's status string. A second reset covers a drive that let
-    the lines go but did not answer; a wedged adapter is USB-reset by
-    Bus.reset; lines still held end it untouched (BusHeld).
+    the lines go but did not answer; a wedged adapter is reset with the bus,
+    else USB-reset, by Bus.reset; lines still held end it untouched (BusHeld).
     """
     bus = Bus(cbm, OUTER_S if timeout is None else timeout)
     error = None
@@ -501,7 +536,7 @@ def parse(line):
     op, args, arg = words[0], words[1:], None
     if op not in OPS:
         raise ValueError(f"unknown step {op!r}")
-    if op in ("reset", "usbreset", "detect"):
+    if op in ("reset", *RECOVERY, "detect"):
         if args:
             raise ValueError(f"{op} takes no arguments")
         return [(op, None, None)]
@@ -559,6 +594,8 @@ class Script:
             rec |= {"result": "error", "error": f"{type(e).__name__}: {e}"}
             if isinstance(e, BusHeld):
                 self.held, culprit = str(e), None
+                if e.recovery:
+                    rec["recovery"] = e.recovery
         if rec["result"] != "ok":
             rec["bus"] = self.lines[culprit] = bus.snapshot()
             bus.idle()

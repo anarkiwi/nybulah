@@ -19,6 +19,7 @@ _PROTOS = {
     "cbm_driver_open_ex": (ctypes.c_int, [ctypes.POINTER(_FD), ctypes.c_char_p]),
     "cbm_driver_close": (None, [_FD]),
     "cbm_reset": (ctypes.c_int, [_FD]),
+    "cbm_adapter_reset": (ctypes.c_int, [_FD, ctypes.c_int]),
     "cbm_upload": (
         ctypes.c_int,
         [_FD, ctypes.c_ubyte, ctypes.c_int, _BUF, ctypes.c_size_t],
@@ -59,6 +60,7 @@ _PROTOS = {
     "cbm_iec_wait": (ctypes.c_int, [_FD, ctypes.c_int, ctypes.c_int]),
     "cbm_get_plugin_function_address": (ctypes.c_void_p, [ctypes.c_char_p]),
 }
+_OPTIONAL = {"cbm_adapter_reset"}
 _XFER = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_void_p, ctypes.c_uint)
 _STREAM = "opencbm_plugin_srq2_stream"
 _SET_TIMEOUT = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_uint)
@@ -112,15 +114,20 @@ def _transfers(proto, what):
 
 
 def load_library(name="opencbm"):
-    """Load libopencbm and attach prototypes."""
+    """Load libopencbm and attach prototypes; an older library may lack the
+    _OPTIONAL entry points, whose methods then raise OpenCBMError."""
     lib = ctypes.CDLL(ctypes.util.find_library(name) or f"lib{name}.so.0")
     for fn, (restype, argtypes) in _PROTOS.items():
-        f = getattr(lib, fn)
+        f = getattr(lib, fn, None)
+        if f is None and fn in _OPTIONAL:
+            continue
+        if f is None:
+            raise OpenCBMError(f"lib{name} lacks {fn}")
         f.restype, f.argtypes = restype, argtypes
     return lib
 
 
-class OpenCBM:
+class OpenCBM:  # pylint: disable=too-many-public-methods
     """An open OpenCBM driver handle (one ZoomFloppy/xum1541)."""
 
     def __init__(self, adapter=None, lib=None):
@@ -178,6 +185,15 @@ class OpenCBM:
     def reset(self):
         """Pulse IEC RESET."""
         self._check(self.lib.cbm_reset(self.fd), "cbm_reset")
+
+    def adapter_reset(self, reset_bus=True):
+        """Reset the adapter from its control endpoint (xum1541 firmware v13),
+        aborting any transfer even with its command loop wedged; reset_bus also
+        pulses IEC RESET."""
+        fn = getattr(self.lib, "cbm_adapter_reset", None)
+        if fn is None:
+            raise OpenCBMError("libopencbm lacks cbm_adapter_reset")
+        self._check(fn(self.fd, int(bool(reset_bus))), "cbm_adapter_reset", 0)
 
     def unlisten(self):
         """UNLISTEN under ATN to every device (clears a 1571/1581 fast host flag)."""

@@ -206,10 +206,17 @@ an adapter wedged mid-transfer keeps its own CLK and DATA asserted and never
 resets the bus. A drive released by RESET lets go of the lines in reset and
 through its diagnostic, so lines held in one unchanged state from the reset to
 the outer limit (`Bus.adapter_held`) blame the adapter: `reset` (and
-`recover`) then USB-resets it once (`USBDEVFS_RESET` on the `16d0:0504` usbfs
-node, `OpenCBM.usb_reset`), pulses RESET again and settles within a new outer
-limit, marking the step `usb_reset`. Lines still held after that are reported
-as above. The `usbreset` step does the USB reset and then `reset` on request.
+`recover`) then resets it from its control endpoint with the bus flag
+(`cbm_adapter_reset(fd, 1)`, firmware v13, `OpenCBM.adapter_reset`), which
+also pulses RESET, and settles within a new outer limit. The adapter-only
+reset does not free lines a wedged adapter holds; the bus flag does. If the
+lines are still held in one state, or the library or firmware lacks the call,
+it USB-resets the adapter once (`USBDEVFS_RESET` on the `16d0:0504` usbfs
+node, `OpenCBM.usb_reset`), pulses RESET again and settles once more. The
+step record's `recovery` maps each recovery tried (`adapterreset`,
+`usbreset`) to `ok` or its error, and `adapter_reset` or `usb_reset` marks
+the one that freed the bus. Lines still held after both are reported as
+above. The `adapterreset` and `usbreset` steps do either recovery on request.
 
 A drive that does not answer once the lines are free fails its step and the
 script stops; `--keep-going` skips only that drive's later steps. A hung DOS
