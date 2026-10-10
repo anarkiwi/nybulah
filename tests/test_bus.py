@@ -159,11 +159,15 @@ def held_by_a_drive(*devs, cls=ClockFirst, **kw):
 def test_outer_limit_reports_and_leaves_the_bus_untouched(capsys):
     cbm = held_by_a_drive(8, 9)
     out, recs = run(cbm, "reset", "wait 8 9", "status 9", "--keep-going", capsys=capsys)
-    limit = cbm.writes[0][0] + 0.1 + bus.OUTER_S
+    limit = cbm.writes[-1][0] + 0.1 + bus.OUTER_S
     assert recs[0]["result"] == "error" and "BusHeld" in recs[0]["error"]
-    assert recs[0]["seconds"] == pytest.approx(0.1 + bus.OUTER_S, abs=0.2)
     assert [w for w in cbm.writes if w[0] >= limit - 0.2] == []
-    assert cbm.resets == 1 and not cbm.log and len(recs) == 2 and not out["ok"]
+    assert (
+        cbm.resets == 1 + bus.RECOVERY_PULSES
+        and not cbm.log
+        and len(recs) == 2
+        and not out["ok"]
+    )
     assert "needs a power cycle; nothing was sent" in out["held"]
     assert cbm.host_lines == 0 and cbm.closed
 
@@ -278,7 +282,6 @@ def test_parse_expands_devices_and_escapes():
     assert bus.parse("  # nothing") == []
     assert bus.parse("status 8 9") == [("status", 8, None), ("status", 9, None)]
     assert bus.parse('command 8 "U0\\x3eM1"') == [("command", 8, b"U0>M1")]
-    assert bus.parse("usbreset") == [("usbreset", None, None)]
     assert bus.parse("adapterreset") == [("adapterreset", None, None)]
 
 
@@ -315,7 +318,7 @@ def test_recover_waits_for_boot_then_gives_up_on_silence():
     held = held_forever(8)
     with pytest.raises(bus.DriveUnresponsive, match="nothing was sent"):
         bus.recover(held, 8, timeout=0.2)
-    assert held.resets == 1 and not held.log
+    assert held.resets == 1 + bus.RECOVERY_PULSES and not held.log
 
 
 def test_console_exit_status(monkeypatch):
@@ -418,6 +421,9 @@ def test_bus_held_before_the_run_blames_no_drive(capsys):
         f"CLK and DATA still held {recs[0]['seconds']:.2f} s after this run started, "
         "past every derived boot bound"
     )
+    assert "the adapter or a drive is holding the bus; bus step adapterreset" in (
+        out["held"]
+    )
     snap = recs[0]["bus"]
     assert snap["held_since"] == {"CLK": "unknown", "DATA": "unknown"}
     assert "at least (low when this run started)" in snap["text"]
@@ -448,16 +454,18 @@ def test_settle_needs_the_quiet_window_a_drive_was_seen_to_break():
 
 
 class WedgedAdapter(DOSBus):
-    """An adapter whose firmware left its command loop holding CLK and DATA:
-    RESET requests and releases never reach the bus until a USB reset, which
-    frees the lines unless the USB reset does not cure it."""
+    """An adapter stopped mid-transfer holding CLK and DATA: its command loop
+    never performs a RESET request (fails: the request errors) and it ignores
+    releases until the control-endpoint reset aborts the transfer."""
 
-    def __init__(self, drives, wedged=True, cures=True):
+    def __init__(self, drives, fails=False):
         super().__init__(drives)
-        self.wedged, self.cures, self.usb_resets = wedged, cures, 0
-        self.host_lines = IEC_CLOCK | IEC_DATA if wedged else 0
+        self.fails, self.wedged, self.calls = fails, True, []
+        self.host_lines = IEC_CLOCK | IEC_DATA
 
     def reset(self):
+        if self.wedged and self.fails:
+            raise OpenCBMError("cbm_reset: timeout")
         if not self.wedged:
             super().reset()
 
@@ -465,188 +473,152 @@ class WedgedAdapter(DOSBus):
         if not self.wedged:
             super().iec_release(lines)
 
-    def usb_reset(self):
-        self.usb_resets += 1
-        if self.cures:
-            self.wedged, self.host_lines = False, 0
-
-
-class CommandResettable(WedgedAdapter):
-    """A wedged adapter with the firmware v13 control-endpoint reset, which
-    frees the lines and pulses RESET only with the bus flag and only if frees;
-    ``calls`` orders its recoveries."""
-
-    def __init__(self, drives, frees=True, **kw):
-        super().__init__(drives, **kw)
-        self.frees, self.calls = frees, []
-
     def adapter_reset(self, reset_bus=True):
         self.calls.append(("adapter_reset", reset_bus))
-        if self.frees and reset_bus:
-            self.wedged = False
-            DOSBus.reset(self)
-
-    def usb_reset(self):
-        self.calls.append(("usb_reset",))
-        super().usb_reset()
+        self.wedged = False
+        super().adapter_reset(reset_bus)
 
 
-class OldFirmware(CommandResettable):
-    """A library with cbm_adapter_reset over firmware that refuses it."""
+class OldFirmware(WedgedAdapter):
+    """Firmware before v13 refuses the control-endpoint reset."""
 
     def adapter_reset(self, reset_bus=True):
         self.calls.append(("adapter_reset", reset_bus))
         raise OpenCBMError("cbm_adapter_reset returned -1")
 
 
+class USBResettable(OldFirmware):
+    """Old firmware whose USB reset reinitialises the adapter."""
+
+    def usb_reset(self):
+        self.calls.append(("usb_reset",))
+        self.wedged, self.host_lines = False, 0
+
+
+class Stubborn(DOSBus):
+    """Drive 8 holds CLK and DATA from the start through the first ``pulses``
+    RESET pulses, then boots like any other."""
+
+    def __init__(self, drives, pulses):
+        super().__init__(drives)
+        self.pulses = pulses
+        self.drives[8].held = [(0.0, INF)]
+
+    def reset(self):
+        super().reset()
+        if self.resets <= self.pulses:
+            self.drives[8].held = [(self.now, INF)]
+
+
 def booting(*devs):
     return [DOSDrive(d, boot_s=0.5) for d in devs]
 
 
-def test_reset_usb_resets_a_wedged_adapter_once(capsys):
-    cbm = WedgedAdapter(booting(8, 9, 10))
-    out, recs = run(cbm, "reset", "wait 8 9 10", capsys=capsys)
-    assert out["ok"] and cbm.usb_resets == 1 and cbm.resets == 1
-    assert recs[0]["usb_reset"] and recs[0]["timeline"]["from"] == "usb reset"
-    assert recs[0]["seconds"] >= bus.OUTER_S
-    assert [t["from"] for t in out["timelines"]] == ["run start", "reset", "usb reset"]
-    assert out["timelines"][1]["transitions"] == [[0.0, ["CLK", "DATA"]]]
-    assert [r["status"][:3] for r in recs[1:4]] == ["73,"] * 3
+def resets_sent(cbm):
+    return [w for _, w in cbm.writes if w.endswith("reset")]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_wedged_adapter_is_released_by_the_adapter_reset_alone(fails, capsys):
+    cbm = WedgedAdapter(booting(8, 9), fails=fails)
+    out, recs = run(cbm, "reset", "wait 8 9", capsys=capsys)
+    assert out["ok"] and cbm.calls == [("adapter_reset", False)]
+    assert resets_sent(cbm) == ["adapter reset", "reset"]
+    recovery = {"adapter_reset": "ok", "pulses": 1}
+    froms = ["run start", "adapter reset", "reset after adapter reset"]
+    if fails:
+        assert recs[0]["seconds"] == pytest.approx(0.1 + 0.5, abs=1e-3)
+    else:
+        recovery["held_by"] = "adapter"
+        froms.insert(1, "reset")
+        assert recs[0]["seconds"] >= bus.OUTER_S
+        assert out["timelines"][1]["transitions"] == [[0.0, ["CLK", "DATA"]]]
+    assert recs[0]["recovery"] == recovery
+    assert [t["from"] for t in out["timelines"]] == froms
+    assert out["timelines"][-2]["transitions"] == [[0.0, []]]
+    assert [r["status"][:3] for r in recs[1:3]] == ["73,"] * 2
     assert not cbm.violations and not cbm.aborts
 
 
-class DriveHeldAdapter(ClockFirst, CommandResettable):
-    """A resettable adapter on a bus a drive is holding."""
-
-
-def test_drive_holding_the_bus_is_not_usb_reset(capsys):
-    cbm = held_by_a_drive(8, 9, cls=DriveHeldAdapter, wedged=False)
-    out, recs = run(cbm, "reset", "wait 9", capsys=capsys)
-    assert "BusHeld" in recs[0]["error"] and "usb_reset" not in recs[0]
-    assert "recovery" not in recs[0] and not cbm.calls
-    assert cbm.usb_resets == 0 and cbm.resets == 1 and not cbm.log
-    assert "a drive is holding the bus and needs a power cycle" in out["held"]
-
-
-def test_lines_held_again_after_a_release_blame_a_drive():
-    drive = DOSDrive(8)
-    drive.holds = ((0.0, 0.5), (1.0, INF))
-    cbm = WedgedAdapter([drive], wedged=False)
-    b = bus.Bus(cbm, outer_s=2.0)
-    assert b.reset()["settled_s"] == pytest.approx(0.5)
-    cbm.sleep(0.5)
-    with pytest.raises(bus.BusHeld, match="a drive is holding the bus"):
-        b.settle(b.boot_limit())
-    assert not b.adapter_held() and cbm.usb_resets == 0
-
-
-def test_usbreset_step(capsys):
-    cbm = WedgedAdapter(booting(8))
-    out, recs = run(cbm, "usbreset", "wait 8", capsys=capsys)
-    assert out["ok"] and cbm.usb_resets == 1 and recs[0]["usb_reset"]
-    assert recs[0]["settled_s"] == pytest.approx(0.5, abs=1e-3)
-    out, recs = run(DOSBus([DOSDrive(8)]), "usbreset", capsys=capsys)
-    assert recs[0]["error"] == "ValueError: adapter cannot be USB-reset"
-    assert not out["ok"]
-
-
-def test_usb_reset_that_does_not_cure_reports_once(capsys):
-    cbm = WedgedAdapter(booting(8), cures=False)
-    out, recs = run(cbm, "reset", "wait 8", capsys=capsys)
-    assert "BusHeld" in recs[0]["error"] and cbm.usb_resets == 1 and len(recs) == 2
-    assert recs[0]["seconds"] == pytest.approx(2 * (0.1 + bus.OUTER_S), abs=0.3)
-    assert "a USB reset did not clear it and it needs a power cycle" in out["held"]
-    assert out["timelines"][-1]["from"] == "usb reset" and not cbm.log
-
-
-def test_adapter_without_usb_reset_reports_the_adapter(capsys):
-    cbm = held_forever(8)
-    out, recs = run(cbm, "reset", "--boot-seconds", "2", capsys=capsys)
-    assert "BusHeld" in recs[0]["error"] and cbm.resets == 1 and not cbm.log
-    assert "the adapter is holding the bus; an adapter reset (bus step " in out["held"]
-    assert (
-        "adapterreset) or a USB reset of the adapter (bus step usbreset) clears it"
-        in (out["held"])
-    )
-    assert out["held"].endswith("; nothing was sent")
-
-
-def test_recover_usb_resets_a_wedged_adapter():
-    cbm = WedgedAdapter(booting(8))
-    assert bus.recover(cbm, 8).startswith("73,") and cbm.usb_resets == 1
-    stuck = WedgedAdapter(booting(8), cures=False)
-    with pytest.raises(bus.DriveUnresponsive, match="device 8: .*did not clear"):
-        bus.recover(stuck, 8, timeout=0.2)
-    assert stuck.usb_resets == 1
-
-
-def test_reset_frees_a_wedged_adapter_by_adapter_reset_alone(capsys):
-    cbm = CommandResettable(booting(8, 9))
+@pytest.mark.parametrize("pulses", [1, 2])
+def test_drive_hold_gets_a_pulse_within_and_one_after_the_outer_limit(pulses, capsys):
+    cbm = Stubborn(booting(8, 9), pulses)
     out, recs = run(cbm, "reset", "wait 8 9", capsys=capsys)
-    assert out["ok"] and cbm.calls == [("adapter_reset", True)]
-    assert cbm.usb_resets == 0 and cbm.resets == 1 and not cbm.violations
-    assert recs[0]["recovery"] == {"adapterreset": "ok"} and recs[0]["adapter_reset"]
-    assert "usb_reset" not in recs[0]
-    froms = [t["from"] for t in out["timelines"]]
-    assert froms == ["run start", "reset", "adapter reset"]
-    assert out["timelines"][1]["transitions"] == [[0.0, ["CLK", "DATA"]]]
-    assert recs[0]["settled_s"] == pytest.approx(0.5, abs=1e-3)
+    assert (
+        out["ok"]
+        and resets_sent(cbm) == ["reset", "adapter reset"] + ["reset"] * pulses
+    )
+    assert recs[0]["recovery"] == {
+        "adapter_reset": "ok",
+        "held_by": "drive",
+        "pulses": pulses,
+    }
+    assert out["timelines"][2]["transitions"] == [[0.0, ["CLK", "DATA"]]]
+    assert pulses * bus.OUTER_S < recs[0]["seconds"] < (pulses + 1) * bus.OUTER_S
     assert [r["status"][:3] for r in recs[1:3]] == ["73,"] * 2
 
 
-@pytest.mark.parametrize("cls", [CommandResettable, OldFirmware])
-def test_adapter_reset_that_leaves_lines_held_falls_back_to_usb_reset(cls, capsys):
-    cbm = cls(booting(8), frees=False)
-    out, recs = run(cbm, "reset", "wait 8", capsys=capsys)
-    assert out["ok"] and cbm.calls == [("adapter_reset", True), ("usb_reset",)]
-    assert cbm.usb_resets == 1 and recs[0]["usb_reset"]
-    recovery = recs[0]["recovery"]
-    assert (
-        list(recovery) == ["adapterreset", "usbreset"] and recovery["usbreset"] == "ok"
-    )
-    tried = [t["from"] for t in out["timelines"]][1:]
-    if cls is OldFirmware:
-        assert recovery["adapterreset"].startswith("OpenCBMError: cbm_adapter_reset")
-        assert tried == ["reset", "usb reset"]
-    else:
-        assert recovery["adapterreset"].startswith("BusHeld: ")
-        assert "an adapter reset did not clear it" in recovery["adapterreset"]
-        assert tried == ["reset", "adapter reset", "usb reset"]
-        assert out["timelines"][2]["transitions"] == [[0.0, ["CLK", "DATA"]]]
-    assert recs[1]["status"].startswith("73,") and not cbm.violations
-
-
-def test_adapter_without_adapter_reset_goes_straight_to_usb_reset(capsys):
-    cbm = WedgedAdapter(booting(8))
-    out, recs = run(cbm, "reset", "wait 8", capsys=capsys)
-    assert out["ok"] and recs[0]["recovery"] == {"usbreset": "ok"}
-
-
-def test_every_recovery_failing_reports_each(capsys):
-    cbm = CommandResettable(booting(8), frees=False, cures=False)
-    out, recs = run(cbm, "reset", "wait 8", capsys=capsys)
+def test_drive_hold_past_every_pulse_is_reported_and_left_alone(capsys):
+    cbm = held_by_a_drive(8, 9)
+    out, recs = run(cbm, "reset", "wait 8 9", "--keep-going", capsys=capsys)
+    pulses = 1 + bus.RECOVERY_PULSES
+    assert resets_sent(cbm) == ["reset", "adapter reset"] + ["reset"] * (pulses - 1)
+    limit = cbm.writes[-1][0] + 0.1 + bus.OUTER_S
+    assert [w for w in cbm.writes if w[0] >= limit - 0.2] == []
+    assert recs[0]["seconds"] == pytest.approx(pulses * (0.2 + bus.OUTER_S), abs=0.3)
+    assert recs[0]["recovery"] == {
+        "adapter_reset": "ok",
+        "held_by": "drive",
+        "pulses": bus.RECOVERY_PULSES,
+    }
     assert "BusHeld" in recs[0]["error"] and len(recs) == 2 and not cbm.log
-    assert cbm.calls == [("adapter_reset", True), ("usb_reset",)]
-    assert list(recs[0]["recovery"]) == ["adapterreset", "usbreset"]
-    assert "a USB reset did not clear it and it needs a power cycle" in out["held"]
-    assert out["timelines"][-1]["from"] == "usb reset"
+    assert out["held"].endswith(
+        "the adapter has released its lines, so a drive is holding the bus and "
+        "needs a power cycle; nothing was sent"
+    )
+    assert cbm.host_lines == 0 and cbm.closed and not out["ok"]
+
+
+def test_failed_adapter_reset_falls_back_to_a_usb_reset(capsys):
+    cbm = USBResettable(booting(8))
+    out, recs = run(cbm, "reset", "wait 8", capsys=capsys)
+    assert out["ok"] and cbm.calls == [("adapter_reset", False), ("usb_reset",)]
+    assert recs[0]["recovery"] == {
+        "adapter_reset": "OpenCBMError: cbm_adapter_reset returned -1",
+        "usb_reset": "ok",
+        "held_by": "adapter",
+        "pulses": 1,
+    }
+    assert recs[1]["status"].startswith("73,")
+
+
+@pytest.mark.parametrize("cls", [OldFirmware, None])
+def test_adapter_that_cannot_be_reset_is_an_error(cls, capsys):
+    if cls is None:
+        cbm = held_forever(8)
+        cbm.adapter_reset = None
+        error = "adapter cannot be reset by command"
+    else:
+        cbm, error = cls(booting(8), fails=True), "cbm_adapter_reset returned -1"
+    out, recs = run(cbm, "reset", "wait 8", capsys=capsys)
+    assert recs[0]["error"] == f"OpenCBMError: {error}" and len(recs) == 2
+    assert recs[0]["bus"]["low"] == ["CLK", "DATA"] and not out["ok"]
+    assert not cbm.log and cbm.resets == (1 if cls is None else 0)
 
 
 def test_adapterreset_step(capsys):
-    cbm = CommandResettable(booting(8))
+    cbm = DOSBus(booting(8))
     out, recs = run(cbm, "adapterreset", "wait 8", capsys=capsys)
-    assert (
-        out["ok"]
-        and recs[0]["adapter_reset"]
-        and cbm.calls == [("adapter_reset", True)]
-    )
-    assert cbm.host_lines == 0 and cbm.resets == 1
-    out, recs = run(DOSBus([DOSDrive(8)]), "adapterreset", capsys=capsys)
-    assert recs[0]["error"] == "ValueError: adapter cannot be reset by command"
-    assert not out["ok"]
+    assert out["ok"] and resets_sent(cbm) == ["adapter reset", "reset"]
+    assert recs[0]["recovery"] == {"adapter_reset": "ok", "pulses": 1}
+    assert recs[0]["settled_s"] == pytest.approx(0.5, abs=1e-3)
 
 
-def test_recover_adapter_resets_before_usb_reset():
-    cbm = CommandResettable(booting(8))
-    assert bus.recover(cbm, 8).startswith("73,") and cbm.usb_resets == 0
-    assert cbm.calls == [("adapter_reset", True)]
+def test_recover_releases_a_wedged_adapter_and_reports_a_drive_hold():
+    cbm = WedgedAdapter(booting(8))
+    assert bus.recover(cbm, 8).startswith("73,")
+    assert cbm.calls == [("adapter_reset", False)]
+    stuck = held_forever(8)
+    with pytest.raises(bus.DriveUnresponsive, match="device 8: .*a drive is holding"):
+        bus.recover(stuck, 8, timeout=0.2)
+    assert stuck.resets == 1 + bus.RECOVERY_PULSES and not stuck.log

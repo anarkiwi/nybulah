@@ -201,22 +201,32 @@ derived boot bound, what was seen, that a drive is holding the bus and needs a
 power cycle, and that nothing was sent. No drive entry is marked failed for
 it, and `hwcheck`'s recovery does not reset again.
 
-The xum1541 firmware performs a RESET request only from its command loop, so
-an adapter wedged mid-transfer keeps its own CLK and DATA asserted and never
-resets the bus. A drive released by RESET lets go of the lines in reset and
-through its diagnostic, so lines held in one unchanged state from the reset to
-the outer limit (`Bus.adapter_held`) blame the adapter: `reset` (and
-`recover`) then resets it from its control endpoint with the bus flag
-(`cbm_adapter_reset(fd, 1)`, firmware v13, `OpenCBM.adapter_reset`), which
-also pulses RESET, and settles within a new outer limit. The adapter-only
-reset does not free lines a wedged adapter holds; the bus flag does. If the
-lines are still held in one state, or the library or firmware lacks the call,
-it USB-resets the adapter once (`USBDEVFS_RESET` on the `16d0:0504` usbfs
-node, `OpenCBM.usb_reset`), pulses RESET again and settles once more. The
-step record's `recovery` maps each recovery tried (`adapterreset`,
-`usbreset`) to `ok` or its error, and `adapter_reset` or `usb_reset` marks
-the one that freed the bus. Lines still held after both are reported as
-above. The `adapterreset` and `usbreset` steps do either recovery on request.
+The xum1541 firmware (v13) answers both reset requests on its control
+endpoint. `cbm_reset` (`XUM1541_RESET`) releases ATN, CLK, DATA and SRQ at
+once and leaves the RESET pulse to the command loop. `cbm_adapter_reset`
+(`XUM1541_ADAPTER_RESET`) always releases those lines and aborts the transfer
+in progress; its command loop then reinitialises the port (`board_init_iec`,
+`iec_init`) and the host library waits for that, clears the endpoint stalls
+and restores the I/O timeout. Its bus flag only adds the same RESET as
+`cbm_reset` (`iec_reset`: a RESET pulse, then `wait_for_free_bus`). The line
+state alone after a RESET cannot tell the adapter from a drive: the first poll
+is answered only after `iec_reset` returns, and a drive that keeps or retakes
+CLK and DATA reads the same as a wedged adapter.
+
+So `reset` (and `recover`) do not guess. Lines still held at the outer limit,
+or a RESET request that fails, run `adapterreset`: `cbm_adapter_reset(fd, 0)`
+(`OpenCBM.adapter_reset`), then one poll. The adapter has provably released
+its lines, so CLK or DATA free blames the adapter and CLK or DATA low is a
+drive's. It then pulses RESET and settles within a new outer limit; a drive
+still holding gets one more pulse and limit (`RECOVERY_PULSES`), and lines
+still held after that are reported as above, naming a drive. Only when the
+adapter-reset request itself fails (older library or firmware, or no answer)
+does it USB-reset the adapter instead (`USBDEVFS_RESET` on the `16d0:0504`
+usbfs node, `OpenCBM.usb_reset`); a USB reset cannot free a line a drive
+holds. The step record's `recovery` gives each reset's outcome
+(`adapter_reset`, `usb_reset`), `held_by` (`adapter` or `drive`) and the
+RESET pulses sent after the adapter reset (`pulses`). The `adapterreset` step
+does the same on request.
 
 A drive that does not answer once the lines are free fails its step and the
 script stops; `--keep-going` skips only that drive's later steps. A hung DOS

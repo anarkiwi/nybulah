@@ -411,6 +411,14 @@ class DOSBus:  # pylint: disable=too-many-instance-attributes
         for d in self.drives.values():
             d.restart(self.now)
 
+    def adapter_reset(self, reset_bus=True):
+        """Control-endpoint adapter reset: abort, release the host's lines and,
+        with reset_bus, pulse RESET."""
+        self.writes.append((self.now, "adapter reset"))
+        self.host_lines, self.addressed = 0, None
+        if reset_bus:
+            self.reset()
+
     def _lines(self, t):
         held = any(a <= t < b for d in self.drives.values() for a, b in d.held)
         return self.host_lines | (IEC_CLOCK | IEC_DATA if held else 0)

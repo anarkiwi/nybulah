@@ -145,8 +145,8 @@ class OpenCBM:  # pylint: disable=too-many-public-methods
 
     def usb_reset(self, sysfs=SYSFS_USB, usbfs=USBFS):
         """USB-reset the xum1541 (USBDEVFS_RESET on its usbfs node) and reopen
-        the driver: clears an adapter whose firmware no longer runs its command
-        loop, which a RESET request cannot reach."""
+        the driver: reinitialises an adapter whose control-endpoint reset
+        (adapter_reset) fails."""
         nodes = usb_nodes(sysfs, usbfs)
         if len(nodes) != 1:
             raise OpenCBMError(
