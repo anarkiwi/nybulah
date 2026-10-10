@@ -436,14 +436,19 @@ def _stable(truth):
 
 
 def _peaks_near(c, p, w, offsets, window, alpha):
-    """Per copy offset: the shift off it, within ``window``, of the most
-    significant correlation peak of the ``w`` bits of ``p`` read whole."""
+    """Per copy offset whose unshifted ``w`` bits lie inside ``c`` (elsewhere
+    their own peak is out of reach and the window's best is other bits'): the
+    shift off it, within ``window``, of the most significant correlation peak of
+    the ``w`` bits of ``p`` read whole."""
     agree, overlap = _correlate(c, p, w)
     pp, pc = p[w > 0].mean(), c.mean()
     z = _zscore(agree, overlap, pc * pp + (1 - pc) * (1 - pp))
     thr = _threshold(alpha, len(z))
+    used = np.flatnonzero(w)
     out = []
     for off in offsets:
+        if off + used[0] < 0 or off + used[-1] >= len(c):
+            continue
         lo = max(off + window[0] + len(p) - 1, 0)
         hi = min(off + window[1] + len(p), len(z))
         if lo < hi:
