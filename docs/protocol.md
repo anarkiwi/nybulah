@@ -641,9 +641,10 @@ Cycle tables (t = 0 at an SDR write, from the code):
 
 | path | status reads | data register read | next SDR write |
 |---|---|---|---|
-| `dl` data loop | 24 (28 with a count carry), then every 27 (ATN on each pass) | 37 | 41 (45) |
-| `w0` before the first DRQ | every 30 or less | 11 or less after the read that sees DRQ | 11 after the read |
-| `send` (one metadata byte, w0) | -14, 4, 28 | 13 (DRQ at 4), 37 (at 28) | metadata at 0, data at 40 or 48 |
+| `dl` data loop | 24 (28 with a count carry), then every 28 (ATN on each pass); 36 after a pass that sees bit 15 change, 45 when it counts a wrap | 13 after the read that sees DRQ (37) | 41 (45) |
+| `dfirst`, `s4`, `s28` into `dl` | 42 | | |
+| `w0` before the first DRQ | every 31 or less (28, then 18 or 31, around a bit 15 change); 45 around queuing a KEEP | 9 or 11 after the read that sees DRQ | 11 after the data register read |
+| `send` (one metadata byte, w0) | -14, 4, 28; `w0` again at 39 | 12 after -14 (no metadata write), 13 (DRQ at 4), 37 (at 28) | metadata at 0, data at 40 or 48 |
 | `plain` (WD idle) | | | 40 |
 
 Bounds (the shifter flags a byte within 39 cycles; a byte waits in the data
@@ -653,19 +654,29 @@ kbit/s):
 | quantity | worst case | budget | margin |
 |---|---|---|---|
 | SDR write spacing | 40 (`send` s4 path), 41 (`dl`) | > 39 | 1 cycle |
-| byte waiting in `dl` | 40 (27 + 13) | 64 | 24 |
-| first byte, from `w0` | read 41 after arrival; second byte read 106 after the first's arrival | 128 (third arrival) | 22 |
-| first byte during a metadata write | arrival after -14; second byte read at 94 | > 114 | 20 |
-| backlog | writes 40 apart against bytes 64 apart | | drains 24 cycles a byte |
+| byte waiting in `dl` | 41 (28 + 13); 58 (45 + 13) in the pass that counts a wrap | 64 | 6 |
+| first byte, from `w0` | read 56 after arrival (45 + 11, the KEEP pass; 42 otherwise); second byte read 122 after the first's arrival | 64; 128 (third arrival) | 8; 6 |
+| first byte during a metadata write | arrival after -14; second byte read at 95 | > 114 | 19 |
+| backlog | writes 41 apart against bytes 64 apart | | drains 23 cycles a byte |
 | CLK for metadata | asserted at -4, released at 16 to 24 | adapter samples 4-14 | 2 cycles |
 | ATN seen | every pass of `dl` and `w0` | adapter holds ATN 8622 us | |
 
-A stamp reads ICR 4 cycles and timer B low 22 cycles after its reference (the
-first byte's SDR write, the status read that saw the command end, or the one that
-saw the index): its microsecond time is the wrap count, plus one when ICR showed a
-wrap, plus one when it did not and the elapsed count is at most 9 (a wrap between
-the two reads). Every other ICR read is at least 32 cycles before a stamp's, so that
-case cannot come from a wrap already counted.
+Wraps are counted from timer B itself, as in `mfm_1581` (see "Without
+streaming"): every wait (`w0`, `dl`, and `bwait` through `tick`) polls timer B's
+high byte against `phase`, its value at the last poll, and bit 15 rising is a wrap;
+`phase` is taken at entry. No loop reads ICR, which loses the timer B flag to a read
+in the cycle before the underflow (VICE `cia_do_update_tb`), so an ICR-counted
+stream reads an index period one wrap short now and then. `w0` takes its status
+read before the new phase, so a DRQ there leaves the wrap to `dl`'s first pass; `dl`
+takes the new phase before its next status read, so a DRQ that comes every pass
+cannot defer it; it counts the timeout in Y.
+
+A stamp is the wrap count and `phase`, both from the last poll, then timer B high,
+low, high, the low byte read 19 cycles after its start (after the first byte's SDR
+write for t_first). Its time is the wrap count, plus one when bit 15 is set in the
+high byte on the low read's side of a borrow and clear in `phase` (a rise since the
+poll, which the next poll counts), times 65536, plus the elapsed count (~timer B).
+Polls are under half a wrap apart, so at most one rise lies between.
 
 Every read loop takes a pending DRQ before BUSY: Read Address and Read Sector clear
 BUSY with their last byte still in the data register.

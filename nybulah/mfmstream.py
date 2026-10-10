@@ -15,8 +15,6 @@ CODES = {M_START: "start", M_REC: "rec", M_KEEP: "keep", M_INDEX: "index"}
 ST_NOGO = 0xFF  # drive/mfmstream.s: the host never asserted CLK
 END = {0x40: "done", 0x44: "timeout", 0x48: "atn"}
 CHUNK = 0x01
-STAMP_ICR, STAMP_LO = 4, 22  # drive/mfmstream.s STAMP: cycles after the reference
-WINDOW_US = (STAMP_LO - STAMP_ICR) // 2  # a wrap in between leaves elapsed <= this
 TB_WRAP = 1 << 16
 EPOCH = 1 << 8  # the drive counts wraps in a byte
 REC_BYTES = 14  # two stamps, status, flags, count (lo, hi)
@@ -30,14 +28,14 @@ INCREMENT = 0x80
 
 
 def stamp_us(raw):
-    """Microseconds (modulo EPOCH wraps) of a stamp: wraps, ICR bit 1, timer B high,
-    low, high; the high read on the low read's side of a borrow, plus a wrap flagged at
-    the ICR read or one between it and the timer reads (no flag, elapsed <= WINDOW_US).
+    """Microseconds (modulo EPOCH wraps) of a stamp: wraps and timer B high at the
+    drive's last poll, then timer B high, low, high; the high read on the low read's
+    side of a borrow, plus the wrap bit 15 rising since the poll shows.
     """
-    wraps, flag, hi1, lo, hi2 = (int(v) for v in raw)
+    wraps, phase, hi1, lo, hi2 = (int(v) for v in raw)
     hi = hi2 if lo & 0x80 else hi1
     elapsed = (0xFF - hi) << 8 | (0xFF - lo)
-    epoch = wraps + bool(flag) + (not flag and elapsed <= WINDOW_US)
+    epoch = wraps + (hi >> 7 & ~phase >> 7 & 1)
     return (epoch % EPOCH) * TB_WRAP + elapsed
 
 

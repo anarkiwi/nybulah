@@ -7,10 +7,13 @@ from nybulah import mfmstream as ms
 from nybulah.stream import ESC
 
 
-def stamp(us_epoch, elapsed, flag=0):
-    """A drive stamp for elapsed microseconds into a wrap: timer B = ~elapsed."""
+def stamp(us_epoch, elapsed, phase=None):
+    """A drive stamp for elapsed microseconds into a wrap: timer B = ~elapsed, polled
+    last at phase (timer B high; by default the stamp's own)."""
     tb = 0xFFFF - elapsed
-    return bytes([us_epoch, flag, tb >> 8, tb & 0xFF, tb >> 8])
+    return bytes(
+        [us_epoch, tb >> 8 if phase is None else phase, tb >> 8, tb & 0xFF, tb >> 8]
+    )
 
 
 def pack(payload):
@@ -32,13 +35,34 @@ def frame(data=b"", meta=()):
 
 def test_stamp_rules():
     assert ms.stamp_us(stamp(3, 15)) == 3 * ms.TB_WRAP + 15
-    assert ms.stamp_us(stamp(3, 15, flag=2)) == 4 * ms.TB_WRAP + 15
-    assert ms.stamp_us(stamp(3, ms.WINDOW_US)) == 4 * ms.TB_WRAP + ms.WINDOW_US
-    assert ms.stamp_us(stamp(3, ms.WINDOW_US + 1)) == 3 * ms.TB_WRAP + 10
-    lo_high = bytes([1, 0, 0x12, 0xF0, 0x11])  # borrow between the reads
+    assert ms.stamp_us(stamp(3, 15, phase=0x01)) == 4 * ms.TB_WRAP + 15
+    assert ms.stamp_us(stamp(3, 0x7FFF, phase=0xFF)) == 3 * ms.TB_WRAP + 0x7FFF
+    assert ms.stamp_us(stamp(3, 0x8000, phase=0x80)) == 3 * ms.TB_WRAP + 0x8000
+    assert ms.stamp_us(stamp(0xFF, 7, phase=0x00)) == 7
+    lo_high = bytes([1, 0x12, 0x12, 0xF0, 0x11])  # borrow between the reads
     assert ms.stamp_us(lo_high) == ms.TB_WRAP + ((0xFF - 0x11) << 8 | 0x0F)
-    lo_low = bytes([1, 0, 0x12, 0x02, 0x11])
+    lo_low = bytes([1, 0x12, 0x12, 0x02, 0x11])
     assert ms.stamp_us(lo_low) == ms.TB_WRAP + ((0xFF - 0x12) << 8 | 0xFD)
+    risen = bytes([1, 0x00, 0x00, 0x05, 0xFF])  # wrap between the high reads
+    assert ms.stamp_us(risen) == ms.TB_WRAP + ((0xFF - 0x00) << 8 | 0xFA)
+    after = bytes([1, 0x00, 0x00, 0xFD, 0xFF])
+    assert ms.stamp_us(after) == 2 * ms.TB_WRAP + 2
+
+
+def test_stamps_follow_a_polled_timer():
+    """A drive that polls timer B under half a wrap apart, counts bit 15 rising and
+    stamps before each poll: every stamp decodes to the timer's microseconds."""
+    rng = np.random.default_rng(1)
+    t = np.cumsum(rng.integers(1, 0x8000, 4000))
+    tb = 0xFFFF - (t & 0xFFFF)
+    wraps, phase, got = 0, tb[0] >> 8, []
+    for k in range(1, len(t)):
+        hi = tb[k] >> 8
+        got.append(ms.stamp_us(bytes([wraps & 0xFF, phase, hi, tb[k] & 0xFF, hi])))
+        wraps += int(hi >> 7 & ~phase >> 7 & 1)
+        phase = hi
+    want = (t[1:] >> 16) % ms.EPOCH * ms.TB_WRAP + (t[1:] & 0xFFFF)
+    assert got == want.tolist()
 
 
 def test_unwrap_across_the_wrap_counter():

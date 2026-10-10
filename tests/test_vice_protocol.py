@@ -308,10 +308,26 @@ def test_main_prints_report(monkeypatch, capsys):
     monkeypatch.setattr(vb, "writes", lambda *a: calls.append(a) or {"w": 1})
     monkeypatch.setattr(vb, "stream", lambda *a, **k: calls.append((a, k)) or {"s": 2})
     assert vb.main(["writes", "--cylinder", "3"]) == {"w": 1}
-    assert vb.main(["stream", "--code2", "0x782", "--head", "4", "--peers"]) == {"s": 2}
+    argv = [
+        "stream",
+        "--code2",
+        "0x782",
+        "--head",
+        "4",
+        "--peers",
+        "--index-waits",
+        "9",
+    ]
+    assert vb.main(argv) == {"s": 2}
     assert calls[0] == (None, 3, 0)
     _, kw = calls[1]
-    assert kw == {"code2": 0x782, "under": None, "head_writes": 4, "peers": True}
+    assert kw == {
+        "code2": 0x782,
+        "under": None,
+        "head_writes": 4,
+        "peers": True,
+        "index_waits": 9,
+    }
     assert '"s": 2' in capsys.readouterr().out
 
 

@@ -259,22 +259,24 @@ def stream(  # pylint: disable=too-many-locals,too-many-arguments
     head_writes=0,
     seed=1,
     peers=False,
+    index_waits=0,
 ):
     """Read Track streamed by mfmstream_1581 (from code) to the emulated C128, the
     head placed by the mfm_1581 of under, called with the zero page the monitor's J
     leaves (and a 1571 and a 1541 on the bus with peers): the parsed stream, the
     drive's return, sectors decoded from it against the D81, the cycles from START
     to the first KEEP, the I/O trace (from the call to its head_writes-th SDR write,
-    and at the end)."""
+    and at the end). index_waits index edge waits run first."""
     image = random_d81(seed)
     with Bench(
         image, under, "x128", receiver=True, peers=BUS_PEERS if peers else None
     ) as bench:
         bench.place(cylinder, side)
-        entry = ms.entry(ms.OP_READ_TRACK, cylinder, rep=revolutions)
+        entries = [ms.entry(ms.OP_INDEX, rep=index_waits)] if index_waits else []
+        entries.append(ms.entry(ms.OP_READ_TRACK, cylinder, rep=revolutions))
         tmo = bench.drive._tmo(r1581.RNF_REVS + 1)  # pylint: disable=protected-access
         segments = stream_code(
-            loader(code)(r1581.STREAM_CODE), ms.command_list([entry]), tmo, code2
+            loader(code)(r1581.STREAM_CODE), ms.command_list(entries), tmo, code2
         )
         for addr, part in segments:
             bench.mon.write(addr, part)
@@ -296,8 +298,15 @@ def stream(  # pylint: disable=too-many-locals,too-many-arguments
         "adapter": got.adapter,
         "drive_end": got.drive_end,
         "keepalives": got.keepalives,
+        "index_us": got.index_us.tolist(),
         "commands": [
-            {"bytes": len(c.data), "status": _status(c.status), "timeout": c.timeout}
+            {
+                "bytes": len(c.data),
+                "status": _status(c.status),
+                "timeout": c.timeout,
+                "t_first_us": c.t_first,
+                "t_end_us": c.t_end,
+            }
             for c in got.commands
         ],
         "metadata_head": [f"${v:02X}" for v in data[(lines & 0x40) == 0][:8]],
@@ -379,6 +388,9 @@ def main(argv=None):
     parser.add_argument("--side", type=int, default=0)
     parser.add_argument("--revolutions", type=int, default=2)
     parser.add_argument(
+        "--index-waits", type=int, default=0, help="stream: index edges stamped first"
+    )
+    parser.add_argument(
         "--code2", type=lambda s: int(s, 0), default=r1581.CODE2, help="stream part 2"
     )
     args = parser.parse_args(argv)
@@ -394,6 +406,7 @@ def main(argv=None):
             under=args.under,
             head_writes=args.head,
             peers=args.peers,
+            index_waits=args.index_waits,
         )
     json.dump(report, sys.stdout, indent=1)
     sys.stdout.write("\n")

@@ -350,7 +350,7 @@ def test_stream_keepalives_do_not_need_timer_b(media):
     no_stops(sim)
 
 
-KEEP_PASSES, W0_PASS = 256, 50  # drive/mfmstream.s
+KEEP_PASSES, W0_PASS = 256, 51  # drive/mfmstream.s
 PB_CLK = 0x08
 
 
