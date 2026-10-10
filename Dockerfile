@@ -49,6 +49,33 @@ FROM opencbm-git AS opencbm-local
 
 FROM ${OPENCBM_IMAGE} AS opencbm-image
 
+# VICE (GPL, run as a separate program) built headless from a pinned release
+# tarball; its bundled ROMs stay in the image (data/C64, C128, DRIVES).
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS vice-build
+ARG VICE_VERSION=3.10
+ARG VICE_SHA256=8e5bac18cbcb9f192380ad3ef881f8790f5b75c41d7b3da65d831985d864d6d1
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bison build-essential ca-certificates curl dos2unix file flex pkg-config xa65 zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/vice.tar.gz \
+        "https://downloads.sourceforge.net/project/vice-emu/releases/vice-${VICE_VERSION}.tar.gz" \
+    && echo "${VICE_SHA256}  /tmp/vice.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/vice.tar.gz -C /tmp && rm /tmp/vice.tar.gz
+WORKDIR /tmp/vice-${VICE_VERSION}
+RUN ./configure --prefix=/opt/vice --enable-headlessui --disable-html-docs \
+        --disable-pdf-docs --without-alsa --without-pulse --without-png \
+        --without-flac --without-mpg123 --without-vorbis --without-lame \
+        --without-portaudio --disable-ethernet --disable-realdevice --disable-midi \
+        --disable-rs232 --disable-openmp --without-libcurl \
+    && make -j"$(nproc)" -C src x64sc x128 c1541 \
+    && mkdir -p /opt/vice/bin /opt/vice/share/vice \
+    && cp src/x64sc src/x128 src/c1541 /opt/vice/bin/ \
+    && cp -r data/C64 data/C128 data/DRIVES /opt/vice/share/vice/
+
+FROM scratch AS vice
+COPY --from=vice-build /opt/vice/ /opt/vice/
+
 # Python dependencies are resolved on plain Ubuntu so an OpenCBM change keeps them cached.
 FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS pydeps
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
@@ -78,6 +105,10 @@ COPY --from=drivecode /out/ nybulah/drivecode/
 RUN pip install --no-cache-dir --no-deps -e .
 RUN python -c "from nybulah import simfast; simfast.warm()" \
     && chmod -R a+rwX "$NUMBA_CACHE_DIR"
+
+FROM test AS test-vice
+COPY --from=vice /opt/vice/ /opt/vice/
+ENV PATH=/opt/vice/bin:$PATH NYBULAH_VICE_DATA=/opt/vice/share/vice
 
 FROM base AS runtime
 COPY --from=pydeps /venv /venv

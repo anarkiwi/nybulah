@@ -68,6 +68,7 @@ nybulah survey CORPUS --out survey/             # corpus statistics and threshol
 - [formats.md](docs/formats.md): image formats, flux decoding, licences
 - [scenarios.md](docs/scenarios.md): track scenarios in preserved images
 - [comparison.md](docs/comparison.md): other tools, historic copiers, gaps
+- [vice.md](docs/vice.md): drive code on VICE's true drive emulation (binary monitor bench)
 
 ## Development
 
@@ -77,9 +78,12 @@ docker run --rm -v "$PWD:/app" -w /app nybulah:test python -m pytest -n auto
 ```
 
 Drive code is ca65 assembly in `drive/`, run in tests on a compiled drive
-simulator (`nybulah.simfast`; `NYBULAH_SIM=py65` selects the reference model).
+simulator (`nybulah.simfast`; `NYBULAH_SIM=py65` selects the reference model)
+and on VICE's drive emulation (`--target test-vice`, `pytest -m vice`;
+[vice.md](docs/vice.md)).
 
 ## Licence
 
 Apache-2.0. nybulah contains no nibtools or OpenCBM code; the modified
-firmware is in its own GPL-2.0 repository.
+firmware is in its own GPL-2.0 repository. The `test-vice` image builds VICE
+(GPL-2.0) from its release tarball and runs it as a separate program.

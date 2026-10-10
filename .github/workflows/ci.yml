@@ -60,3 +60,59 @@ jobs:
         run: >-
           docker run --rm nybulah:test python -m pytest -n auto -p no:cacheprovider
           --cov=nybulah --cov-report=term-missing --cov-fail-under=85
+
+  vice:
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: key
+        run: echo "key=$(.github/basecache.sh key)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v6
+        with:
+          path: ~/basecache
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: basecache-
+      - if: steps.cache.outputs.cache-hit != 'true' && env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: .github/basecache.sh fetch
+      - id: base
+        run: |
+          {
+            echo 'contexts<<EOF'
+            .github/basecache.sh up
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      - name: Build VICE
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          build-contexts: ${{ steps.base.outputs.contexts }}
+          target: vice
+          cache-from: type=gha,scope=vice
+          cache-to: type=gha,scope=vice,mode=max
+      - name: Build VICE test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          build-contexts: ${{ steps.base.outputs.contexts }}
+          target: test-vice
+          tags: nybulah:test-vice
+          load: true
+          cache-from: |
+            type=gha,scope=vice
+            type=gha,scope=test
+            type=gha,scope=test-vice
+          cache-to: type=gha,scope=test-vice,mode=max
+      - name: pytest (VICE)
+        run: >-
+          docker run --rm nybulah:test-vice python -m pytest -n auto -p no:cacheprovider
+          tests/test_vice.py tests/test_vice_protocol.py
+          --cov=nybulah.vice --cov=nybulah.vicebench --cov-report=term-missing
+          --cov-fail-under=85
