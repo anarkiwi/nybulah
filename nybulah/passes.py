@@ -408,6 +408,14 @@ class Syncs:  # pylint: disable=too-many-instance-attributes
         """Ones of each run that byte ready never latched."""
         return np.maximum(self.runs - self.latched, 0)
 
+    @property
+    def whole(self):
+        """Per sync, whether the bytes hold all of it: its run starts after a
+        latched zero, it ends inside the known context, its length is bounded."""
+        pos = np.asarray(self.positions, np.int64)
+        inside = (pos >= self.first) & (pos < self.valid)
+        return inside & (self.latched < CELLS * pos) & (self.hi >= 0)
+
 
 def _syncs(rows, latched, span, byte_cycles, unmatched):
     """Syncs from ``(position, run, lo, hi)`` rows (run 0: no sync).

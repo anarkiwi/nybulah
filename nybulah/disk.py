@@ -2,6 +2,7 @@
 
 import dataclasses
 import pathlib
+import sys
 from collections import Counter
 
 import numpy as np
@@ -19,10 +20,11 @@ from .analysis.sector import (
 )
 from .formats.d64 import BAM_TRACK, D64
 from .formats.d71 import D71, SIDE_TRACKS
-from .nibbler import NPAGES, TrackError
+from .nibbler import NPAGES, ST_NOSYNC, TrackError
 
 SIDE1_TRACK_BASE = SIDE_TRACKS
 PROBE_SYNC = 5
+PROBE_TRIES = 3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -131,20 +133,41 @@ def read_d71(nib, **kw):
     return D71(*read_jobs(nib, d71_jobs(), **kw))
 
 
+def probe_cells(cap):
+    """Cells from a probe capture's start, the end of the probe sync, to the end
+    of the sync's next pass; None unless the capture began on the sync and holds
+    that pass whole."""
+    whole = np.flatnonzero(cap.syncs.whole)
+    if cap.status & ST_NOSYNC or not whole.size:
+        return None
+    return 8 * int(cap.positions[whole[0]]) + int(cap.hidden[whole[0]])
+
+
 def revolution_cells(nib, halftrack, archive=None, density=0):
     """Bit cells per revolution this drive writes at ``density`` (destroys the track).
 
     Writes filler ending in a single sync over more than one revolution, then
-    measures the distance from that sync to its next pass.
+    measures the distance from that sync to its next pass, retaking a capture
+    that does not hold the pass whole up to PROBE_TRIES times.
     """
     archive = archive if isinstance(archive, Archive) else Archive(archive)
     stream = bytes([GAP_BYTE]) * (NPAGES * 256 - PROBE_SYNC) + b"\xff" * PROBE_SYNC
     nib.write_track(halftrack, stream, density=density)
     job = TrackJob(0, halftrack // 2, halftrack // 2)
-    cap = archive("probe", job, nib.capture(halftrack, density=density, start="sync"))
-    if not cap.positions.size:
-        raise TrackError("probe sync not found")
-    return 8 * int(cap.positions[0]) + int(cap.hidden[0])
+    for attempt in range(1, PROBE_TRIES + 1):
+        cap = nib.capture(halftrack, density=density, start="sync")
+        cells = probe_cells(archive("probe", job, cap))
+        if cells is not None:
+            return cells
+        tqdm.write(
+            f"probe h{halftrack} d{density}: capture {attempt}/{PROBE_TRIES} holds"
+            f" no whole sync pass ({cap.valid_bytes}/{len(cap.data)} bytes known)",
+            file=sys.stderr,
+        )
+    raise TrackError(
+        f"probe h{halftrack} d{density}: no capture of {PROBE_TRIES} held the"
+        " probe sync's next pass whole"
+    )
 
 
 def cells_at(cells0, density):
