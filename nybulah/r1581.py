@@ -444,10 +444,14 @@ def _revs(e):
 
 
 def stream_state(raw):
-    """drive/mfmstream.s's state block: entries started, the list position, the last
-    record (stamps in microseconds, WD status, flags, data bytes)."""
+    """drive/mfmstream.s's state block, cleared when the stream starts: entries
+    started, the list position, whether a command's first data byte was written
+    (first_set), the stamps in microseconds, the WD status (read once valid after the
+    last command write, until a record replaced it), flags and the data bytes (set by a
+    record or an ATN abort)."""
     b = bytes(raw)
     return {
+        "first_set": any(b[6:11]),
         "entries_started": b[0],
         "op": b[1],
         "rep_left": b[2],

@@ -377,6 +377,7 @@ def test_stream_out_of_step_reply_sends_nothing_more(media, monkeypatch):
     state = diag["drive_state"]
     assert "error" not in state, state
     assert state["entries_started"] == 1 and state["op"] == ms.OP_READ_TRACK
+    assert state["first_set"]
     assert state["count"] >= mfm.TRACK_BYTES - 1 and state["wd_status"] & ST_BUSY == 0
     assert state["t_end_us"] - state["t_first_us"] == pytest.approx(
         drive.period_us, rel=1e-3
@@ -384,6 +385,22 @@ def test_stream_out_of_step_reply_sends_nothing_more(media, monkeypatch):
     assert isinstance(lost.value, monitor.RECOVERABLE) and not drive.mon.running
     drive.close()
     assert not sent
+    no_stops(sim)
+
+
+def test_stream_state_holds_the_status_after_the_command_write(media, monkeypatch):
+    """Stopped by the adapter mid-command, the state keeps the WD status read once
+    valid after the Read Track write (busy, MO raised) and the first byte's stamp."""
+    cbm, sim, drive = stream_rig(media, cylinder=4)
+    drive.motor(True)
+    drive.home(4)
+    slow = cbm.srq2_stream
+    monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
+    got = drive.stream([ms.entry(ms.OP_INDEX), ms.entry(ms.OP_READ_TRACK, 4)])
+    state = got.state
+    assert got.adapter == "overrun" and got.reply[0] == 0x48
+    assert state["entries_started"] == 2 and state["first_set"]
+    assert state["wd_status"] & (ST_BUSY | r1581.ST_MO) == ST_BUSY | r1581.ST_MO
     no_stops(sim)
 
 
@@ -448,7 +465,9 @@ def test_throttled_host_overruns_and_the_drive_stops(media, monkeypatch):
     monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
     got = drive.stream([ms.entry(ms.OP_READ_TRACK, 8)])
     assert got.adapter == "overrun" and got.reply[0] == 0x48
-    assert got.state["entries_started"] == 1 and got.state["flags"] == 0
+    state = got.state
+    assert state["entries_started"] == 1 and state["flags"] == 0
+    assert state["first_set"] and state["count"] > 1
     assert got.diagnosis()["drive"] == "atn" and got.reply[1] == 1
     monkeypatch.setattr(cbm, "srq2_stream", slow)
     assert drive.read_track(1).meta["adapter"] == "done"

@@ -680,8 +680,10 @@ code nor `ST_NOGO` was read from a stream still running: `StreamLost` ends the
 session with no further transfer and the monitor is recovered by a bus reset.
 
 The last 20 bytes of the first block (`$04EC-$04FF`, `r1581.STATE_AT`) hold the
-stream's state: entries started, the entry and repeats left, and the last record
-(both stamps, WD status, flags, data bytes). An incomplete stream reads it through
+stream's state, cleared when it starts: entries started, the entry and repeats
+left, the first stamp (set by a command's first data byte), the end stamp, the WD
+status (read once valid after each command write, replaced by a record or the
+timeout), flags and the data bytes (set by a record or an ATN abort). An incomplete stream reads it through
 the monitor; an out-of-step one, after the drive's longest remaining stream and its
 monitor's watchdog, over DOS M-R before the recovery's bus reset, which the ROM's
 RAM test (dskint.src) would overwrite. It appears as `diagnosis.drive_state`.
@@ -701,3 +703,20 @@ bit (`msub.src` precmp: set from cylinder 44 on). Afterwards the host runs DOS j
 `$82` (controller reset: cache invalidated, no head movement) through the job queue
 at `$0002`, and waits 0.32 s before a session that writes the cache (DOS writes a
 dirty cache back after 32 controller ticks of bus silence, `idle.src`).
+
+### Reference: VICE's WD177x and 8520
+
+VICE (GPL, read for behaviour only) agrees with the model on Read Track: the
+command is matched on its top four bits, so `$E8` is Read Track with h set
+(`drive/iec/wd1770.c:119,137`); BUSY rises 24 us after the write and MO with it
+(`wd1770.c:230-250`); bytes start at the first index edge after the command and stop
+at the next (`wd1770.c:638-672`). Its 8520 loads a written SDR byte two cycles
+later, flags it two cycles after the eighth CNT fall and chains a byte written
+during a transfer with no gap (`core/ciacore.c:914-929,1736-1790`); it never drops
+a written byte. Where VICE differs the model keeps the datasheet or 1581 hardware
+evidence: VICE accepts any command while busy (`wd1770.c:821-871`; the datasheet
+accepts only Force Interrupt), clears MO and shows live type I bits after an idle
+$D0 (`wd1770.c:799-813,210-214`; the 1581 reads $80 there with T0 clear), drops MO
+after 10 idle index pulses (`wd1770.c:222`; the datasheet says 9) and delivers the
+1581's fast serial a byte at a time with no SRQ/DATA timing
+(`drive/iec/cia1581d.c:233-239`).

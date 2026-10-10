@@ -306,9 +306,21 @@ put:    sty py
         ldy py
         rts
 
-; State at the end of the first block (nybulah.r1581.STATE), readable after
-; the stream ends, also over DOS M-R once the monitor has left.
+; count = the data bytes so far (cnt).
+keepcnt:
+        lda cnt
+        sta count
+        lda cnt + 1
+        sta count + 1
+        rts
+
+; State at the end of the first block (nybulah.r1581.STATE_AT), cleared when
+; the stream starts and readable after it ends, also over DOS M-R once the
+; monitor has left: first is set by a command's first data byte; stat holds
+; the WD status read once valid after each command write until a record or
+; the timeout replaces it; count is set by a record and by an ATN abort.
 STATE_LEN = 20
+
         .res $0500 - STATE_LEN - *
 state:
 issued: .res 1
@@ -393,10 +405,7 @@ pret:   rts
 
 ; Queue a REC with flags A.
 rec:    sta flags
-        lda cnt
-        sta count
-        lda cnt + 1
-        sta count + 1
+        jsr keepcnt
         lda #M_REC
         jsr put
         ldy #0
@@ -431,7 +440,8 @@ timeout:
         lda #END_TIMEOUT
         jmp finish
 
-abort:  jsr force
+abort:  jsr keepcnt
+        jsr force
         lda #END_ATN
         jmp finish
 
@@ -497,10 +507,11 @@ itmo:   jmp timeout
 stream: lda #0
         sta qhead
         sta qtail
-        sta lp
         sta wraps
-        sta rep
-        sta issued
+        ldx #STATE_LEN - 1
+:       sta state,x
+        dex
+        bpl :-
         WDTEST
         lda WDTRK
         sta trksave
@@ -576,6 +587,7 @@ again:  dec rep
         inc L + 2,x
 :       lda op
         jsr wdcmd
+        sta stat                        ; the status once valid, until the end
         jmp w0
 
 done:   lda #M_END
