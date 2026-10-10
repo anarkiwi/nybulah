@@ -15,7 +15,7 @@ BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
 	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin $(OUT)/ciaprobe.bin) \
 	$(M1581:%=$(OUT)/monitor_%_1581.bin) $(OUT)/ciaprobe_1581.bin \
-	$(MFM:%=$(OUT)/%_1581.bin)
+	$(MFM:%=$(OUT)/%_1581.bin) $(OUT)/ramtest_10.bin $(OUT)/ramtest_11.bin
 
 all: $(BINS)
 
@@ -49,6 +49,11 @@ $(OUT)/%_1581.bin: %.s mfm.cfg mfm.inc
 	ld65 -C mfm.cfg -o $@ $(OUT)/$*_1581.o
 	rm -f $(OUT)/$*_1581.o
 
+$(OUT)/ramtest_%.bin: ramtest.s
+	ca65 -t none -o $(OUT)/ramtest_$*.o $<
+	ld65 -t none -S '$$$*00' -o $@ $(OUT)/ramtest_$*.o
+	rm -f $(OUT)/ramtest_$*.o
+
 $(OUT)/ciaprobe.bin: ciaprobe.s
 	ca65 -t none -o $(OUT)/ciaprobe.o $<
 	ld65 -t none -S '$$0300' -o $@ $(OUT)/ciaprobe.o
@@ -75,6 +80,6 @@ $(OUT)/sense_1571.bin: sense.s sense.cfg
 	rm -f $(OUT)/sense_1571.o
 
 clean:
-	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/mfm*.bin
+	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/mfm*.bin $(OUT)/ramtest_*.bin
 
 .PHONY: all clean

@@ -104,5 +104,6 @@ read-circuit model. Conversion to G64, G71, D64 and P64 keeps every track
 
 `hwcheck` (identify drives, probe RAM, bench transports), `homeprobe` (1571
 track 00 sensor and homing plan), `streamprobe` (one streamed track),
-`ramcheck` (RAM captures against a stream), `ramprobe` and `bench`
+`ramcheck` (RAM captures against a stream), `ramtest` (drive RAM march and link
+transfer test), `ramprobe` and `bench`
 ([hardware.md](hardware.md)). `nybulah <command> --help` lists the options.
