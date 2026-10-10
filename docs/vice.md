@@ -60,7 +60,7 @@ prints a JSON report:
 
 ```sh
 python -m nybulah.vicebench writes [--drivecode DIR]
-python -m nybulah.vicebench stream [--drivecode DIR] [--code2 0x0782] [--under DIR] [--head N]
+python -m nybulah.vicebench stream [--drivecode DIR] [--code2 0x0782] [--under DIR] [--head N] [--peers]
 ```
 
 - `writes` runs, on one side:
@@ -70,14 +70,56 @@ python -m nybulah.vicebench stream [--drivecode DIR] [--code2 0x0782] [--under D
     DRQ and the first data byte, the longest gap between data bytes and the PCs
     in that gap, and the final status;
   - finally it quits VICE, which writes the disk back, and compares the D81.
-- `stream` runs Read Track of `mfmstream_1581` to the C128. It reports the
-  drive's return, the parsed records, and the sectors decoded from each
-  revolution against the D81. `--head N` also traces every CIA and WD register
-  access from the call to the Nth SDR write.
+- `stream` runs Read Track of `mfmstream_1581` to the C128. The call starts with
+  the zero page the monitor's J leaves: `drive/burst.inc` reads each command
+  burst (address, length, op) into `ptr..ptr+4` (`$30-$34`), so J to `$0300`
+  enters with `$31 = $03`. It reports the drive's return, the parsed records,
+  the sectors decoded from each revolution against the D81, and the drive cycles
+  from START to the first KEEP. `--head N` also traces every CIA and WD register
+  access from the call to the Nth SDR write. `--peers` puts a 1571 on unit 8 and
+  a 1541 on unit 10, as on the hardware bus.
 
 `--drivecode DIR` takes another build's `.bin` files, for example a branch built
 with `make -C drive OUT=DIR`. `--code2` sets where the stream code's second part
 loads. `--under` names the build whose `mfm_1581` places the head.
+
+## 1581 stream: the early KEEP and the 8520
+
+On hardware the adapter received START, one KEEP shortly after it, then nothing
+until its gap timeout. The early KEEP comes from the stream's pass counter `kc`
+(`$31`), which the stream code did not initialise. Under the monitor, J leaves
+`$03` there (the high byte of the call address), so the first KEEP was queued on
+the third `w0` pass: 296 drive cycles after START, on VICE with the J zero page
+and in `nybulah.sim` alike. `DriveMonitor.call` had left `$31 = 0`, a full 256
+passes. `stream` now clears `kc`, so the first KEEP comes a full count of passes
+after START on every entry (`test_stream_first_keepalive_counts_every_pass`,
+`test_1581_read_track_streams_to_c128`).
+
+The early KEEP does not explain the silence after it. An earlier build, whose
+keepalives followed timer B and had no such counter, showed START then silence as
+well. With the J zero page, and with a 1571 and a 1541 on the bus, VICE runs the
+same build to the end: START, KEEPs every 256 passes, two full revolutions, every
+sector matching. The relevant 8520 points, VICE against the MOS 6526/8520 data
+sheets:
+
+- An ICR read returns and clears every flag, including SP (data sheet: "the
+  interrupt data register is cleared ... when read"; VICE
+  `core/ciacore.c:1288-1352`). `w0` reads ICR on every pass and so clears the
+  SP flag of each byte. No send path in `mfmstream.s` waits for SP: writes are spaced by
+  cycle count (40 or more apart), and the one SP wait, in `finish`, is bounded.
+  A lost flag cannot hang the stream.
+- In output mode a written SDR byte starts at the next timer A underflow and
+  shifts at half the underflow rate; the flag follows the eighth CNT pulse (data
+  sheet, Serial Port). VICE models the same inside the drive's CIA, cycle by cycle
+  (`ciacore.c:914-929`, `ciacore_intsdr` at `1723-1830`), and only the handover to
+  the computer is byte-level (`drive/iec/cia1581d.c` `store_sdr`).
+- The leftover timer B flag (`$83` at the first ICR read) counts one wrap early.
+  It shortens the command timeout by one wrap and does not change the path.
+
+Every exit of the wait (`dfirst`, `wend`, `wwrap`, `wabort`) sends within a pass
+count or a record, and every one is reproduced on VICE. What remains of the
+hardware silence lies outside VICE's model: the fast serial bus at the bit level
+(SRQ and DATA timing between the 1581, the other drives and the adapter).
 
 ## Limits
 

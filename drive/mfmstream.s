@@ -62,7 +62,8 @@ QMASK    = $1F
 ; a byte the adapter waits through.
 ADAPTER_GAP_US = 20000
 KEEP_PASSES = 256               ; kc wraps: a KEEP per 256 passes
-W0_PASS = 51                    ; cycles of a w0 pass that sends nothing
+.assert KEEP_PASSES = 256, error, "kc counts down from 0"
+W0_PASS = 50                    ; cycles of a w0 pass that sends nothing
 BW_PASS = 76                    ; cycles of a bwait pass that sends nothing
 .assert KEEP_PASSES * W0_PASS < ADAPTER_GAP_US * CPU_MHZ, error, "w0 keepalive"
 .assert KEEP_PASSES * BW_PASS < ADAPTER_GAP_US * CPU_MHZ, error, "bwait keepalive"
@@ -72,7 +73,7 @@ STAMP_LO = 22                   ; write (or status read) -> timer B low read
 STAMP_ICR = 4                   ; write (or status read) -> ICR read
 
 qhead   = $30
-kc      = $31                   ; wait passes left to the next KEEP
+kc      = $31                   ; wait passes left to the next KEEP (0: 256)
 cnt     = $32                   ; data bytes of the command
 tmo     = $34
 wraps   = $35
@@ -149,11 +150,11 @@ w0:     WDOK
         lda WDSTAT                      ; 4     u = 30
         and #ST_DRQ                     ; 2
         BR bne, dfirst                  ; 2
-        lda qhead                       ; 4
+        lda qhead                       ; 3
         cmp qtail                       ; 3
         BR bne, wsend                   ; 2
         dec kc                          ; 5
-        BR bne, w0                      ; 3     u = 51: the next read at 55
+        BR bne, w0                      ; 3     u = 50: the next read at 54
         lda #M_KEEP
         jsr put
         jmp w0
@@ -508,6 +509,7 @@ stream: lda #0
         sta qhead
         sta qtail
         sta wraps
+        sta kc                          ; KEEP_PASSES passes to the first KEEP
         ldx #STATE_LEN - 1
 :       sta state,x
         dex

@@ -625,7 +625,7 @@ straight to the shift register; metadata (CLK asserted) carries a record per com
 (`$0C`: two stamps, the WD status, a timeout flag and the byte count, packed into
 six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, every 256
 passes of a wait loop: before a command's first DRQ, for an index edge, and for
-busy to clear after a force interrupt; the passes are counted, not timed by timer
+busy to clear after a force interrupt; the passes are counted from a counter the stream clears at entry, not timed by timer
 B, and 256 of the longest pass fit in the adapter's 20 ms wait for the next byte) and the v12
 END family. `nybulah.mfmstream.MfmStream` parses it.
 

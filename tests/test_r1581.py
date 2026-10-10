@@ -350,6 +350,37 @@ def test_stream_keepalives_do_not_need_timer_b(media):
     no_stops(sim)
 
 
+KEEP_PASSES, W0_PASS = 256, 50  # drive/mfmstream.s
+PB_CLK = 0x08
+
+
+def test_stream_first_keepalive_counts_every_pass(media):
+    """J leaves the command burst (address, length, op) in the monitor's ptr..ptr+4,
+    under the stream's pass counter: the first KEEP still waits a full count of
+    passes after START."""
+    _, sim, drive = stream_rig(media, cylinder=5)
+    drive.motor(True)
+    drive.home(5)
+    meta, write, pb = [], sim.cia.write, [0]
+
+    def hooked(reg, v, c):
+        if reg == 1:
+            pb[0] = v
+        elif reg == 12:
+            meta.append((v, c, bool(pb[0] & PB_CLK)))
+        return write(reg, v, c)
+
+    sim.cia.write = hooked
+    got = drive.stream([ms.entry(ms.OP_READ_TRACK, 5)])
+    assert got.complete and got.keepalives > 0
+    v, c, clk = (np.array(x) for x in zip(*meta))
+    start = np.flatnonzero(clk & (v == ms.M_START))[0]
+    keep = np.flatnonzero(clk & (v == ms.M_KEEP))
+    assert keep[0] == start + 1
+    assert c[keep[0]] - c[start] >= (KEEP_PASSES - 1) * W0_PASS
+    no_stops(sim)
+
+
 def test_stream_index_wait_after_a_command_keeps_the_stream_alive(media):
     """A force interrupt whose busy outlasts the adapter's gap, after the stream has
     started, is waited out with keepalives."""
