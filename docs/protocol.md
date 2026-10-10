@@ -709,7 +709,18 @@ before its DRQ wait, so it is written within one status poll of the DRQ; a token
 read between runs, inside the byte time the WD shifts the last one. The first byte
 is ready before the Write Track command goes out (the WD gives up unless it is
 written within three of its byte clocks). Read loops read the data register within
-one poll plus 13 cycles. Write commands carry the DOS's precompensation
+one poll plus 13 cycles.
+
+Times (index edges, the first byte of Read Address, Restore) count timer B wraps
+from timer B itself: each wait polls the high byte, and bit 15 rising is a wrap. A
+stamp is resolved against the poll after it (less one wrap when bit 15 has risen
+in between). The ICR timer B flag is not reliable for counting: an ICR read in the
+cycle before timer B underflows loses the flag while bit 7 still rises (the 6526
+timer B bug, which VICE models in `cia_do_update_tb`, `src/core/ciacore.c`), and a
+read in the cycle the flag sets can return it without bit 7 and clear it. A wait
+polling ICR meets either race now and then; an index period then reads one wrap
+short. The write loops still spend their timeout on
+ICR bit 7: a wrap lost there only lengthens it. Write commands carry the DOS's precompensation
 bit (`msub.src` precmp: set from cylinder 44 on). Afterwards the host runs DOS job
 `$82` (controller reset: cache invalidated, no head movement) through the job queue
 at `$0002`, and waits 0.32 s before a session that writes the cache (DOS writes a

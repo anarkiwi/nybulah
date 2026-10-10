@@ -44,10 +44,19 @@
 ;
 ; Write commands carry the precompensation bit the DOS gives P_CYL. Every
 ; wait counts timer B wraps (65536 us) into P_TMO and gives up when it runs
-; out (any CIA flag the mask enables counts: the ICR read clears them all).
-; Times are 24 bit microseconds: wraps << 16 | elapsed (= ~timer B).
+; out. Times are 24 bit microseconds: wraps << 16 | elapsed (= ~timer B).
+; Wraps are read from timer B itself (TBPOLL, TBLOOP): bit 15 rising is a
+; wrap, the phase taken at setup. The ICR timer B flag is not used for
+; them: an ICR read the cycle before timer B underflows loses the flag
+; (6526/8520 timer B bug), and one in the cycle the flag sets can return
+; it without bit 7 and clear it. The write loops spend P_TMO on ICR bit 7
+; (any flag the mask enables, the shorter poll): a wrap lost there only
+; lengthens the timeout.
 
         .include "mfm.inc"
+
+wraps    = tmp
+phase    = tmp + 1              ; timer B high at the last poll (bit 15)
 
         .org $0300
 
@@ -76,7 +85,6 @@ P_T0:   .res 3
 P_T1:   .res 3
 P_ID:   .res 6
 P_RS:   .res 4
-wraps:  .res 1
 tmo:    .res 1
 fill:   .res 1
 trksave: .res 1
@@ -109,10 +117,16 @@ wdgo:   jsr wdcmd
         WDIDLE
         rts
 
-; A wrap seen: count it and spend a unit of the timeout; Z set when it ran
-; out. Called from the waits whenever ICR bit 7 is set.
-spend:  inc wraps
+; Timer B high (A) differs from phase in bit 15: the new phase; bit 15
+; rising is a wrap, counted and spent from the timeout with Z set when it
+; ran out; Z clear otherwise.
+wrap:   eor phase
+        sta phase
+        bpl :+
+        inc wraps
         dec tmo
+        rts
+:       lda #1
         rts
 
 ; Timer B into raw: high, low, high again.
@@ -125,11 +139,44 @@ spend:  inc wraps
         sta raw + 2
 .endmacro
 
-; raw (taken with wraps = A) into t: the high read on the low read's side of
-; a borrow (a low byte of $80 or more was read after it), inverted to
-; elapsed. A wrap counted since the reads (at most one: they are under a
-; wrap apart) belongs to them only when the elapsed count had restarted.
-time:   sta t + 2
+; Timer B high against phase (wrap), branching to out when a wrap used up
+; the timeout. A clobbered.
+.macro TBPOLL out
+        .local done
+        lda CIA_TBHI
+        eor phase
+        bpl done
+        jsr wrap
+.ifnblank out
+        beq out
+.endif
+done:
+.endmacro
+
+; TBPOLL inline in a wait, back to again unless a wrap used up the timeout;
+; inline and on zero page so that a read loop's pass that counts a wrap
+; still takes the DRQ within a byte time. A clobbered.
+.macro TBLOOP again
+        lda CIA_TBHI
+        eor phase
+        bpl again
+        eor phase
+        sta phase
+        bpl again
+        inc wraps
+        dec tmo
+        bne again
+.endmacro
+
+; Now into t.
+now:    STAMP
+; raw (taken under half a wrap ago) into t: the high read on the low read's
+; side of a borrow (a low byte of $80 or more was read after it), inverted
+; to elapsed, under the wraps polled now, less one when bit 15 has risen
+; since the high read.
+time:   TBPOLL
+        lda wraps
+        sta t + 2
         lda raw + 1
         eor #$FF
         sta t
@@ -137,28 +184,16 @@ time:   sta t + 2
         ldx raw + 1
         bpl :+
         lda raw + 2
-:       eor #$FF
+:       tax
+        eor #$FF
         sta t + 1
-        lda CIA_ICR
-        and #ICR_TB
-        beq :+
-        jsr spend
-:       lda wraps
-        cmp t + 2
-        beq :+
-        lda t + 1
-        bmi :+
-        inc t + 2
+        txa
+        eor phase
+        bpl :+
+        lda phase
+        bpl :+
+        dec t + 2
 :       rts
-
-; Now into t.
-now:    lda CIA_ICR
-        and #ICR_TB
-        beq :+
-        jsr spend
-:       STAMP
-        lda wraps
-        jmp time
 
 ; Copy t to P_T0 (X = 0) or P_T1 (X = 3).
 keep:   ldy #0
@@ -175,7 +210,10 @@ setup:  lda #0
         sta wraps
         lda P_TMO
         sta tmo
-        jmp status1
+        jsr status1
+        ldy CIA_TBHI
+        sty phase
+        rts
 
 tmout:  jsr status1
         lda #$FF
@@ -311,15 +349,12 @@ settrk: jsr status1
 
 ; Wait until the index bit of the type I status equals A.
 ipwait: sta fill
-:       bit CIA_ICR
-        bpl :+
-        jsr spend
-        beq ipout
-:       WDTEST
+:       TBPOLL ipout
+        WDTEST
         lda WDSTAT
         and #ST_IP
         cmp fill
-        bne :--
+        bne :-
         rts
 ipout:  pla
         pla
@@ -353,10 +388,7 @@ ral:    WDTEST
         and #ST_DRQ >> 1                ; DRQ before BUSY: the last byte may wait
         bne :+
         bcc rae
-        bit CIA_ICR
-        bpl ral
-        jsr spend
-        bne ral
+        TBLOOP ral
         jmp tmout
 :       WDTEST
         lda WDDAT
@@ -364,8 +396,6 @@ ral:    WDTEST
         tya
         bne :+
         STAMP
-        lda wraps
-        sta t + 2
 :       iny
         cpy #6
         bne ral
@@ -373,7 +403,6 @@ rae:    jsr wait
         pha
         cpy #0
         beq :+
-        lda t + 2
         jsr time
         ldx #0
         jsr keep
@@ -432,10 +461,7 @@ rsl:    WDTEST
         and #ST_DRQ >> 1                ; DRQ before BUSY: the last byte may wait
         bne rsd
         bcc rse
-        bit CIA_ICR
-        bpl rsl
-        jsr spend
-        bne rsl
+        TBLOOP rsl
         jsr restrk
         jmp tmout
 rsd:    WDTEST

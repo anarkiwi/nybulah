@@ -149,6 +149,9 @@ hardware silence lies outside VICE's model: the fast serial bus at the bit level
   checkpoint was hit rather than where the drive is.
 - When VICE is stopped in drive context it reports stale main CPU registers.
   `C128Receiver.received` takes the 8502's X from the CPU history.
+- VICE models the 6526's ICR races on the 1581's CIA (`CIA_IM_TBB` in
+  `src/core/ciacore.c`), so drive code that counts timer B wraps from ICR loses
+  some (see "1581 capture and streaming" in [protocol.md](protocol.md)).
 - VICE starts running before the client connects, so each session begins at a
   different disk rotation and timer phase. Faults that depend on phase show up
   intermittently.
