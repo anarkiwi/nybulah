@@ -10,11 +10,12 @@ import struct
 import time
 
 import numpy as np
+from tqdm import tqdm
 
 from . import mfmstream as ms
 from .analysis import mfm
 from .formats.mfmcap import MfmCapture
-from .link import WATCHDOG_S, HandshakeTimeout
+from .link import WATCHDOG_IDLE_S, WATCHDOG_S, HandshakeTimeout
 from .monitor import Monitor, drivecode
 
 CODE_BASE, CODE2, SPLIT = 0x0300, 0x0782, 0x0200
@@ -371,17 +372,24 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         return got
 
     def _dos_state(self, stream_us):
-        """The stream state over DOS M-R once the drive can have finished its stream
-        (stream_us at most) and its monitor left for DOS (WATCHDOG_S unanswered), or
-        why it could not be read; an adapter on a virtual clock advances it instead."""
+        """The stream state over DOS M-R, or why it could not be read. The drive is in
+        DOS at the latest once its stream has ended (stream_us), its J reply has waited
+        WATCHDOG_S for the host and its monitor WATCHDOG_IDLE_S for a command (the
+        reply may have been taken); M-R is tried every WATCHDOG_S until then. An
+        adapter on a virtual clock advances it instead of sleeping."""
         wait = getattr(self.mon.cbm, "host_wait", None) or self.sleep
-        wait(stream_us / 1e6 + WATCHDOG_S)
-        try:
-            return stream_state(
-                self.mon.cbm.download(self.mon.dev, STATE_AT, STATE_LEN)
-            )
-        except (IOError, ValueError) as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+        limit = stream_us / 1e6 + WATCHDOG_S + WATCHDOG_IDLE_S
+        tries = math.ceil(limit / WATCHDOG_S) + 1
+        error = None
+        for i in tqdm(range(tries), desc="drive state", unit="try", leave=False):
+            try:
+                raw = self.mon.cbm.download(self.mon.dev, STATE_AT, STATE_LEN)
+            except (IOError, ValueError) as e:
+                error = f"{type(e).__name__}: {e}"
+                wait(WATCHDOG_S)
+                continue
+            return stream_state(raw) | {"answered_s": i * WATCHDOG_S}
+        return {"error": error, "waited_s": (tries - 1) * WATCHDOG_S}
 
     def read_track(self, revolutions=1):
         """Read Track ``revolutions`` times: a "track" MfmCapture."""

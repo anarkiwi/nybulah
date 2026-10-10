@@ -621,6 +621,41 @@ def test_cli_streamprobe_stops_at_a_short_track_stream(cli_rig, media, monkeypat
     no_stops(sim)
 
 
+def test_lost_stream_state_waits_out_the_monitor_idle_window(media, monkeypatch):
+    """A reply taken but misread leaves the drive in its monitor's command wait: the
+    state is read over DOS once the idle watchdog has returned it there."""
+    _, sim, drive = stream_rig(media, cylinder=2)
+    drive.motor(True)
+    drive.home(2)
+    response = drive.mon.link.response
+    monkeypatch.setattr(drive.mon.link, "response", lambda n: bytes(len(response(n))))
+    with pytest.raises(r1581.StreamLost) as lost:
+        drive.read_track(1)
+    state = lost.value.meta["diagnosis"]["drive_state"]
+    assert "error" not in state, state
+    assert state["answered_s"] >= WATCHDOG_IDLE_S - r1581.WATCHDOG_S
+    assert state["entries_started"] == 1 and state["count"] >= mfm.TRACK_BYTES - 1
+    no_stops(sim)
+
+
+def test_lost_stream_state_reports_a_drive_that_never_answers(media, monkeypatch):
+    cbm, sim, drive = stream_rig(media, cylinder=2)
+    drive.motor(True)
+    drive.home(2)
+    monkeypatch.setattr(drive.mon.link, "response", bytes)
+
+    def gone(*_):
+        raise r1581.TrackError("not responding")
+
+    monkeypatch.setattr(cbm, "download", gone)
+    with pytest.raises(r1581.StreamLost) as lost:
+        drive.read_track(1)
+    state = lost.value.meta["diagnosis"]["drive_state"]
+    assert state["error"] == "TrackError: not responding"
+    assert state["waited_s"] >= WATCHDOG_IDLE_S + r1581.WATCHDOG_S
+    no_stops(sim)
+
+
 def test_cli_streamprobe_reports_a_lost_stream(cli_rig, media, monkeypatch, capsys):
     cbm, sim = cli_rig(media, 0)
     parse = ms.MfmStream.parse

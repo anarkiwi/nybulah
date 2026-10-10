@@ -684,9 +684,12 @@ stream's state, cleared when it starts: entries started, the entry and repeats
 left, the first stamp (set by a command's first data byte), the end stamp, the WD
 status (read once valid after each command write, replaced by a record or the
 timeout), flags and the data bytes (set by a record or an ATN abort). An incomplete stream reads it through
-the monitor; an out-of-step one, after the drive's longest remaining stream and its
-monitor's watchdog, over DOS M-R before the recovery's bus reset, which the ROM's
-RAM test (dskint.src) would overwrite. It appears as `diagnosis.drive_state`.
+the monitor. An out-of-step one reads it over DOS M-R before the recovery's bus
+reset, which the ROM's RAM test (dskint.src) would overwrite: M-R is tried every
+`WATCHDOG_S` until the drive's longest remaining stream, its J reply's wait for the
+host (`WATCHDOG_S`) and its monitor's wait for a command (`WATCHDOG_IDLE_S`, when
+the misread reply was taken) have all run out; `answered_s` or `waited_s` says
+which. It appears as `diagnosis.drive_state`.
 
 ### Without streaming
 
@@ -719,4 +722,8 @@ accepts only Force Interrupt), clears MO and shows live type I bits after an idl
 $D0 (`wd1770.c:799-813,210-214`; the 1581 reads $80 there with T0 clear), drops MO
 after 10 idle index pulses (`wd1770.c:222`; the datasheet says 9) and delivers the
 1581's fast serial a byte at a time with no SRQ/DATA timing
-(`drive/iec/cia1581d.c:233-239`).
+(`drive/iec/cia1581d.c:233-239`). As there, an ICR read returns and clears every
+flag (`core/ciacore.c:1288-1352`). The stream runs with interrupts masked (the
+monitor's entry `sei`; nothing in it clears I), so no ROM IRQ reads ICR behind it;
+its only wait on the shift register's flag, at the end, is bounded, and the flag it
+may clear elsewhere (timer B polls) is never waited for.
