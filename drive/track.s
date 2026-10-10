@@ -29,8 +29,13 @@
 ; VIA1 timer 2 counts down in one-shot mode (ACR bit 5 clear, set up by the
 ; host) and keeps counting after it expires. VIA1 timer 1 is the monitor's
 ; watchdog and is not touched.
-; 1571: VIA1 PA2 side, PA5 2 MHz; WD1770 status at $2000, bit 1 index once
-; Force Interrupt $D0 has been written to the command register.
+; 1571: VIA1 PA2 side, PA5 2 MHz; WD1770 at $2000-$2003. Its status bit 1 is
+; the live index only in type I status, which a force interrupt shows only
+; when the WD is idle (datasheet); so prep ends by taking it as the 1571 DOS
+; does (diskin): Force Interrupt, then a Seek to the track register's own
+; value (no step pulse), each followed by a wait for busy to clear, and
+; leaves that status in wdst. Every WD access keeps the DOS's address rule
+; (wdtest.inc).
 ;
 ; Read passes (kind):
 ;   0 BITS  the byte stored per byte ready
@@ -105,6 +110,8 @@ VIA2PA   = $1C01
 VIA2DDRA = $1C03
 PCR2     = $1C0C
 WD       = $2000
+WD_TRK   = $2001
+WD_DAT   = $2003
 
 PB_STEP  = $03
 PB_KEEP  = $93                  ; phase, write enable, SYNC
@@ -116,6 +123,7 @@ PCR_READ_SOE = $EE              ; CB2 high (read), CA2 high (SOE)
 PCR_WRITE_MASK = $11
 PCR_WRITE_SOE = $CE             ; CB2 low (write), CA2 high (SOE)
 WD_FORCE_INT = $D0
+WD_SEEK  = $18                  ; h = 1 (no spin-up wait), no verify (DOS diskin)
 WD_INDEX = $02
 
 ST_NOSYNC   = $01               ; no matching sync before the start timeout
@@ -132,6 +140,7 @@ WEND_TMO = 8                    ; x 7 cycles: over a byte period at zone 0      
 ANCHOR_MAX = 8
 INDEX_TMO = 120                 ; x 256 x 16 cycles: over 2 rev, per edge
 WD_SETTLE = 8                   ; x 5 cycles before trusting WD1770 status
+WD_IDLE_TMO = 24                ; x 256 x 11 cycles waiting for busy to clear
 
 ZP      = $60
 pbset   = ZP + 0                ; motor, LED and density bits for $1C00
@@ -156,7 +165,8 @@ cnth    = ZP + 29
 npg     = ZP + 30
 tmo     = ZP + 31
 tmp     = ZP + 32
-ZP_SIZE = 33
+wdst    = ZP + 33               ; 1571: WD status at the end of prep
+ZP_SIZE = 34
 .assert anchor + ANCHOR_MAX = status, error, "anchor overlaps results"
 
 ; A branch whose cycle count is part of a timing table: no page crossing.
@@ -197,7 +207,10 @@ d2:     dex
 dd:     rts
 .endmacro
 
+        .include "wdtest.inc"
+
         .segment "CODE"
+        .org $0300                      ; the Makefile's TRACK_BASE
 
         jmp prep
 .if !SEEK
@@ -284,7 +297,12 @@ stp:    txa
         bne stp
         lda settle
         jsr delay
-:       lda status
+:
+.if MODEL = 1571
+        jsr wdt1
+        sta wdst
+.endif
+        lda status
         rts
 
 .if !SEEK
@@ -300,29 +318,17 @@ pb7:    sta tmp
         sec
         rts
 
-; Wait for byte ready, as VWAIT; C set on timeout.
-vwait:  bvs vok
-        dex
-        bvs vok
-        bne vwait
-        dec tmo
-        bne vwait
-        sec
-        rts
 vok:    clc
         rts
 
 .if MODEL = 1571
-; Leading edge of the index pulse; C set on timeout. Preserves X.
-index:  lda #WD_FORCE_INT
-        sta WD
-        ldy #WD_SETTLE
-:       dey
-        bne :-
-        tya
+; Leading edge of the index pulse (prep left type I status); C set on
+; timeout. Preserves X.
+index:  lda #0
 ip:     sta tmp
         lda #INDEX_TMO
         sta tmo
+        WDTEST
 iw:     lda WD
         and #WD_INDEX
         cmp tmp
@@ -467,9 +473,42 @@ full:   lda #ST_FULL
 
 .endif
 
+.if MODEL = 1571
+; Type I status, the index live in bit 1 (see the header): A = the status,
+; bit 0 (busy) set if busy never cleared (a command written while busy is
+; not accepted). X and Y clobbered.
+wdt1:   lda #WD_FORCE_INT
+        jsr wdcmd
+        WDTEST
+        lda WD_TRK
+        WDTEST
+        sta WD_DAT
+        lda #WD_SEEK
+; Command A, then A = the status once busy reads clear, or after 256 x
+; WD_IDLE_TMO polls of 11 cycles.
+wdcmd:  WDTEST
+        sta WD
+        ldy #WD_SETTLE
+:       dey
+        bne :-
+        ldx #WD_IDLE_TMO
+        lda #1
+        WDTEST
+wdp:    bit WD
+        beq wdr
+        dey
+        bne wdp
+        dex
+        bne wdp
+wdr:    WDTEST
+        lda WD
+        rts
+.endif
+
 .if SEEK
         DELAY_ROUTINE
 .else
+        .reloc
         .segment "PASS"
 write:  lda #ST_WPROT
         sta status

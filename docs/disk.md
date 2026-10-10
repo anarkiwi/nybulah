@@ -44,7 +44,14 @@ when its `PASS` page does not read back from expansion RAM.
 
 - **prep** sets the motor, LED and density bits. On a 1571 it also sets the
   side bit (VIA1 PA2). It steps a signed number of halftracks with a delay per
-  step, then waits a settle time.
+  step, then waits a settle time. On a 1571 it then puts the WD1770 in type I
+  status, where status bit 1 is the live index, as the DOS does (`diskin`):
+  Force Interrupt, then a Seek to the track register's own value (no step
+  pulse), each followed by a bounded wait for busy to clear. A Force Interrupt
+  alone keeps a running command's status type (datasheet), so a WD left in a
+  type II or III command would hide the index. The status is left in the
+  result block (`wdst`); every WD access keeps the DOS's address rule
+  (`drive/wdtest.inc`).
 - **read** runs one capture pass of 31 pages. Start modes are `now`, `sync`
   (the pass starts inside a sync, so its first byte follows it), `index`
   (1571: at the second of two index edges, which also give the revolution
@@ -297,7 +304,8 @@ These are not yet confirmed on hardware:
   from a header estimate is confirmed on hardware (68 and 34 checked steps,
   sensor on at halftrack 2, phase rule held);
 - the step and settle delays;
-- the 1571 side bit polarity and WD1770 index after `$D0`;
+- the 1571 side bit polarity and the WD1770 index after prep's Force
+  Interrupt and Seek;
 - whether SYNC asserts on the tenth one (TS's SYNC low time against TB's
   hidden ones tests it);
 - the TB sample windows: the cycle offset between SO setting V and a branch

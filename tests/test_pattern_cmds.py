@@ -40,7 +40,9 @@ def test_write_then_verify_places_the_index(monkeypatch, tmp_path):
     v8 = cli.main(argv + ["--repeats", "1", "--cells", str(out["cells"])], cbm)
     index = v8["index"]
     assert index["captures"] == 1 and index["start_offsets"] == [0]
-    assert abs(index["pattern_angle"] - at / len(cells)) * len(cells) <= 16
+    n = len(cells)
+    assert abs((v8["index_bits"] + at + n / 2) % n - n / 2) <= 16
+    assert abs(index["pattern_angle"] - at / n) < 1e-3
     assert index["stream_edges"] >= 2 and min(index["stream_edge_offsets"]) >= -16
     angles = [c["start_angle"] for c in v8["captures"]]
     assert all(
@@ -224,6 +226,7 @@ def test_hw_stream_saw_no_index():
         "captures": 0,
         "stream_edges": 0,
         "drive_end": ["noindex"],
+        "ram_index": [],
         "pattern_angle": None,
     }
     revs = np.array(entry["revolution_bits"])

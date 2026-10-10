@@ -82,32 +82,7 @@ ptr      = $30
 len      = $32
 tmp      = $34
 
-; Pad with a nop when the next instruction would start at an address whose
-; low two bits are 00 (untimed code).
-.macro WDTEST
-        .if (* & 3) = 0
-        nop
-        .endif
-.endmacro
-
-; After an unconditional jump: pad with an unreachable byte so the WD access
-; at the next label keeps the rule without changing any timing.
-.macro WDALIGN
-        .if (* & 3) = 0
-        .byte $EA
-        .endif
-.endmacro
-
-; After an unconditional jump: pad with unreachable bytes to an address
-; that is k modulo 4, so a timed block's WD accesses keep the rule.
-.macro ALIGN4 k
-        .res (k - *) & 3, $EA
-.endmacro
-
-; Assert the rule instead (timed code).
-.macro WDOK
-        .assert (* & 3) <> 0, error, "WD access at an address ending in 00"
-.endmacro
+        .include "wdtest.inc"
 
 ; A branch whose cycle count is part of a timing table: no page crossing.
 .macro BR op, target
