@@ -1,7 +1,9 @@
 """Test track pattern: ground truth, bit alignment of captures, per-region errors.
 
 One revolution of known bits (every GCR byte, tagged syncs, a weak region, seeded
-GCR, $55, DOS sectors) plus $55 filler of the writer's length. Captures are placed
+GCR, $55, DOS sectors) plus $55 filler of the writer's length. The ``weak``
+variant replaces the weak region by tagged no-flux and invalid GCR runs of
+geometrically growing lengths. Captures are placed
 per revolution by FFT cross-correlation, then aligned by banded edit distance.
 """
 
@@ -23,6 +25,9 @@ SEED = 1571
 DISK_ID = b"NY"
 DOS_SECTORS = 4
 WEAK_BYTES = 32
+WEAK_RUNS, WEAK_GROWTH = 4, 4
+BAD_GCR = 0x44  # zero runs of three; GCR allows two at most
+VARIANTS = ("standard", "weak")
 GAP_BYTES = 64
 T2_SPAN = 256
 TS_SPAN = 256
@@ -59,10 +64,17 @@ def sync_runs(density):
     return [SYNC_MIN_BITS, 8 * SYNC_BYTES, *longs]
 
 
+def weak_runs(density):
+    """Byte lengths of the weak variant's runs: from the bytes spanning the TB
+    pass's T2 low byte, growing by WEAK_GROWTH."""
+    byte = 8 * CPU_HZ / bit_rate(density)
+    return [int(np.ceil(T2_SPAN / byte)) * WEAK_GROWTH**k for k in range(WEAK_RUNS)]
+
+
 @dataclasses.dataclass
-class Truth:
-    """A written pattern: its bits and regions, and the drive's cells per revolution
-    when the write measured them."""
+class Truth:  # pylint: disable=too-many-instance-attributes
+    """A written pattern: its bits and regions, the drive's cells per revolution
+    when the write measured them and the $55 bytes written before it."""
 
     halftrack: int
     density: int
@@ -70,6 +82,8 @@ class Truth:
     bits: np.ndarray
     regions: list
     cells: int | None = None
+    lead: int | None = None
+    variant: str = VARIANTS[0]
 
     @property
     def track(self):
@@ -100,6 +114,8 @@ class Truth:
             "density": self.density,
             "seed": self.seed,
             "cells": self.cells,
+            "lead": self.lead,
+            "variant": self.variant,
             "bits": len(self.bits),
             "regions": regions,
         }
@@ -118,7 +134,14 @@ class Truth:
             ]
             regions.append(region)
         return cls(
-            rec["halftrack"], rec["density"], rec["seed"], bits, regions, rec["cells"]
+            rec["halftrack"],
+            rec["density"],
+            rec["seed"],
+            bits,
+            regions,
+            rec["cells"],
+            rec.get("lead"),
+            rec.get("variant", VARIANTS[0]),
         )
 
 
@@ -150,7 +173,34 @@ def _split_syncs(parts):
     return bits, regions
 
 
-def make_truth(halftrack, density=None, seed=SEED, cells=None):
+def _tag(run, tag, zero=True):
+    """A sync of ``run`` ones (after a zero), its GCR tag byte and $55."""
+    gap = gap_bits(8 * HEADER_GAP_BYTES)
+    ones = np.ones(run, np.uint8)
+    return np.concatenate(([0] * zero, ones, encode_bits([tag]), gap)).astype(np.uint8)
+
+
+def _unstable_parts(density, variant, first_tag):
+    """The weak region, or per weak run a tag then its no-flux or invalid GCR
+    run. A weak run ends with the zero before the next sync: the bits of the
+    byte a sync interrupts are never latched, and after unstable data that
+    byte's framing is unknown."""
+    if variant == "standard":
+        return [("weak", UNSTABLE, np.zeros(8 * WEAK_BYTES, np.uint8))]
+    parts = []
+    for n in weak_runs(density):
+        for name, byte in (("noflux", 0), ("badgcr", BAD_GCR)):
+            tag = first_tag + len(parts) // 2
+            zero = not parts
+            parts.append((f"tag{tag}", EXACT, _tag(8 * SYNC_BYTES, tag, zero)))
+            run = np.append(to_bits(np.full(n, byte)), 0).astype(np.uint8)
+            parts.append((f"{name}{n}", UNSTABLE, run))
+    return parts
+
+
+def make_truth(  # pylint: disable=too-many-arguments
+    halftrack, density=None, seed=SEED, cells=None, lead=None, variant=VARIANTS[0]
+):
     """The pattern for a halftrack: as long as the shortest revolution a drive
     within the unmeasured speed tolerance turns at ``density``."""
     track = halftrack // 2
@@ -159,14 +209,11 @@ def make_truth(halftrack, density=None, seed=SEED, cells=None):
     sectors = rng.integers(0, 256, (DOS_SECTORS, 256), dtype=np.uint8)
     capacity = DOS_SECTORS * (SECTOR_BYTES + HEADER_GAP_BYTES)
     dos = format_track(track, sectors, DISK_ID, capacity=capacity)
-    gap = gap_bits(8 * HEADER_GAP_BYTES)
     parts = [("gcr_all", EXACT, encode_bits(np.arange(256, dtype=np.uint8)))]
-    for i, run in enumerate(sync_runs(density)):
-        tag = np.concatenate(([0], np.ones(run, np.uint8), encode_bits([i]), gap))
-        parts.append((f"sync{run}", EXACT, tag.astype(np.uint8)))
-    parts.append(("weak", UNSTABLE, np.zeros(8 * WEAK_BYTES, np.uint8)))
-    resync = np.concatenate(([0], np.ones(8 * SYNC_BYTES), encode_bits([0]), gap))
-    parts.append(("resync", EXACT, resync.astype(np.uint8)))
+    runs = sync_runs(density)
+    parts += [(f"sync{run}", EXACT, _tag(run, i)) for i, run in enumerate(runs)]
+    parts += _unstable_parts(density, variant, len(runs))
+    parts.append(("resync", EXACT, _tag(8 * SYNC_BYTES, 0, variant == "standard")))
     total = 8 * int(track_capacity(density) * (1 - UNMEASURED_TOLERANCE))
     used = sum(len(p[2]) for p in parts) + 8 * GAP_BYTES + 8 * len(dos)
     count = (total - used) // 10
@@ -176,7 +223,7 @@ def make_truth(halftrack, density=None, seed=SEED, cells=None):
     parts.append(("gap55", EXACT, gap_bits(total - used - 10 * count + 8 * GAP_BYTES)))
     parts.append(("dos", EXACT, to_bits(dos)))
     bits, regions = _split_syncs(parts)
-    return Truth(halftrack, density, seed, bits, regions, cells)
+    return Truth(halftrack, density, seed, bits, regions, cells, lead, variant)
 
 
 @numba.njit(cache=True)
@@ -476,12 +523,13 @@ def _weak_reads(al, i, r):
 
 def region_report(truth, al, begins=()):
     """Per group: bits covered, bit errors, insertions and deletions outside syncs,
-    start drift; per sync region the run written and found; weak reads; framing."""
+    start drift; per sync region the run written and found; per unstable group its
+    reads; framing."""
     ok = al.match >= 0
     covered = al.match != UNCOVERED
     wrong = ok & (al.c[np.maximum(al.match, 0)] != truth_bits(truth, al))
     runs = runs_of_ones(al.c, 1)
-    groups, syncs, weak = {}, [], []
+    groups, syncs, weak = {}, [], {}
     for i, r in enumerate(truth.regions):
         here = al.region == i
         g = groups.setdefault(
@@ -500,7 +548,8 @@ def region_report(truth, al, begins=()):
         g["errors"] += int((here & wrong).sum()) if r.kind != UNSTABLE else 0
         first = np.flatnonzero(here & ok & (al.pos == r.offset))
         g["drift"] += (al.match[first] - first).tolist()
-        weak += _weak_reads(al, i, r) if r.kind == UNSTABLE else []
+        if r.kind == UNSTABLE:
+            weak.setdefault(r.group, []).extend(_weak_reads(al, i, r))
     for g in groups.values():
         g["slips"] = g["ins"] + g["del"]
     gap = next(i for i, r in enumerate(truth.regions) if r.group == "gap55")
