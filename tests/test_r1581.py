@@ -6,7 +6,7 @@ import json
 import numpy as np
 import pytest
 
-from nybulah import cli, disk1581, r1581, simsrq, simx
+from nybulah import cli, disk1581, monitor, r1581, simsrq, simx
 from nybulah import mfmstream as ms
 from nybulah.analysis import mfm
 from nybulah.formats import d81
@@ -15,7 +15,7 @@ from nybulah.link import BASE, WATCHDOG_IDLE_S
 from nybulah.monitor import Monitor, drivecode
 from nybulah.sim import Drive1581
 from nybulah.r1581 import ST_BUSY, ST_T0
-from nybulah.simwd import NEVER, STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
+from nybulah.simwd import CPU_HZ, NEVER, STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
 from nybulah.simwd import stream_track
 
 DEV = 9
@@ -320,6 +320,121 @@ def test_stream_without_a_turning_disk_times_out(media):
     no_stops(sim)
 
 
+def test_stream_index_wait_timeout_returns_to_the_monitor(media):
+    """An index wait that times out (no disk turning) ends the stream and returns
+    END_TIMEOUT from J; the drive is back in the monitor."""
+    _, sim, drive = stream_rig(media, cylinder=0)
+    drive.home(0)
+    got = drive.stream([ms.entry(ms.OP_INDEX)])
+    assert got.drive_end == "timeout" and got.reply[:2] == (0x44, 1)
+    assert got.commands[-1].timeout and got.commands[-1].data.size == 0
+    assert drive.sense()["t0"]
+    no_stops(sim)
+
+
+# Longer than the adapter's wait for the next byte (simsrq.STREAM_TIMEOUT_US).
+PAST_GAP = 2 * int(simsrq.STREAM_TIMEOUT_US * CPU_HZ / 1_000_000)
+CIA_CRB = 0x400F
+
+
+def test_stream_keepalives_do_not_need_timer_b(media):
+    """Keepalives count wait passes: with timer B stopped the wait for Read Track's
+    index still sends them inside the adapter's gap."""
+    _, sim, drive = stream_rig(media, cylinder=5)
+    drive.motor(True)
+    drive.home(5)
+    drive.mon.write(CIA_CRB, b"\x00")
+    got = drive.stream([ms.entry(ms.OP_READ_TRACK, 5)])
+    assert got.complete and got.keepalives > 0
+    assert len(got.commands[0].data) >= mfm.TRACK_BYTES - 1
+    no_stops(sim)
+
+
+KEEP_PASSES, W0_PASS = 256, 50  # drive/mfmstream.s
+PB_CLK = 0x08
+
+
+def test_stream_first_keepalive_counts_every_pass(media):
+    """J leaves the command burst (address, length, op) in the monitor's ptr..ptr+4,
+    under the stream's pass counter: the first KEEP still waits a full count of
+    passes after START."""
+    _, sim, drive = stream_rig(media, cylinder=5)
+    drive.motor(True)
+    drive.home(5)
+    meta, write, pb = [], sim.cia.write, [0]
+
+    def hooked(reg, v, c):
+        if reg == 1:
+            pb[0] = v
+        elif reg == 12:
+            meta.append((v, c, bool(pb[0] & PB_CLK)))
+        return write(reg, v, c)
+
+    sim.cia.write = hooked
+    got = drive.stream([ms.entry(ms.OP_READ_TRACK, 5)])
+    assert got.complete and got.keepalives > 0
+    v, c, clk = (np.array(x) for x in zip(*meta))
+    start = np.flatnonzero(clk & (v == ms.M_START))[0]
+    keep = np.flatnonzero(clk & (v == ms.M_KEEP))
+    assert keep[0] == start + 1
+    assert c[keep[0]] - c[start] >= (KEEP_PASSES - 1) * W0_PASS
+    no_stops(sim)
+
+
+def test_stream_index_wait_after_a_command_keeps_the_stream_alive(media):
+    """A force interrupt whose busy outlasts the adapter's gap, after the stream has
+    started, is waited out with keepalives."""
+    _, sim, drive = stream_rig(media, cylinder=3)
+    sim.wd = Wd(media, cylinder=3, force_busy=PAST_GAP)
+    drive.motor(True)
+    drive.home(3)
+    got = drive.stream([ms.entry(ms.OP_READ_ADDRESS, rep=2), ms.entry(ms.OP_INDEX)])
+    assert got.complete and len(got.index_us) == 1 and got.keepalives > 0
+    no_stops(sim)
+
+
+def test_stream_out_of_step_reply_sends_nothing_more(media, monkeypatch):
+    """A reply that is no J return ends the session without another transfer."""
+    cbm, sim, drive = stream_rig(media, cylinder=2)
+    drive.motor(True)
+    drive.home(2)
+    monkeypatch.setattr(drive.mon.link, "response", bytes)
+    sent = []
+    monkeypatch.setattr(cbm, "srq2_write", sent.append)
+    with pytest.raises(r1581.StreamLost) as lost:
+        drive.read_track(1)
+    diag = lost.value.meta["diagnosis"]
+    assert diag["drive"] == "reply $00 is no end code"
+    state = diag["drive_state"]
+    assert "error" not in state, state
+    assert state["entries_started"] == 1 and state["op"] == ms.OP_READ_TRACK
+    assert state["first_set"]
+    assert state["count"] >= mfm.TRACK_BYTES - 1 and state["wd_status"] & ST_BUSY == 0
+    assert state["t_end_us"] - state["t_first_us"] == pytest.approx(
+        drive.period_us, rel=1e-3
+    )
+    assert isinstance(lost.value, monitor.RECOVERABLE) and not drive.mon.running
+    drive.close()
+    assert not sent
+    no_stops(sim)
+
+
+def test_stream_state_holds_the_status_after_the_command_write(media, monkeypatch):
+    """Stopped by the adapter mid-command, the state keeps the WD status read once
+    valid after the Read Track write (busy, MO raised) and the first byte's stamp."""
+    cbm, sim, drive = stream_rig(media, cylinder=4)
+    drive.motor(True)
+    drive.home(4)
+    slow = cbm.srq2_stream
+    monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
+    got = drive.stream([ms.entry(ms.OP_INDEX), ms.entry(ms.OP_READ_TRACK, 4)])
+    state = got.state
+    assert got.adapter == "overrun" and got.reply[0] == 0x48
+    assert state["entries_started"] == 2 and state["first_set"]
+    assert state["wd_status"] & (ST_BUSY | r1581.ST_MO) == ST_BUSY | r1581.ST_MO
+    no_stops(sim)
+
+
 def random_d81(seed):
     """A D81 of random sectors, no errors."""
     rng = np.random.default_rng(seed)
@@ -380,7 +495,11 @@ def test_throttled_host_overruns_and_the_drive_stops(media, monkeypatch):
     slow = cbm.srq2_stream
     monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
     got = drive.stream([ms.entry(ms.OP_READ_TRACK, 8)])
-    assert got.adapter == "overrun" and got.reply == 0x48
+    assert got.adapter == "overrun" and got.reply[0] == 0x48
+    state = got.state
+    assert state["entries_started"] == 1 and state["flags"] == 0
+    assert state["first_set"] and state["count"] > 1
+    assert got.diagnosis()["drive"] == "atn" and got.reply[1] == 1
     monkeypatch.setattr(cbm, "srq2_stream", slow)
     assert drive.read_track(1).meta["adapter"] == "done"
     no_stops(sim)
@@ -515,6 +634,74 @@ def test_cli_streamprobe_sequence_of_hw11(media, monkeypatch, tmp_path):
     assert {tuple(i[:3]) for i in out["ids"]} >= {(39, 0, r) for r in range(1, 11)}
     assert cbm.drive.wd.pulses == 2 * 39
     no_stops(cbm.drive)
+
+
+def test_cli_streamprobe_stops_at_a_short_track_stream(cli_rig, media, monkeypatch):
+    cbm, sim = cli_rig(media, 0)
+    slow = cbm.srq2_stream
+    monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
+    monkeypatch.setattr(r1581.Mfm1581, "read_ids", None)
+    args = ["streamprobe", "--dev", "9", "--max-steps", "0", "--cylinder", "39"]
+    out = cli.main(args, cbm)
+    stream = out["track_stream"]
+    assert stream["adapter"] == "overrun" and "ids" not in out
+    diag = stream["diagnosis"]
+    assert diag["drive"] == "atn" and diag["entries_started"] == 1
+    assert diag["codes"]["start"] == 1 and diag["data_bytes"] >= max(stream["bytes"], 1)
+    assert diag["elapsed_s"] > 0
+    no_stops(sim)
+
+
+def test_lost_stream_state_waits_out_the_monitor_idle_window(media, monkeypatch):
+    """A reply taken but misread leaves the drive in its monitor's command wait: the
+    state is read over DOS once the idle watchdog has returned it there."""
+    _, sim, drive = stream_rig(media, cylinder=2)
+    drive.motor(True)
+    drive.home(2)
+    response = drive.mon.link.response
+    monkeypatch.setattr(drive.mon.link, "response", lambda n: bytes(len(response(n))))
+    with pytest.raises(r1581.StreamLost) as lost:
+        drive.read_track(1)
+    state = lost.value.meta["diagnosis"]["drive_state"]
+    assert "error" not in state, state
+    assert state["answered_s"] >= WATCHDOG_IDLE_S - r1581.WATCHDOG_S
+    assert state["entries_started"] == 1 and state["count"] >= mfm.TRACK_BYTES - 1
+    no_stops(sim)
+
+
+def test_lost_stream_state_reports_a_drive_that_never_answers(media, monkeypatch):
+    cbm, sim, drive = stream_rig(media, cylinder=2)
+    drive.motor(True)
+    drive.home(2)
+    monkeypatch.setattr(drive.mon.link, "response", bytes)
+
+    def gone(*_):
+        raise r1581.TrackError("not responding")
+
+    monkeypatch.setattr(cbm, "download", gone)
+    with pytest.raises(r1581.StreamLost) as lost:
+        drive.read_track(1)
+    state = lost.value.meta["diagnosis"]["drive_state"]
+    assert state["error"] == "TrackError: not responding"
+    assert state["waited_s"] >= WATCHDOG_IDLE_S + r1581.WATCHDOG_S
+    no_stops(sim)
+
+
+def test_cli_streamprobe_reports_a_lost_stream(cli_rig, media, monkeypatch, capsys):
+    cbm, sim = cli_rig(media, 0)
+    parse = ms.MfmStream.parse
+    monkeypatch.setattr(
+        ms.MfmStream, "parse", lambda raw, reply: parse(raw, bytes(len(reply)))
+    )
+    recovered = []
+    monkeypatch.setattr(monitor, "recover", lambda c, d: recovered.append(d))
+    args = ["streamprobe", "--dev", "9", "--max-steps", "0", "--cylinder", "39"]
+    with pytest.raises(r1581.StreamLost):
+        cli.main(args, cbm)
+    out = json.loads(capsys.readouterr().out)
+    assert out["track_stream"]["diagnosis"]["codes"]["start"] == 1
+    assert recovered == [DEV]
+    no_stops(sim)
 
 
 def test_cli_streamprobe_reports_the_track_stream_when_a_later_step_fails(

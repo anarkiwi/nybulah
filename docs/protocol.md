@@ -584,7 +584,7 @@ restores the timers and reads ICR.
 
 The per-byte X monitor does not fit beside the CIA code (`$0500-$07FF`); on a 1581
 `s3` is burst X (firmware v10). The monitor is at most `$0290` bytes, so the 1581
-drive code can use `$0790-$09FF` as well as `$0300-$04FF`.
+drive code can use `$0782-$09FF` as well as `$0300-$04FF`.
 
 `ciaprobe_1581` measures the 8520's SDR-write-to-ICR-flag latency exactly as on the
 1571 (`tools/xprobe.py --cia`); the 40-cycle send period needs it at 39 or less, as
@@ -623,15 +623,17 @@ Address, Read Sector or Read Track, or an index edge wait, each up to 127 times
 (Read Sector optionally advancing the sector). Every byte the WD delivers goes
 straight to the shift register; metadata (CLK asserted) carries a record per command
 (`$0C`: two stamps, the WD status, a timeout flag and the byte count, packed into
-six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, whenever timer
-B bits 15-13 change while waiting, 8.2 ms, under the adapter's 20 ms) and the v12
+six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, every 256
+passes of a wait loop: before a command's first DRQ, for an index edge, and for
+busy to clear after a force interrupt; the passes are counted from a counter the stream clears at entry, not timed by timer
+B, and 256 of the longest pass fit in the adapter's 20 ms wait for the next byte) and the v12
 END family. `nybulah.mfmstream.MfmStream` parses it.
 
 Cycle tables (t = 0 at an SDR write, from the code):
 
 | path | status reads | data register read | next SDR write |
 |---|---|---|---|
-| `dl` data loop | 24 (28 with a count carry), then every 21 | 37 | 41 (45) |
+| `dl` data loop | 24 (28 with a count carry), then every 27 (ATN on each pass) | 37 | 41 (45) |
 | `w0` before the first DRQ | every 30 or less | 11 or less after the read that sees DRQ | 11 after the read |
 | `send` (one metadata byte, w0) | -14, 4, 28 | 13 (DRQ at 4), 37 (at 28) | metadata at 0, data at 40 or 48 |
 | `plain` (WD idle) | | | 40 |
@@ -643,12 +645,12 @@ kbit/s):
 | quantity | worst case | budget | margin |
 |---|---|---|---|
 | SDR write spacing | 40 (`send` s4 path), 41 (`dl`) | > 39 | 1 cycle |
-| byte waiting in `dl` | 34 (21 + 13) | 64 | 30 |
+| byte waiting in `dl` | 40 (27 + 13) | 64 | 24 |
 | first byte, from `w0` | read 41 after arrival; second byte read 106 after the first's arrival | 128 (third arrival) | 22 |
 | first byte during a metadata write | arrival after -14; second byte read at 94 | > 114 | 20 |
 | backlog | writes 40 apart against bytes 64 apart | | drains 24 cycles a byte |
 | CLK for metadata | asserted at -4, released at 16 to 24 | adapter samples 4-14 | 2 cycles |
-| ATN seen | every byte in `dl`, every pass of `w0` | adapter holds ATN 8622 us | |
+| ATN seen | every pass of `dl` and `w0` | adapter holds ATN 8622 us | |
 
 A stamp reads ICR 4 cycles and timer B low 22 cycles after its reference (the
 first byte's SDR write, the status read that saw the command end, or the one that
@@ -665,7 +667,29 @@ Read Track starts at the leading edge of an index pulse and ends at the next
 show whether the WD caught the next edge or waited a revolution. A command that
 outlasts TMO wraps (six revolutions at the measured period: the WD gives up Read
 Sector and Read Address after five) is force-interrupted and ends the stream with
-END_TIMEOUT.
+END_TIMEOUT; an index wait that outlasts it ends the same way.
+
+J returns A = the END code (or `ST_NOGO` $FF when the host never asserted CLK),
+X = the entries started (commands issued plus index waits) and Y = the WD status.
+A stream that is not `done`/`done` carries a diagnosis in its capture meta
+(`MfmStream.diagnosis`): the reply decoded, the metadata codes and data bytes the
+adapter delivered whether or not a record framed them, the adapter output size and
+how long the receive took (the adapter's 20 ms gap timeout against its I/O timeout
+for no first fall). `streamprobe` stops after such a Read Track stream. A reply that is neither an END
+code nor `ST_NOGO` was read from a stream still running: `StreamLost` ends the
+session with no further transfer and the monitor is recovered by a bus reset.
+
+The last 20 bytes of the first block (`$04EC-$04FF`, `r1581.STATE_AT`) hold the
+stream's state, cleared when it starts: entries started, the entry and repeats
+left, the first stamp (set by a command's first data byte), the end stamp, the WD
+status (read once valid after each command write, replaced by a record or the
+timeout), flags and the data bytes (set by a record or an ATN abort). An incomplete stream reads it through
+the monitor. An out-of-step one reads it over DOS M-R before the recovery's bus
+reset, which the ROM's RAM test (dskint.src) would overwrite: M-R is tried every
+`WATCHDOG_S` until the drive's longest remaining stream, its J reply's wait for the
+host (`WATCHDOG_S`) and its monitor's wait for a command (`WATCHDOG_IDLE_S`, when
+the misread reply was taken) have all run out; `answered_s` or `waited_s` says
+which. It appears as `diagnosis.drive_state`.
 
 ### Without streaming
 
@@ -682,3 +706,24 @@ bit (`msub.src` precmp: set from cylinder 44 on). Afterwards the host runs DOS j
 `$82` (controller reset: cache invalidated, no head movement) through the job queue
 at `$0002`, and waits 0.32 s before a session that writes the cache (DOS writes a
 dirty cache back after 32 controller ticks of bus silence, `idle.src`).
+
+### Reference: VICE's WD177x and 8520
+
+VICE (GPL, read for behaviour only) agrees with the model on Read Track: the
+command is matched on its top four bits, so `$E8` is Read Track with h set
+(`drive/iec/wd1770.c:119,137`); BUSY rises 24 us after the write and MO with it
+(`wd1770.c:230-250`); bytes start at the first index edge after the command and stop
+at the next (`wd1770.c:638-672`). Its 8520 loads a written SDR byte two cycles
+later, flags it two cycles after the eighth CNT fall and chains a byte written
+during a transfer with no gap (`core/ciacore.c:914-929,1736-1790`); it never drops
+a written byte. Where VICE differs the model keeps the datasheet or 1581 hardware
+evidence: VICE accepts any command while busy (`wd1770.c:821-871`; the datasheet
+accepts only Force Interrupt), clears MO and shows live type I bits after an idle
+$D0 (`wd1770.c:799-813,210-214`; the 1581 reads $80 there with T0 clear), drops MO
+after 10 idle index pulses (`wd1770.c:222`; the datasheet says 9) and delivers the
+1581's fast serial a byte at a time with no SRQ/DATA timing
+(`drive/iec/cia1581d.c:233-239`). As there, an ICR read returns and clears every
+flag (`core/ciacore.c:1288-1352`). The stream runs with interrupts masked (the
+monitor's entry `sei`; nothing in it clears I), so no ROM IRQ reads ICR behind it;
+its only wait on the shift register's flag, at the end, is bounded, and the flag it
+may clear elsewhere (timer B polls) is never waited for.

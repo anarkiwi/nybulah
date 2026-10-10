@@ -33,6 +33,8 @@ TAG_TMO = 4 * ms.LIST_ENTRIES
 PATTERN = [0x11, 0x22, 0x22, 0x22, 0x33, 0x44, 0x44, 0x44]
 PATTERN_REPEATS = 400
 IO_SPAN = 0x10
+MONITOR_PTR = 0x30  # drive/monitor.s ptr: burst.inc reads a command into ptr..ptr+4
+BUS_PEERS = {8: ("1571", None), 10: ("1541", None)}
 
 
 def loader(directory=None):
@@ -126,12 +128,14 @@ class Bench:
     """VICE with a 1581 on UNIT holding a D81, the drive parked under a DriveMonitor
     and an opened :class:`r1581.Mfm1581` on it; ``receiver`` on x128."""
 
-    def __init__(self, image, code=None, machine="x64sc", receiver=False):
+    def __init__(  # pylint: disable=too-many-arguments
+        self, image, code=None, machine="x64sc", receiver=False, peers=None
+    ):
         self._tmp = pathlib.Path(tempfile.mkdtemp(prefix="vicebench-"))
         self.path = self._tmp / "disk.d81"
         self.path.write_bytes(d81.write_d81(image))
         self.load = loader(code)
-        self.vice = vice.Vice({UNIT: ("1581", self.path)}, machine)
+        self.vice = vice.Vice({**(peers or {}), UNIT: ("1581", self.path)}, machine)
         self.receiver = None
         if receiver:
             self.receiver = vice.C128Receiver(self.vice, self.load("vicerx_c128"))
@@ -227,6 +231,12 @@ def writes(code=None, cylinder=39, side=0, seed=1):
     return report
 
 
+def j_command(addr):
+    """What the monitor's J leaves in ptr..ptr+4 when it calls addr: the command
+    burst (address, length 0, op 'J'), read in place (drive/burst.inc)."""
+    return bytes([addr & 0xFF, addr >> 8, 0, 0, ord("J")])
+
+
 def stream_code(code, list_block, tmo, code2):
     """(segments, list address) of a stream build: its two parts at CODE_BASE and
     code2, the list and TMO written after its tag."""
@@ -238,22 +248,28 @@ def stream_code(code, list_block, tmo, code2):
     return [(r1581.CODE_BASE, bytes(body[:split])), (code2, bytes(body[split:]))]
 
 
-def stream(  # pylint: disable=too-many-locals
+def stream(  # pylint: disable=too-many-locals,too-many-arguments
     code=None,
     cylinder=39,
     side=0,
     revolutions=2,
+    *,
     code2=r1581.CODE2,
     under=None,
     head_writes=0,
     seed=1,
+    peers=False,
 ):
     """Read Track streamed by mfmstream_1581 (from code) to the emulated C128, the
-    head placed by the mfm_1581 of under: the parsed stream, the drive's return,
-    sectors decoded from it against the D81, the I/O trace (from the call to its
-    head_writes-th SDR write, and at the end)."""
+    head placed by the mfm_1581 of under, called with the zero page the monitor's J
+    leaves (and a 1571 and a 1541 on the bus with peers): the parsed stream, the
+    drive's return, sectors decoded from it against the D81, the cycles from START
+    to the first KEEP, the I/O trace (from the call to its head_writes-th SDR write,
+    and at the end)."""
     image = random_d81(seed)
-    with Bench(image, under, machine="x128", receiver=True) as bench:
+    with Bench(
+        image, under, "x128", receiver=True, peers=BUS_PEERS if peers else None
+    ) as bench:
         bench.place(cylinder, side)
         entry = ms.entry(ms.OP_READ_TRACK, cylinder, rep=revolutions)
         tmo = bench.drive._tmo(r1581.RNF_REVS + 1)  # pylint: disable=protected-access
@@ -262,6 +278,7 @@ def stream(  # pylint: disable=too-many-locals
         )
         for addr, part in segments:
             bench.mon.write(addr, part)
+        bench.mon.write(MONITOR_PTR, j_command(STREAM_ENTRY))
         c0 = bench.vice.clock(SPACE)
         bench.mon.call(STREAM_ENTRY)
         head = _head(bench, head_writes)
@@ -291,6 +308,10 @@ def stream(  # pylint: disable=too-many-locals
             for r in io_trace(head[head["clock"] >= c0])
         ],
         "trace": summarise(io_trace(history[history["clock"] >= c0])),
+        "first_keep_cycles": first_keep(
+            io_trace(head[head["clock"] >= c0])
+            or io_trace(history[history["clock"] >= c0])
+        ),
     }
     rows = d81.side_rows(cylinder, side)
     want = image.data[rows].reshape(mfm.SECTORS, -1)
@@ -298,6 +319,15 @@ def stream(  # pylint: disable=too-many-locals
         _sectors_match(c.data, want, cylinder, side) for c in got.commands
     ]
     return report
+
+
+def first_keep(trace):
+    """Drive cycles from the START write to the first KEEP write in an io_trace, or
+    None when the trace holds no such pair."""
+    sdr = [(r["clock"], r["value"]) for r in trace if r["reg"] == "SDR"]
+    start = next((c for c, v in sdr if v == ms.M_START), None)
+    keep = next((c for c, v in sdr if v == ms.M_KEEP and start is not None), None)
+    return None if start is None or keep is None else keep - start
 
 
 def _head(bench, count):
@@ -342,6 +372,9 @@ def main(argv=None):
     parser.add_argument("--drivecode", help="directory of another build's .bin files")
     parser.add_argument("--under", help="stream: the build that places the head")
     parser.add_argument("--head", type=int, default=0, help="stream: SDR writes traced")
+    parser.add_argument(
+        "--peers", action="store_true", help="stream: a 1571 on 8 and a 1541 on 10"
+    )
     parser.add_argument("--cylinder", type=int, default=39)
     parser.add_argument("--side", type=int, default=0)
     parser.add_argument("--revolutions", type=int, default=2)
@@ -357,9 +390,10 @@ def main(argv=None):
             args.cylinder,
             args.side,
             args.revolutions,
-            args.code2,
+            code2=args.code2,
             under=args.under,
             head_writes=args.head,
+            peers=args.peers,
         )
     json.dump(report, sys.stdout, indent=1)
     sys.stdout.write("\n")

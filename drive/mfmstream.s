@@ -2,7 +2,7 @@
 ; commands and sends every byte the WD delivers out through the 8520 shift
 ; register as it arrives, with no host handshake, plus metadata with CLK
 ; asserted at the byte's bit 7 (the adapter samples CLK 4 to 14 cycles after
-; the SDR write). Loaded at $0300 (512 bytes) and $0790 (the rest) in place
+; the SDR write). Loaded at $0300 (512 bytes) and $0782 (the rest) in place
 ; of mfm_1581 and called through J of monitor_s4_1581, the head placed.
 ;
 ; List L (the "NYMS" tag + 4): up to four entries of four bytes, op $FF
@@ -13,12 +13,15 @@
 ;   sec  sector register
 ;   rep  bits 6-0: times to run the entry (1-127); bit 7: sector + 1 each
 ; TMO: timer B wraps (65536 us) a command or an index wait may take.
-; Returns A = the end code, or ST_NOGO when the host never asserted CLK.
+; Returns A = the end code, or ST_NOGO when the host never asserted CLK;
+; X = the entries started (commands issued and index waits), Y = the WD
+; status at the return.
 ;
 ; Metadata (bit 7 clear, low bits 00, never $40-$4C outside the END family;
 ; then chunks %dddddd01 of 24 bit values, most significant first):
 ;   $04 START
-;   $14 KEEP    queued when timer B bits 15-13 change while waiting
+;   $14 KEEP    queued every KEEP_PASSES passes of a wait loop, inside the
+;               adapter's ADAPTER_GAP_US
 ;   $0C REC     after a command, 14 bytes packed into 19 chunks: stamps
 ;               t_first and t_end (5 bytes each), WD status, flags (bit 0:
 ;               forced out by the timeout), data byte count (lo, hi)
@@ -54,14 +57,23 @@ END_TIMEOUT = $44
 END_ATN  = $48
 ST_NOGO  = $FF
 F_TIMEOUT = $01
-QMASK    = $3F
-KEEP_MASK = $E0
+QMASK    = $1F
+; xum1541 firmware v12 x_timing.h SRQ_STREAM_POLLS: the longest silence after
+; a byte the adapter waits through.
+ADAPTER_GAP_US = 20000
+KEEP_PASSES = 256               ; kc wraps: a KEEP per 256 passes
+.assert KEEP_PASSES = 256, error, "kc counts down from 0"
+W0_PASS = 50                    ; cycles of a w0 pass that sends nothing
+BW_PASS = 76                    ; cycles of a bwait pass that sends nothing
+.assert KEEP_PASSES * W0_PASS < ADAPTER_GAP_US * CPU_MHZ, error, "w0 keepalive"
+.assert KEEP_PASSES * BW_PASS < ADAPTER_GAP_US * CPU_MHZ, error, "bwait keepalive"
+FORCE_WRAPS = 2                 ; mfm.inc WDIDLE's bound on busy after $D0
 PB_CLKIN = $04
 STAMP_LO = 22                   ; write (or status read) -> timer B low read
 STAMP_ICR = 4                   ; write (or status read) -> ICR read
 
 qhead   = $30
-keep    = $31
+kc      = $31                   ; wait passes left to the next KEEP (0: 256)
 cnt     = $32                   ; data bytes of the command
 tmo     = $34
 wraps   = $35
@@ -98,15 +110,6 @@ force:  lda #WD_FORCE
         WDIDLE
         rts
 
-; Z set when a wrap used up the timeout.
-tick:   lda CIA_ICR
-        and #ICR_TB
-        beq :+
-        inc wraps
-        dec tmo
-        rts
-:       lda #1
-        rts
 
 ; Send one queued byte, the WD idle: CLK from 4 before the write to 16
 ; after; returns 40 after it.
@@ -147,14 +150,11 @@ w0:     WDOK
         lda WDSTAT                      ; 4     u = 30
         and #ST_DRQ                     ; 2
         BR bne, dfirst                  ; 2
-        lda qhead                       ; 4
+        lda qhead                       ; 3
         cmp qtail                       ; 3
         BR bne, wsend                   ; 2
-        lda CIA_TBHI                    ; 4
-        and #KEEP_MASK                  ; 2
-        cmp keep                        ; 4
-        BR beq, w0                      ; 3     u = 56: the next read at 60
-        sta keep
+        dec kc                          ; 5
+        BR bne, w0                      ; 3     u = 50: the next read at 54
         lda #M_KEEP
         jsr put
         jmp w0
@@ -174,14 +174,18 @@ wend:   WDTEST
         lda wraps
         sta last
         STAMP last
-        ldx #4
+        jsr dup
+        lda #0
+        sta cnt
+        jmp record
+
+; first = last (a record without data spans its wait).
+dup:    ldx #4
 :       lda last,x
         sta first,x
         dex
         bpl :-
-        lda #0
-        sta cnt
-        jmp record
+        rts
 
 
 ; First byte: read at once, written 11 cycles later (w0 reads the status 39
@@ -197,10 +201,10 @@ dstamp: STAMP first                     ; 34
         jmp dl                          ; 3     the status read at 41
 
 ; Data loop: from a write at t = 0 the status is read at 24 (28 when the
-; count carries) and every 21 cycles while no DRQ; a DRQ seen (before BUSY:
-; a command's last byte may wait after BUSY clears) is written 17 cycles
-; after its status read: writes are 41 or more apart and a byte waits at most
-; 21 + 13 cycles in the data register.
+; count carries) and every 27 cycles while no DRQ, ATN checked on each pass;
+; a DRQ seen (before BUSY: a command's last byte may wait after BUSY clears)
+; is written 17 cycles after its status read: writes are 41 or more apart and
+; a byte waits at most 27 + 13 cycles in the data register.
         ALIGN4 2
 dl:     WDOK
         lda WDSTAT                      ; 4     t = 24
@@ -208,9 +212,11 @@ dl:     WDOK
         and #ST_DRQ >> 1                ; 2     C: BUSY
         BR bne, dd                      ; 3
         BR bcc, dend                    ; 2
+        bit CIA_PB                      ; 4
+        BR bmi, dabort                  ; 2
         lda CIA_ICR                     ; 4
         and #ICR_TB                     ; 2
-        BR beq, dl                      ; 3     status every 21 cycles
+        BR beq, dl                      ; 3     status every 27 cycles
         inc wraps
         dec tmo
         bne dl
@@ -301,6 +307,24 @@ put:    sty py
         ldy py
         rts
 
+; count = the data bytes so far (cnt).
+keepcnt:
+        lda cnt
+        sta count
+        lda cnt + 1
+        sta count + 1
+        rts
+
+; State at the end of the first block (nybulah.r1581.STATE_AT), cleared when
+; the stream starts and readable after it ends, also over DOS M-R once the
+; monitor has left: first is set by a command's first data byte; stat holds
+; the WD status read once valid after each command write until a record or
+; the timeout replaces it; count is set by a record and by an ATN abort.
+STATE_LEN = 20
+
+        .res $0500 - STATE_LEN - *
+state:
+issued: .res 1
 op:     .res 1
 rep:    .res 1
 lp:     .res 1
@@ -312,10 +336,13 @@ stat:   .res 1                  ; the REC payload continues: status, flags,
 flags:  .res 1                  ; count
 count:  .res 2
 REC_LEN = * - first
+.assert * - state = STATE_LEN && * = $0500, error, "state block"
+; Queued at once at most: a KEEP not yet sent, a REC, END.
+.assert 1 + 1 + (8 * REC_LEN + 5) / 6 + 1 <= QMASK, error, "queue too short"
 
 
         .segment "CODE2"
-        .org $0790
+        .org $0782
 
 q:      .res QMASK + 1
         .assert >q = >(q + QMASK), error, "q crosses a page"
@@ -323,6 +350,17 @@ acc:    .res 1
 bits:   .res 1
 nb:     .res 1
 py:     .res 1
+sm:     .res 1
+
+; Z set when a wrap used up the timeout.
+tick:   lda CIA_ICR
+        and #ICR_TB
+        beq :+
+        inc wraps
+        dec tmo
+        rts
+:       lda #1
+        rts
 
 ; Add the first stamp's wrap flag to wraps.
 seen:   lda first + 1
@@ -368,10 +406,7 @@ pret:   rts
 
 ; Queue a REC with flags A.
 rec:    sta flags
-        lda cnt
-        sta count
-        lda cnt + 1
-        sta count + 1
+        jsr keepcnt
         lda #M_REC
         jsr put
         ldy #0
@@ -391,58 +426,73 @@ timeout:
         WDTEST
         lda WDSTAT
         sta stat
-        jsr force
+        lda #FORCE_WRAPS
+        sta tmo
+        jsr fwait
         lda wraps
         sta last
         STAMP last
         lda cnt
         ora cnt + 1
-        bne :++
-        ldx #4
-:       lda last,x
-        sta first,x
-        dex
-        bpl :-
+        bne :+
+        jsr dup
 :       lda #F_TIMEOUT
         jsr rec
         lda #END_TIMEOUT
         jmp finish
 
-abort:  jsr force
+abort:  jsr keepcnt
+        jsr force
         lda #END_ATN
         jmp finish
 
-; Wait for type I status IP = A with w0's housekeeping, the WD idle.
-iwait:  sta sc
-:       bit CIA_PB
-        bmi abort
+; Wait until the WD status masked by X reads A, with w0's housekeeping (the
+; WD idle): C clear on a match, set once the timeout ran out; ATN leaves
+; through abort without returning.
+bwait:  sta sc
+        stx sm
+bw:     bit CIA_PB
+        bmi bab
         jsr tick
-        bne :+
-        jmp timeout
-:       lda qhead
+        sec
+        beq bret
+        lda qhead
         cmp qtail
         beq :+
         jsr plain
-        jmp :--
-:       lda CIA_TBHI
-        and #KEEP_MASK
-        cmp keep
-        beq :+
-        sta keep
+        jmp bw
+:       dec kc
+        bne :+
         lda #M_KEEP
         jsr put
 :       WDTEST
         lda WDSTAT
-        and #ST_IP
+        and sm
         cmp sc
-        bne :----
-        rts
+        bne bw
+        clc
+bret:   rts
+bab:    pla
+        pla
+        jmp abort
 
-index:  jsr force
+; Force interrupt, then busy clear with housekeeping; C set on the timeout.
+fwait:  lda #WD_FORCE
+        jsr wdcmd
         lda #0
-        jsr iwait
+        ldx #ST_BUSY
+        jmp bwait
+
+index:  jsr fwait
+        bcs itmo
+        lda #0
+        ldx #ST_IP
+        jsr bwait
+        bcs itmo
         lda #ST_IP
-        jsr iwait
+        tax
+        jsr bwait
+        bcs itmo
         lda wraps
         sta first
         STAMP first
@@ -453,13 +503,17 @@ index:  jsr force
         ldx #5
         jsr pack
         jmp nextcmd
+itmo:   jmp timeout
 
 stream: lda #0
         sta qhead
         sta qtail
-        sta lp
         sta wraps
-        sta rep
+        sta kc                          ; KEEP_PASSES passes to the first KEEP
+        ldx #STATE_LEN - 1
+:       sta state,x
+        dex
+        bpl :-
         WDTEST
         lda WDTRK
         sta trksave
@@ -470,6 +524,9 @@ stream: lda #0
         bne :+
         jsr tick
         bne :-
+        ldx issued
+        WDTEST
+        ldy WDSTAT
         lda #ST_NOGO
         rts
 :       lda CIA_PB
@@ -483,9 +540,6 @@ stream: lda #0
         sta CIA_CRA
         lda #M_START
         jsr put
-        lda CIA_TBHI
-        and #KEEP_MASK
-        sta keep
         jmp next
 
 ; Flush the queue with the WD idle, then the entry again or the next one.
@@ -510,6 +564,7 @@ next:   ldy lp
         and #$7F
         sta rep
 again:  dec rep
+        inc issued
         lda TMO
         sta tmo
         lda #1
@@ -534,6 +589,7 @@ again:  dec rep
         inc L + 2,x
 :       lda op
         jsr wdcmd
+        sta stat                        ; the status once valid, until the end
         jmp w0
 
 done:   lda #M_END
@@ -560,5 +616,8 @@ finish: pha
         lda trksave
         WDTEST
         sta WDTRK
+        ldx issued
+        WDTEST
+        ldy WDSTAT
         pla
         rts

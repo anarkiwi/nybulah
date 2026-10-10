@@ -1,5 +1,5 @@
 ; 1581 head motion, probing, sector I/O and track writing through the WD177x,
-; loaded at $0300 (512 bytes) and $0790 (the rest, after the largest 1581
+; loaded at $0300 (512 bytes) and $0782 (the rest, after the largest 1581
 ; monitor) and called through the J command of a monitor_*_1581. Buffers
 ; live in the DOS track cache ($0C00-$1FFF), which the host invalidates
 ; afterwards.
@@ -307,7 +307,7 @@ settrk: jsr status1
         rts
 
         .segment "CODE2"
-        .org $0790
+        .org $0782
 
 ; Wait until the index bit of the type I status equals A.
 ipwait: sta fill

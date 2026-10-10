@@ -2,6 +2,7 @@ import ctypes
 
 import pytest
 
+from nybulah import opencbm
 from nybulah.opencbm import OpenCBM, OpenCBMError
 
 
@@ -132,3 +133,132 @@ def test_talk_open_and_raw_read():
             fn(*args)
     with pytest.raises(OpenCBMError, match="cbm_raw_read returned -1"):
         bad.raw_read(4)
+
+
+def usb_tree(root, *devices):
+    """A sysfs USB device directory with (name, vid, pid, bus, dev) entries."""
+    for name, vid, pid, busnum, devnum in devices:
+        d = root / name
+        d.mkdir(parents=True)
+        for k, v in (("idVendor", f"{vid:04x}"), ("idProduct", f"{pid:04x}")):
+            (d / k).write_text(v + "\n")
+        (d / "busnum").write_text(f"{busnum}\n")
+        (d / "devnum").write_text(f"{devnum}\n")
+    (root / "1-0:1.0").mkdir(exist_ok=True)
+    return str(root)
+
+
+XUM = (opencbm.XUM1541_VID, opencbm.XUM1541_PID)
+
+
+def test_usbdevfs_reset_number_matches_linux():
+    """_IO('U', 20): type 'U' in bits 8-15, nr 20, no direction or size."""
+    assert opencbm.USBDEVFS_RESET == ord("U") * 256 + 20
+
+
+def test_usb_nodes_finds_only_the_adapter(tmp_path):
+    sysfs = usb_tree(
+        tmp_path,
+        ("1-1", 0x046D, 0xC52B, 1, 2),
+        ("3-2", *XUM, 3, 17),
+        ("usb1", 0x1D6B, 0x0002, 1, 1),
+    )
+    (tmp_path / "4-1").mkdir()
+    (tmp_path / "4-1" / "idVendor").write_text("zz\n")
+    assert opencbm.usb_nodes(sysfs, "/u") == ["/u/003/017"]
+    assert not opencbm.usb_nodes(str(tmp_path / "none"))
+
+
+def test_usb_reset_ioctls_the_node_and_reopens(tmp_path, monkeypatch):
+    sysfs = usb_tree(tmp_path, ("1-4", *XUM, 1, 9))
+    calls = []
+    monkeypatch.setattr(opencbm.os, "open", lambda p, f: calls.append((p, f)) or 42)
+    monkeypatch.setattr(opencbm.os, "close", lambda fd: calls.append(("close", fd)))
+    monkeypatch.setattr(
+        opencbm.fcntl, "ioctl", lambda fd, req, arg: calls.append((fd, req, arg))
+    )
+    lib = FakeLib()
+    cbm = OpenCBM("xum1541:0", lib=lib)
+    cbm._plugin["x"] = None  # pylint: disable=protected-access
+    cbm.usb_reset(sysfs, "/u")
+    assert calls == [
+        ("/u/001/009", opencbm.os.O_WRONLY),
+        (42, opencbm.USBDEVFS_RESET, 0),
+        ("close", 42),
+    ]
+    assert lib.calls == ["cbm_driver_open_ex", "cbm_driver_close", "cbm_driver_open_ex"]
+    assert cbm.fd is not None and cbm.adapter == "xum1541:0"
+    assert not cbm._plugin  # pylint: disable=protected-access
+
+
+def test_usb_reset_failures(tmp_path, monkeypatch):
+    lib = FakeLib()
+    cbm = OpenCBM(lib=lib)
+    with pytest.raises(OpenCBMError, match="exactly one 16d0:0504 adapter, found 0"):
+        cbm.usb_reset(str(tmp_path / "none"))
+    assert lib.calls == ["cbm_driver_open_ex"]
+    sysfs = usb_tree(tmp_path / "two", ("1-1", *XUM, 1, 3), ("1-2", *XUM, 1, 4))
+    with pytest.raises(OpenCBMError, match="found 2"):
+        cbm.usb_reset(sysfs)
+
+    def denied(*_):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(opencbm.os, "open", denied)
+    sysfs = usb_tree(tmp_path / "one", ("1-1", *XUM, 2, 5))
+    with pytest.raises(OpenCBMError, match="USBDEVFS_RESET on /u/002/005: denied"):
+        cbm.usb_reset(sysfs, "/u")
+    assert lib.calls[-2:] == ["cbm_driver_close", "cbm_driver_open_ex"]
+    assert cbm.fd is not None
+
+
+class ArgsLib(FakeLib):
+    """FakeLib recording cbm_adapter_reset's arguments; absent when missing."""
+
+    def __init__(self, missing=(), **rc):
+        super().__init__(**rc)
+        self.missing, self.args = set(missing), []
+
+    def __getattr__(self, name):
+        if name in self.missing:
+            raise AttributeError(name)
+        fn = super().__getattr__(name)
+        if name != "cbm_adapter_reset":
+            return fn
+        return lambda *a: self.args.append(a[1:]) or fn(*a)
+
+
+def test_adapter_reset_passes_the_bus_flag_and_checks_zero():
+    lib = ArgsLib()
+    cbm = OpenCBM(lib=lib)
+    cbm.adapter_reset()
+    cbm.adapter_reset(reset_bus=False)
+    assert lib.args == [(1,), (0,)]
+    for rc in (-1, 1):
+        with pytest.raises(OpenCBMError, match=f"cbm_adapter_reset returned {rc}"):
+            OpenCBM(lib=ArgsLib(cbm_adapter_reset=rc)).adapter_reset()
+
+
+def test_adapter_reset_missing_from_an_older_library():
+    cbm = OpenCBM(lib=ArgsLib(missing={"cbm_adapter_reset"}))
+    with pytest.raises(OpenCBMError, match="lacks cbm_adapter_reset"):
+        cbm.adapter_reset()
+
+
+def test_load_library_tolerates_only_optional_symbols(monkeypatch):
+    class Sym:  # pylint: disable=too-few-public-methods
+        """A ctypes function pointer's prototype slots."""
+
+        restype = argtypes = None
+
+    def dll(missing):
+        names = set(opencbm._PROTOS) - {missing}  # pylint: disable=protected-access
+        return type("Dll", (), {n: Sym() for n in names})()
+
+    monkeypatch.setattr(opencbm.ctypes, "CDLL", lambda _: dll("cbm_adapter_reset"))
+    lib = opencbm.load_library()
+    assert not hasattr(lib, "cbm_adapter_reset")
+    assert lib.cbm_reset.argtypes == [ctypes.c_ssize_t]
+    monkeypatch.setattr(opencbm.ctypes, "CDLL", lambda _: dll("cbm_reset"))
+    with pytest.raises(OpenCBMError, match="libopencbm lacks cbm_reset"):
+        opencbm.load_library()

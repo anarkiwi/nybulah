@@ -114,10 +114,18 @@ def test_1581_writes_report():
     assert report["d81_side_ok"]
 
 
+KEEP_PASSES, W0_PASS = 256, 50  # drive/mfmstream.s
+
+
 def test_1581_read_track_streams_to_c128():
     """mfmstream_1581 Read Track, two revolutions, to the emulated C128's fast serial
-    port: the parsed stream ends cleanly and every sector matches the D81."""
-    report = vb.stream(cylinder=CYL, side=1, revolutions=2, head_writes=2, seed=7)
+    port with a 1571 and a 1541 on the bus, called with the zero page the monitor's J
+    leaves: the parsed stream ends cleanly, every sector matches the D81, and the
+    first KEEP waits a full count of passes after START."""
+    report = vb.stream(
+        cylinder=CYL, side=1, revolutions=2, head_writes=2, seed=7, peers=True
+    )
+    assert report["first_keep_cycles"] >= (KEEP_PASSES - 1) * W0_PASS
     assert report["returned"]["a"] == "$40"
     assert (report["adapter"], report["drive_end"]) == ("done", "done")
     assert [c["bytes"] for c in report["commands"]] == [mfm.TRACK_BYTES] * 2

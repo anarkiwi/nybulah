@@ -68,7 +68,8 @@ def summary_1581(track, ids):
 def execute_1581(args, cbm):
     """Home within --max-steps, then a Read Track stream and a Read Address stream;
     the report so far (with how the Read Track stream ended) is printed also when a
-    later step fails."""
+    later step fails. A Read Track stream that falls short ends the probe with its
+    diagnosis."""
     report = {}
     try:
         with r1581.session(cbm, args.dev, "s4") as drive:
@@ -77,11 +78,17 @@ def execute_1581(args, cbm):
             disk1581.home(drive, report["home"], args.max_steps)
             drive.seek(args.cylinder)
             drive.side(args.side)
-            track = drive.read_track(args.revolutions)
+            try:
+                track = drive.read_track(args.revolutions)
+            except r1581.StreamLost as e:
+                report["track_stream"] = e.meta
+                raise
             report["track_stream"] = track.meta | {
                 "bytes": len(track.data),
                 "rev_status": list(track.rev_status),
             }
+            if "diagnosis" in track.meta:
+                return report
             ids = drive.read_ids(args.ids)
             report |= summary_1581(track, ids)
             if args.save:

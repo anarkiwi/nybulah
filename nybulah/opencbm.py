@@ -2,7 +2,9 @@
 
 import ctypes
 import ctypes.util
+import fcntl
 import os
+import pathlib
 
 IEC_DATA = 0x01
 IEC_CLOCK = 0x02
@@ -17,6 +19,7 @@ _PROTOS = {
     "cbm_driver_open_ex": (ctypes.c_int, [ctypes.POINTER(_FD), ctypes.c_char_p]),
     "cbm_driver_close": (None, [_FD]),
     "cbm_reset": (ctypes.c_int, [_FD]),
+    "cbm_adapter_reset": (ctypes.c_int, [_FD, ctypes.c_int]),
     "cbm_upload": (
         ctypes.c_int,
         [_FD, ctypes.c_ubyte, ctypes.c_int, _BUF, ctypes.c_size_t],
@@ -57,9 +60,39 @@ _PROTOS = {
     "cbm_iec_wait": (ctypes.c_int, [_FD, ctypes.c_int, ctypes.c_int]),
     "cbm_get_plugin_function_address": (ctypes.c_void_p, [ctypes.c_char_p]),
 }
+_OPTIONAL = {"cbm_adapter_reset"}
 _XFER = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_void_p, ctypes.c_uint)
 _STREAM = "opencbm_plugin_srq2_stream"
 _SET_TIMEOUT = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_uint)
+
+XUM1541_VID, XUM1541_PID = 0x16D0, 0x0504
+SYSFS_USB = "/sys/bus/usb/devices"
+USBFS = "/dev/bus/usb"
+_IOC_NRBITS = 8
+
+
+def _io(kind, nr):
+    """Linux _IO(type, nr) (asm-generic/ioctl.h): no direction, no size."""
+    return ord(kind) << _IOC_NRBITS | nr
+
+
+USBDEVFS_RESET = _io("U", 20)
+
+
+def usb_nodes(sysfs=SYSFS_USB, usbfs=USBFS, vid=XUM1541_VID, pid=XUM1541_PID):
+    """usbfs nodes (usbfs/BBB/DDD) of every USB device vid:pid listed in sysfs."""
+    nodes = []
+    for d in sorted(p.parent for p in pathlib.Path(sysfs).glob("*/idVendor")):
+        try:
+            attr = {
+                k: int((d / k).read_text(), 16 if k.startswith("id") else 10)
+                for k in ("idVendor", "idProduct", "busnum", "devnum")
+            }
+        except (OSError, ValueError):
+            continue
+        if (attr["idVendor"], attr["idProduct"]) == (vid, pid):
+            nodes.append(f"{usbfs}/{attr['busnum']:03d}/{attr['devnum']:03d}")
+    return nodes
 
 
 class OpenCBMError(IOError):
@@ -81,25 +114,56 @@ def _transfers(proto, what):
 
 
 def load_library(name="opencbm"):
-    """Load libopencbm and attach prototypes."""
+    """Load libopencbm and attach prototypes; an older library may lack the
+    _OPTIONAL entry points, whose methods then raise OpenCBMError."""
     lib = ctypes.CDLL(ctypes.util.find_library(name) or f"lib{name}.so.0")
     for fn, (restype, argtypes) in _PROTOS.items():
-        f = getattr(lib, fn)
+        f = getattr(lib, fn, None)
+        if f is None and fn in _OPTIONAL:
+            continue
+        if f is None:
+            raise OpenCBMError(f"lib{name} lacks {fn}")
         f.restype, f.argtypes = restype, argtypes
     return lib
 
 
-class OpenCBM:
+class OpenCBM:  # pylint: disable=too-many-public-methods
     """An open OpenCBM driver handle (one ZoomFloppy/xum1541)."""
 
     def __init__(self, adapter=None, lib=None):
         self.lib = lib or load_library()
+        self.adapter = adapter
+        self._open()
+
+    def _open(self):
         self.fd = _FD()
+        self._plugin = {}
         if self.lib.cbm_driver_open_ex(
-            ctypes.byref(self.fd), adapter.encode() if adapter else None
+            ctypes.byref(self.fd), self.adapter.encode() if self.adapter else None
         ):
             raise OpenCBMError("cbm_driver_open_ex failed")
-        self._plugin = {}
+
+    def usb_reset(self, sysfs=SYSFS_USB, usbfs=USBFS):
+        """USB-reset the xum1541 (USBDEVFS_RESET on its usbfs node) and reopen
+        the driver: reinitialises an adapter whose control-endpoint reset
+        (adapter_reset) fails."""
+        nodes = usb_nodes(sysfs, usbfs)
+        if len(nodes) != 1:
+            raise OpenCBMError(
+                f"USB reset needs exactly one {XUM1541_VID:04x}:{XUM1541_PID:04x} "
+                f"adapter, found {len(nodes)}"
+            )
+        self.close()
+        try:
+            fd = os.open(nodes[0], os.O_WRONLY)
+            try:
+                fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            raise OpenCBMError(f"USBDEVFS_RESET on {nodes[0]}: {e}") from e
+        finally:
+            self._open()
 
     def close(self):
         """Release the driver handle."""
@@ -121,6 +185,15 @@ class OpenCBM:
     def reset(self):
         """Pulse IEC RESET."""
         self._check(self.lib.cbm_reset(self.fd), "cbm_reset")
+
+    def adapter_reset(self, reset_bus=True):
+        """Reset the adapter from its control endpoint (xum1541 firmware v13),
+        aborting any transfer even with its command loop wedged; reset_bus also
+        pulses IEC RESET."""
+        fn = getattr(self.lib, "cbm_adapter_reset", None)
+        if fn is None:
+            raise OpenCBMError("libopencbm lacks cbm_adapter_reset")
+        self._check(fn(self.fd, int(bool(reset_bus))), "cbm_adapter_reset", 0)
 
     def unlisten(self):
         """UNLISTEN under ATN to every device (clears a 1571/1581 fast host flag)."""

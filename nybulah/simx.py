@@ -527,6 +527,11 @@ class SimX(SimCBM):
             d.cycles = max(d.cycles, math.ceil(d.cycle_at(t)))
         return super().iec_poll()
 
+    def host_wait(self, seconds):
+        """Let the drive run seconds with the host's lines unchanged."""
+        self.now += seconds * 1e6
+        self._advance(self.now)
+
     def _advance(self, t):
         d = self.drive
         while not d.halted and d.next_access() < t:

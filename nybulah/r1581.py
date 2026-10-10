@@ -10,13 +10,15 @@ import struct
 import time
 
 import numpy as np
+from tqdm import tqdm
 
 from . import mfmstream as ms
 from .analysis import mfm
 from .formats.mfmcap import MfmCapture
+from .link import WATCHDOG_IDLE_S, WATCHDOG_S, HandshakeTimeout
 from .monitor import Monitor, drivecode
 
-CODE_BASE, CODE2, SPLIT = 0x0300, 0x0790, 0x0200
+CODE_BASE, CODE2, SPLIT = 0x0300, 0x0782, 0x0200
 CIA_PA = 0x4000
 MFM_CODE, STREAM_CODE = "mfm_1581", "mfmstream_1581"
 TAGS = {MFM_CODE: b"NYMF", STREAM_CODE: b"NYMS"}
@@ -39,6 +41,9 @@ FIELDS = {
 }
 PB_AT, T0_AT, T1_AT, ID_AT, RS_AT = 10, 11, 14, 17, 23
 LIST_TMO = 4 * ms.LIST_ENTRIES  # drive/mfmstream.s: TMO after the list
+STATE_LEN = 20  # drive/mfmstream.s state: issued, op, rep, lp, trksave, sc, stamps...
+STATE_AT = CODE_BASE + SPLIT - STATE_LEN  # ... status, flags, count: the block's end
+FORCE_WRAPS = 2  # drive/mfmstream.s: busy wait after the timeout's force interrupt
 BUFFER, BUFFER_END = 0x0C00, 0x2000  # the DOS track cache (equate.src buffcache)
 MAX_CYL = 80  # drive/mfm.inc: DOS pmaxtrk 79, cylinder 80 used by Wheels
 STEP_US = 12_000  # WD r1r0 = 01 on WD1770 and WD1772
@@ -66,6 +71,16 @@ class TrackError(IOError):
     def __init__(self, message, trace=None):
         super().__init__(message)
         self.trace = trace
+
+
+class StreamLost(HandshakeTimeout):
+    """The reply after a stream was not the drive's J return: the drive is still
+    streaming or left its monitor, so nothing more is sent to it (the monitor is
+    recovered); ``meta`` holds the stream's report."""
+
+    def __init__(self, message, meta):
+        super().__init__(message)
+        self.meta = meta
 
 
 def restore_trace(steps, result, elapsed_us, rs):
@@ -174,7 +189,7 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
     def close(self):
         """Motor off, the head back on the cylinder ``estimate`` found it on, the WD
         track register, side select, motor and LED outputs as found."""
-        if self._saved is None:
+        if self._saved is None or not self.mon.running:
             return
         self.motor(False)
         if self.cylinder is not None and self.entry is not None:
@@ -333,14 +348,48 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         revs = 2 + sum(_revs(e) * (e[3] & ms.REP_MAX) for e in entries)
         self._load(STREAM_CODE)
         self.mon.write(self._p, ms.command_list(entries))
-        self.mon.write(self._p + LIST_TMO, bytes([self._tmo(RNF_REVS + 1)]))
         size = 64 * math.ceil(2 * revs * (TRACK_BYTES + 64) / 64)
         mon = self.mon
+        tmo = self._tmo(RNF_REVS + 1)
+        self.mon.write(self._p + LIST_TMO, bytes([tmo]))
         mon.transact(b"J" + struct.pack("<H", CODE_BASE))
+        t0 = mon.clock()
         raw = mon.cbm.srq2_stream(size)
+        elapsed = mon.clock() - t0
         reply = mon.link.response(3)
         mon.touch()
-        return ms.MfmStream.parse(raw, reply[0])
+        got = ms.MfmStream.parse(raw, reply)
+        got.elapsed_s = round(elapsed, 6)
+        if not got.in_step:
+            mon.running = False
+            reps = sum(e[3] & ms.REP_MAX for e in entries)
+            got.state = self._dos_state((reps * tmo + FORCE_WRAPS) * TB_WRAP_US)
+            raise StreamLost(
+                f"stream ended {got.adapter}, drive out of step", _meta(got)
+            )
+        if not got.complete:
+            got.state = stream_state(mon.read(STATE_AT, STATE_LEN))
+        return got
+
+    def _dos_state(self, stream_us):
+        """The stream state over DOS M-R, or why it could not be read. The drive is in
+        DOS at the latest once its stream has ended (stream_us), its J reply has waited
+        WATCHDOG_S for the host and its monitor WATCHDOG_IDLE_S for a command (the
+        reply may have been taken); M-R is tried every WATCHDOG_S until then. An
+        adapter on a virtual clock advances it instead of sleeping."""
+        wait = getattr(self.mon.cbm, "host_wait", None) or self.sleep
+        limit = stream_us / 1e6 + WATCHDOG_S + WATCHDOG_IDLE_S
+        tries = math.ceil(limit / WATCHDOG_S) + 1
+        error = None
+        for i in tqdm(range(tries), desc="drive state", unit="try", leave=False):
+            try:
+                raw = self.mon.cbm.download(self.mon.dev, STATE_AT, STATE_LEN)
+            except (IOError, ValueError) as e:
+                error = f"{type(e).__name__}: {e}"
+                wait(WATCHDOG_S)
+                continue
+            return stream_state(raw) | {"answered_s": i * WATCHDOG_S}
+        return {"error": error, "waited_s": (tries - 1) * WATCHDOG_S}
 
     def read_track(self, revolutions=1):
         """Read Track ``revolutions`` times: a "track" MfmCapture."""
@@ -402,8 +451,32 @@ def _revs(e):
     return {ms.OP_READ_TRACK: 2, ms.OP_INDEX: 1}.get(e[0], 1)
 
 
+def stream_state(raw):
+    """drive/mfmstream.s's state block, cleared when the stream starts: entries
+    started, the list position, whether a command's first data byte was written
+    (first_set), the stamps in microseconds, the WD status (read once valid after the
+    last command write, until a record replaced it), flags and the data bytes (set by a
+    record or an ATN abort)."""
+    b = bytes(raw)
+    return {
+        "first_set": any(b[6:11]),
+        "entries_started": b[0],
+        "op": b[1],
+        "rep_left": b[2],
+        "list_at": b[3],
+        "t_first_us": ms.stamp_us(b[6:11]),
+        "t_end_us": ms.stamp_us(b[11:16]),
+        "wd_status": b[16],
+        "flags": b[17],
+        "count": b[18] | b[19] << 8,
+    }
+
+
 def _meta(got):
-    return {"adapter": got.adapter, "drive_end": got.drive_end, "reply": got.reply}
+    meta = {"adapter": got.adapter, "drive_end": got.drive_end, "reply": got.reply}
+    if not (got.complete and got.in_step):
+        meta["diagnosis"] = got.diagnosis()
+    return meta
 
 
 def invalidate(cbm, dev, sleep=None, clock=time.monotonic):
