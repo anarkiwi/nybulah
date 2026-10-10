@@ -447,7 +447,9 @@ placed by its own exact bits, since an unstable region reads at any length, so
 a misread there shows as its insertions or deletions only),
 insertions and deletions (sync length differences reported apart, per sync as
 written against found), the drift and the $55 byte framing, the revolution
-length read against `--cells`, and per unstable group (`weak`, or each
+length read against `--cells` (the distance between copies of the stable bits,
+less what each unstable region read beyond its written length; null where no
+stable bit is read in both copies), and per unstable group (`weak`, or each
 `noflux`/`badgcr` run) its instability across repeats (`summary.<path>.unstable`,
 all paths in `summary.unstable_all`). Verify takes no `--lead` and refuses
 one: alignment finds the pattern wherever the write's lead put it, and the
@@ -460,37 +462,60 @@ index) with each excursion's start byte, peak percent, oscillation period and
 decay in ms.
 
 On a 1571, verify takes one more RAM capture whose BITS pass starts at an index
-edge (`ram-index-H.npz`); its aligned start places the index on the pattern.
+edge (`ram-index-H.npz`); its start, placed from the nearest bits of a stable
+region, places the index on the pattern.
 Every capture start (`start_angle.index`) and speed excursion (`angle.index`)
 then gets its angle after the index, and `index.pattern_angle` is the pattern
 start's. Stream INDEX metadata is reported per stream (`index`: edges, their
-track positions, how the stream ended, `wd_status`: the WD1770 status the
-stream began from, `index_level`: the index level at its end) and against that
-reference (`index.stream_edge_offsets`) but not used for it; `index.ram_index`
+track positions from stable bits, how the stream ended, `wd_status`: the WD1770
+status the stream began from, `index_level`: the index level at its end) and
+against that reference (`index.stream_edge_offsets`) but not used for it; an
+edge inside an unstable region has no position and is listed by region
+(`index.stream_edges_unstable`); `index.ram_index`
 lists each index-started RAM capture's status and the WD1770 status prep left.
 A stream whose drive saw no index edge ends `noindex` (END_NOINDEX after its
 two-revolution timeout) with no INDEX; `index.drive_end` lists the ends. A
 `noindex` stream whose `wd_status` has bit 0 set (busy) never had the WD1770
 in type I status; with it clear, the index signal itself did not toggle.
 
-BITS, TB and TS each read their own revolution, so the no-flux `weak` region can
-read as bytes in one pass and as ones run into the `resync` sync in another,
-and the passes then latch different byte counts after it. The merge places TB
-and TS on the BITS bytes allowing such slips: TB and TS land, where they can,
-on each other's syncs that fit their timing, a BITS sync that swallowed bytes
-another pass latched is timed across them, TS's timer wraps go to the TB byte
-on its BITS boundary, and where TB slipped unseen TS measures the syncs. The
-speed trace takes only TB intervals the merge placed on single latched bytes.
-Bytes read from no flux are not 8 written cells and can still move it.
+BITS, TB and TS each read their own revolution, so an unstable region (no
+flux, or GCR with zero runs longer than two) can read as bytes in one pass and
+as ones run into the next sync in another, and the passes then latch different
+byte counts after it. The merge finds the unstable bits of the BITS pass with a
+two-source hidden Markov model (`nybulah/unstable.py`): written GCR emits each
+bit given the two before it and never a third zero; unstable bits come from
+structureless noise. Both sources and the switch rates are fitted to the
+capture by expectation maximisation, and a noise run counts only where it holds
+a zero run GCR cannot write.
+
+TB and TS events (TB's syncs, TS's SYNC lows) are then placed on the BITS
+bytes by dynamic programming over their offsets (`nybulah/eventalign.py`).
+Every pass reads the same track, so the offset holds between events unless the
+bytes between them read differently. An offset rise at an event (BITS latched
+bytes the pass hid in its sync) is explained when the BITS noise run ending
+at the landing holds that many bytes, counting the byte the sync interrupted;
+a fall (the pass latched bytes BITS hid) is explained when such a run ends at
+the landing, as the passes latch noise at different rates. Any other change is
+unexplained: a rise bounded by the bytes the event's own measured wait could
+hold (TS miscounts, timer wraps TB cannot see), a fall by the bytes since the
+previous event, and the first event (an anchor matched at another angle where
+its bytes recur) by any amount. A path is ranked by events landing on no
+capable boundary outside noise, then unexplained changes, then events landing
+inside noise, then changes, then the evidence of its landings: the rarity of
+the latched ones before a sync and, above it, landing on a sync the other pass
+placed that fits the event's timing. A large jump across stable data is
+therefore impossible, not merely costly. TB and TS land, where they can, on
+each other's syncs that fit their timing, TS's timer wraps go to the TB byte on
+its BITS boundary, and where TB slipped unseen TS measures the syncs. Anchors
+are chosen clear of unstable bytes.
+
 Over a known revolution a pass position inside the BITS bytes is that byte;
 only positions past their ends stand for the byte a whole turn away, since the
-turns need not latch the same count across the weak region. One ambiguity
-remains: a TB or TS event in the weak region (a cell or two of extra wait) and
-the `resync` sync can both land, after one slip, on capable bytes of BITS weak
-data, costing no more than the true slip with the weak event unmatched; the
-sync weights then favour the false landing, restoring a run of hidden ones the
-BITS pass never saw (inside the weak region, so `verify` counts it as `weak`
-insertions).
+turns need not latch the same count across an unstable region. The speed trace
+takes only TB intervals the merge placed on single latched bytes outside noise.
+A sync restored next to an unstable region is timed by the pass that saw it,
+whose revolution may have read the region as ones, so in the `weak` variant a
+restored run can extend past its written sync into the tag after it.
 
 `cells` writes a probe sync on `--halftrack` (destroying that halftrack only,
 once per density) and measures the cells per revolution at each of

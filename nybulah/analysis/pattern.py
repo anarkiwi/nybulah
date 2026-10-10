@@ -102,6 +102,11 @@ class Truth:  # pylint: disable=too-many-instance-attributes
             out[r.offset : r.offset + r.length] = i
         return out
 
+    def stable(self):
+        """Per pattern bit: whether its region reads the same every revolution."""
+        kinds = np.array([r.kind != UNSTABLE for r in self.regions], bool)
+        return kinds[self.kinds()]
+
     def to_json(self):
         """JSON-ready record: every region's offset, length and expected bits."""
         regions = []
@@ -325,19 +330,50 @@ class Alignment:  # pylint: disable=too-many-instance-attributes
         k = np.clip(np.searchsorted(m, cbits), 0, len(m) - 1)
         return p[k] + np.asarray(cbits) - m[k]
 
-    def revolution(self, length):
+    def stable_position(self, cbits, stable):
+        """Track positions of ``c`` bit indices from the nearest bit matched in a
+        ``stable`` region (a mask over pattern bits; filler is stable)."""
+        ok = self.match >= 0
+        inside = ok & (self.pos < len(stable))
+        ok[inside] = np.asarray(stable, bool)[self.pos[inside]]
+        return Alignment.track_position(
+            dataclasses.replace(self, match=self.match[ok], pos=self.pos[ok]), cbits
+        )
+
+    def _excess(self, length, keep):
+        """``(copy, start, bits)`` per copy of each unstable region: bits read
+        beyond the written length (matched plus inserted, less written)."""
+        weak = (self.pos >= 0) & (self.pos < length)
+        weak[weak] = ~keep[self.pos[weak]]
+        key = self.region[weak] * (self.copy.max(initial=0) + 1) + self.copy[weak]
+        groups, inv = np.unique(key, return_inverse=True)
+        read = (self.match[weak] >= 0) + self.ins[weak]
+        start = np.full(len(groups), length)
+        np.minimum.at(start, inv, self.pos[weak])
+        excess = np.bincount(inv, read - 1, len(groups)).astype(np.int64)
+        return groups % (self.copy.max(initial=0) + 1), start, excess
+
+    def revolution(self, length, stable=None):
         """Per consecutive copy pair: the median ``c`` distance of the pattern bits
-        (of ``length``) matched in both."""
+        (of ``length``; only ``stable`` ones, less what each unstable region read
+        beyond its written length, when given) matched in both, None where none are."""
         out = []
         sel = (self.match >= 0) & (self.pos < length)
+        keep = np.ones(length, bool) if stable is None else np.asarray(stable, bool)
+        copy, start, excess = self._excess(length, keep)
         for a in np.unique(self.copy[sel])[:-1]:
             at = np.full((2, length), -1, np.int64)
             for row, k in enumerate((a, a + 1)):
                 s = sel & (self.copy == k)
                 at[row, self.pos[s]] = self.match[s]
-            both = (at >= 0).all(axis=0)
-            if both.any():
-                out.append(int(np.median(at[1, both] - at[0, both])))
+            both = np.flatnonzero((at >= 0).all(axis=0) & keep)
+            if not both.size:
+                out.append(None)
+                continue
+            after = (copy == a) & (start[None, :] > both[:, None])
+            before = (copy == a + 1) & (start[None, :] < both[:, None])
+            extra = ((after | before) * excess).sum(axis=1)
+            out.append(int(np.median(at[1, both] - at[0, both] - extra)))
         return out
 
 

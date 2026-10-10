@@ -184,7 +184,7 @@ def _check(truth, name, cap, refs):
         "found": al.found,
         "band": al.band,
         "sync_error": cap.sync_error,
-        "revolution_bits": al.revolution(len(truth.bits)),
+        "revolution_bits": al.revolution(len(truth.bits), truth.stable()),
         "groups": rep["groups"],
         "syncs": rep["syncs"],
         "gap55_framing": rep["gap55_framing"],
@@ -211,7 +211,7 @@ def _summary(truth, entries, weak):
         exact = [
             g for e in mine for g in e["groups"].values() if g["kind"] != pt.UNSTABLE
         ]
-        revs = [r for e in mine for r in e["revolution_bits"]]
+        revs = [r for e in mine for r in e["revolution_bits"] if r is not None]
         out[path] = {
             "captures": len(mine),
             "bit_errors": sum(g["errors"] for g in exact),
@@ -254,22 +254,22 @@ def _offsets(pos, index, revolution):
     return np.round(off).astype(int).tolist()
 
 
-def _index(entries, aligned, revolution):
+def _index(entries, aligned, revolution, stable):
     """The index's track position: the circular mean of the starts of RAM
-    captures begun at an index edge. Stream INDEX metadata lands up to a few
-    bytes after its edge, so stream edges are reported against it, not used
-    for it."""
+    captures begun at an index edge, each from its nearest stable bits.
+    Stream INDEX metadata is reported against it, not used for it."""
     starts = [
-        al.track_position([0])[0]
+        int(al.stable_position([0], stable)[0])
         for cap, al, _ in aligned
         if _indexed(cap) and al.found
     ]
     index = circular_mean(starts, revolution)
     streams = [e["index"] for e in entries if "index" in e]
-    edges = [b for s in streams for b in s["bits"]]
+    edges = [b for s in streams for b in s["bits"] if b is not None]
     report = {
         "captures": len(starts),
         "stream_edges": len(edges),
+        "stream_edges_unstable": [u for s in streams for u in s["unstable"]],
         "drive_end": sorted({str(s["drive"]) for s in streams}),
         "ram_index": [
             {"status": cap.status, "wd_status": index_sense(cap)[0]}
@@ -285,13 +285,22 @@ def _index(entries, aligned, revolution):
     return index, report
 
 
-def _stream_edges(cap, al):
-    """A stream's INDEX metadata as track positions, how the stream ended, the WD1770
-    status it began from and its index level at the end."""
+def _stream_edges(cap, al, truth):
+    """A stream's INDEX metadata as track positions from stable bits (None, and
+    the region under ``unstable``, for an edge inside an unstable region), how
+    the stream ended, its starting WD1770 status and its end index level."""
     edges = cap.index_bits()
-    bits = al.track_position(edges).tolist() if al.found else []
+    pos = al.stable_position(edges, truth.stable()) if al.found else []
+    kinds, names = truth.kinds(), [r.name for r in truth.regions]
+    region = [kinds[t] if 0 <= t < len(kinds) else -1 for t in pos]
+    weak = [k >= 0 and truth.regions[k].kind == pt.UNSTABLE for k in region]
     sense = dict(zip(("wd_status", "index_level"), index_sense(cap)))
-    return {"edges": len(edges), "bits": bits} | cap.stream_status | sense
+    out = {
+        "edges": len(edges),
+        "bits": [None if w else int(b) for b, w in zip(pos, weak)],
+        "unstable": [names[k] for k, w in zip(region, weak) if w],
+    }
+    return out | cap.stream_status | sense
 
 
 def compare(truth, named, window=WINDOW):
@@ -304,7 +313,7 @@ def compare(truth, named, window=WINDOW):
         entry, al, byte_bit, reads = _check(truth, name, cap, refs)
         if entry["path"] == "stream":
             refs = refs + [(name, cap)]
-            entry["index"] = _stream_edges(cap, al)
+            entry["index"] = _stream_edges(cap, al, truth)
         entries.append(entry)
         mine = weak.setdefault(entry["path"], {})
         for g, r in reads.items():
@@ -319,7 +328,7 @@ def compare(truth, named, window=WINDOW):
     revolution = float(
         np.median(revs) if revs else truth.cells or bits_per_revolution(truth.density)
     )
-    index, index_report = _index(entries, aligned, revolution)
+    index, index_report = _index(entries, aligned, revolution, truth.stable())
     for entry, (cap, al, byte_bit) in zip(entries, aligned):
         entry["start_angle"] = _angles(al.track_position([0]), revolution, index)
         trace = speed_trace(cap, window) if cap.parsed is None else None
