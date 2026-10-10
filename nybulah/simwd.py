@@ -33,8 +33,8 @@ WBUMPS, WINNER, WOUTER, WISTOP, WT0MODE, WWP, WDISK, WCHG, WPULSES = range(
 WPER, WIDX, WSPIN, WWLEN, WNT, WCAP, WCHIP, WVIOL, WEARLY, WRNG, WFI = range(
     W0 + 34, W0 + 45
 )
-WCW, WOLD, WFIB, WFBUSY, WT0LIVE = range(W0 + 45, W0 + 50)
-WID = W0 + 50
+WCW, WOLD, WFIB, WFBUSY, WT0LIVE, WLEAD, WSLACK = range(W0 + 45, W0 + 52)
+WID = W0 + 52
 WLW = WID + 6
 WEND = WLW + 4
 
@@ -54,6 +54,9 @@ SPINUP_IP = 6  # ds: h = 0 with MO low waits 6 index pulses
 MO_IDLE_IP = 9  # ds: MO drops after 9 idle revolutions
 DAM_WINDOW = 43  # ds read sector: DAM within 43 bytes of the ID CRC (MFM)
 WSEC_DRQ, WSEC_GAP = 2, 22  # ds write sector flowchart and text (MFM)
+# first byte loaded within 9 byte times of its DRQ, else lost data ends the command
+# (VICE src/drive/iec/wd1770.c:538-544; the ds lets it wait to WSEC_GAP)
+WSEC_LD = WSEC_DRQ + 9
 WT_FIRST = 3  # ds write track: first byte within 3 byte times
 # ds status register table, MFM (sm sheet 2: DDEN grounded), WD CLK 8 MHz from the same
 # Y1 as the CPU: command write -> busy bit, -> status bits 1-7; register write -> read-back
@@ -193,9 +196,20 @@ def deliver(w, v):
 
 
 @kernel
-def take(w):
-    """The data register for writing: zero and lost data if not loaded since DRQ."""
-    if w[WSTAT] & DRQ:
+def loaded(w, t):
+    """The data register was written since DRQ, WLEAD or more cycles before t; the
+    least such margin is kept in WSLACK."""
+    slack = t - w[WLW + 3]
+    if w[WSTAT] & DRQ or slack < w[WLEAD]:
+        return False
+    w[WSLACK] = min(w[WSLACK], slack)
+    return True
+
+
+@kernel
+def take(w, t):
+    """The data register for writing at t: zero and lost data if not loaded."""
+    if not loaded(w, t):
         w[WSTAT] |= LD
         return 0
     return w[WDAT]
@@ -255,10 +269,14 @@ def main(w, m, c):
     elif (cmd & 0xF0) == 0xE0:
         w[WPH] = RTWAIT
         cursor(w, m, c, True)
+    elif cmd >= 0xF0:
+        n, r, p = tlen(w, m, tkey(w)), rot(w, c), w[WPER]
+        b = r // p * n + r % p * n // p
+        w[WPH], w[WN] = WTFIRST, at(w, b, n) + BUSY_VALID
+        w[WT] = at(w, b + WT_FIRST, n) + BUSY_VALID
+        w[WSTAT] |= DRQ
     else:
-        w[WPH] = WTFIRST if cmd >= 0xF0 else IDSRCH
-        if cmd >= 0xF0:
-            w[WSTAT] |= DRQ
+        w[WPH] = IDSRCH
         cursor(w, m, c, False)
 
 
@@ -310,13 +328,13 @@ def delay_event(w, m, t):
 
 
 @kernel
-def track_slot(w, m, j):
+def track_slot(w, m, j, t):
     """Write Track: byte slot j from the data register (ds write track table, MFM)."""
     if w[WCRCN]:
         w[WCRCN] = 0
         put(w, m, j, w[WCRC] & 0xFF, 0)
         return
-    v = take(w)
+    v = take(w, t)
     w[WSTAT] |= DRQ
     if v == 0xF5:
         put(w, m, j, SYNC, MARK)
@@ -348,7 +366,7 @@ def index_event(w, m, b, n, t):
         if key >= 0:
             m[2 * key], m[2 * key + 1] = size & 0xFF, size >> 8
         w[WPH], w[WN], w[WB] = WTDATA, 0, b // n * size + 1
-        track_slot(w, m, 0)
+        track_slot(w, m, 0, t)
 
 
 @kernel
@@ -468,7 +486,7 @@ def sector_slot(w, m, j, t):
         w[WCRC] = crc(SYNC3, v)
         put(w, m, j, v, 0)
     elif k < 16 + size:
-        v = take(w)
+        v = take(w, t)
         if k < 15 + size:
             w[WSTAT] |= DRQ
         w[WCRC] = crc(w[WCRC], v)
@@ -482,32 +500,37 @@ def sector_slot(w, m, j, t):
 
 
 @kernel
+def first_event(w, m, t):
+    """Write Track's first byte due: DRQ rose at WN, the command's start (the byte
+    boundary at or before its write plus BUSY_VALID), WT_FIRST byte times before t
+    (ds write track; VICE src/drive/iec/wd1770.c:642-650, 712-728). Loaded since then,
+    writing waits for the index; else lost data ends the command."""
+    if not loaded(w, t) or w[WLW + 3] < w[WN]:
+        w[WSTAT] |= LD
+        done(w, t)
+        return
+    w[WPH] = WTWAIT
+    cursor(w, m, t, True)
+
+
+@kernel
 def write_event(w, m, b, n, t):
     """Byte slot b % n starting at boundary b while writing (or counting to a write)."""
     ph, j = w[WPH], b % n
-    if ph == WTFIRST:
-        w[WN] += 1
-        if w[WN] < WT_FIRST:
-            return
-        if w[WSTAT] & DRQ:
-            w[WSTAT] |= LD
-            done(w, t)
-            return
-        w[WPH], w[WB] = WTWAIT, (b // n + 1) * n
-    elif ph == WTDATA:
+    if ph == WTDATA:
         if j == 0:
             done(w, t)
         else:
-            track_slot(w, m, j)
+            track_slot(w, m, j, t)
     elif ph == WGAP:
         w[WN] += 1
         if w[WN] == WSEC_DRQ:
             w[WSTAT] |= DRQ
-        if w[WN] < WSEC_GAP:
-            return
-        if w[WSTAT] & DRQ:
+        if w[WN] == WSEC_LD and not loaded(w, t):
             w[WSTAT] |= LD
             done(w, t)
+            return
+        if w[WN] < WSEC_GAP:
             return
         w[WPH], w[WN] = WDATA, 0
         sector_slot(w, m, j, t)
@@ -521,7 +544,7 @@ def due(w, m):
     ph = w[WPH]
     if ph == IDLE:
         return NEVER
-    if ph <= DELAY:
+    if ph <= DELAY or ph == WTFIRST:
         return w[WT]
     return at(w, w[WB], tlen(w, m, tkey(w)))
 
@@ -534,6 +557,8 @@ def event(w, m, t):
         step_event(w, t)
     elif ph == DELAY:
         delay_event(w, m, t)
+    elif ph == WTFIRST:
+        first_event(w, m, t)
     else:
         b, n = w[WB], tlen(w, m, tkey(w))
         w[WB] = b + 1
@@ -771,7 +796,9 @@ class Wd:  # pylint: disable=too-many-public-methods
 
     Steps past ``stops`` (outer, inner cylinder) count in bumps / inner_stops; ``tr00`` is
     T0_OK or a failed sensor (T0_NEVER, T0_ALWAYS); ``spinup`` is in cycles, as is
-    ``force_busy``, how long a $D0 written while idle keeps busy set.
+    ``force_busy``, how long a $D0 written while idle keeps busy set, and ``drq_lead``,
+    how long before a byte slot a write must load the data register (0: the slot's
+    start, the datasheet's byte boundary).
     """
 
     def __init__(self, media=None, cylinder=0, write_protect=False, **kw):
@@ -779,6 +806,7 @@ class Wd:  # pylint: disable=too-many-public-methods
         w[WCHIP] = CHIPS.index(kw.pop("chip", 1772))
         w[WSPIN] = kw.pop("spinup", 0)
         w[WFBUSY] = kw.pop("force_busy", 0)
+        w[WLEAD] = kw.pop("drq_lead", 0)
         w[WT0MODE] = kw.pop("tr00", T0_OK)
         w[WOUTER], w[WISTOP] = kw.pop("stops", (OUTER_STOP, INNER_STOP))
         w[WRNG] = kw.pop("seed", 0) & 0x7FFFFFFF
@@ -787,6 +815,7 @@ class Wd:  # pylint: disable=too-many-public-methods
             raise TypeError(f"unexpected {sorted(kw)}")
         w[WCYL], w[WWP], w[WDIR], w[WTYPE], w[WHEAD] = cylinder, write_protect, 1, 1, 1
         w[WLW : WLW + 4] = w[WFI] = w[WCW] = -NEVER
+        w[WSLACK] = NEVER
         self.media, self.flat = None, np.zeros(1, np.uint8)
         self.insert(media, 0, changed)
 
@@ -864,6 +893,15 @@ class Wd:  # pylint: disable=too-many-public-methods
         """Accesses inside the datasheet's delays: status reads after a command write,
         read-backs after a register write, commands after a Force Interrupt."""
         return self._get(WEARLY)
+
+    @property
+    def drq_slack(self):
+        """Least cycles between a data register load and the slot that took it."""
+        return self._get(WSLACK)
+
+    @drq_slack.setter
+    def drq_slack(self, value):
+        self.w[WSLACK] = value
 
     @property
     def busy(self):

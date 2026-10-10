@@ -15,7 +15,8 @@ from nybulah.link import BASE, WATCHDOG_IDLE_S
 from nybulah.monitor import Monitor, drivecode
 from nybulah.sim import Drive1581
 from nybulah.r1581 import ST_BUSY, ST_T0
-from nybulah.simwd import STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
+from nybulah.simwd import NEVER, STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
+from nybulah.simwd import stream_track
 
 DEV = 9
 BAM = 0x0A00  # equate.src bam1
@@ -190,6 +191,48 @@ def test_read_sector_ram(media):
     assert np.array_equal(data, payload(10, 0, 4))
     _, status = drive.read_sector(10, 11)
     assert status & mfm.ST_RNF
+    no_stops(sim)
+
+
+# drive/mfm.s writetrk and writesec: a DRQ is written within 40 cycles of the
+# 64-cycle byte.
+WT_LEAD = 64 - 40
+
+
+@pytest.mark.parametrize("layout", ["short_tokens", "cylinder_0"])
+def test_write_track_loads_every_byte_wt_lead_ahead(layout):
+    """The WD taking each byte WT_LEAD cycles before its slot still gets every one,
+    whatever the tokens: short ones back to back, or cylinder 0 side 0 as formatted."""
+    sim, drive = ram_rig(MfmMedia(cylinders=2), cylinder=0, drq_lead=WT_LEAD)
+    drive.motor(True)
+    drive.home(0)
+    if layout == "short_tokens":
+        dr = np.array([0x11, 0x22, 0x22, 0x22, 0x33, 0x44, 0x44, 0x44] * 400 + [0x4E])
+    else:
+        dr = mfm.unrle(mfm.plan_track(mfm.standard_layout(0, 0)).image)
+    sim.wd.drq_slack = NEVER
+    status = drive.write_track(mfm.rle(dr))
+    data, _, _ = sim.wd.media.track(0, 1)
+    assert not status & mfm.ST_LOST and sim.wd.drq_slack >= WT_LEAD
+    assert np.array_equal(data, stream_track(dr, len(data))[0])
+    no_stops(sim)
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_write_sectors_load_every_byte_wt_lead_ahead(deleted):
+    """Ten sectors back to back with the WD taking each byte WT_LEAD cycles early:
+    all written, data and data mark ($F8 deleted, $FB normal) as given."""
+    media = MfmMedia.formatted(cylinders=2)
+    sim, drive = ram_rig(media, cylinder=0, drq_lead=WT_LEAD)
+    drive.motor(True)
+    drive.home(0)
+    rows = np.random.default_rng(int(deleted)).integers(0, 256, (10, 512), np.uint8)
+    sim.wd.drq_slack = NEVER
+    status, written = drive.write_sectors(0, 1, rows, deleted)
+    assert (written, status & mfm.ST_LOST) == (10, 0) and sim.wd.drq_slack >= WT_LEAD
+    for r in (1, 10):
+        data, st = drive.read_sector(0, r)
+        assert np.array_equal(data, rows[r - 1]) and bool(st & 0x20) == deleted
     no_stops(sim)
 
 
