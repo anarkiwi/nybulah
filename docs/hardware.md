@@ -811,6 +811,13 @@ to lose only for step 5.
 
    Expect `adapter` and `drive` "done", `revolution_bytes` near 6250,
    `revolution_us` near 200000, 10 IDs a revolution with `c` 39, no ID CRC errors.
+   Measured with firmware v14 (`artifacts/stream-1581-39-v14.npz`): the track
+   stream `done`/`done`, 6254 and 6257 bytes, 200226 and 200232 us, Read Track
+   status `$84` (Lost Data) on both revolutions and two sector errors in the
+   decode; the ids stream ended `timeout` at its index wait (`op 0`): the type I
+   status never showed IP, as `homeprobe`'s `index` false on every run. Both are
+   open; the stamps of Read Track, which the WD starts at an index edge, place
+   the index without the wait.
 5. A whole disk, read (and, on a scratch disk, written and verified):
 
    ```sh
