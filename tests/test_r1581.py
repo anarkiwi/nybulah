@@ -1,6 +1,8 @@
 """1581 drive code (drive/mfm.s, drive/mfmstream.s) on the simulated 1581: transports,
 bounded homing, sector and track I/O, streams; no head ever reaches a stop."""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -12,7 +14,8 @@ from nybulah.formats.mfmcap import load_captures
 from nybulah.link import BASE, WATCHDOG_IDLE_S
 from nybulah.monitor import Monitor, drivecode
 from nybulah.sim import Drive1581
-from nybulah.simwd import T0_NEVER, WTRK, MfmMedia, Wd
+from nybulah.r1581 import ST_BUSY, ST_T0
+from nybulah.simwd import STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
 
 DEV = 9
 BAM = 0x0A00  # equate.src bam1
@@ -33,7 +36,7 @@ def media_fixture():
 def no_stops(drive):
     drive.sync()
     wd = drive.wd
-    assert (wd.bumps, wd.inner_stops, wd.violations) == (0, 0, 0)
+    assert (wd.bumps, wd.inner_stops, wd.violations, wd.early) == (0, 0, 0, 0)
 
 
 def ram_rig(media, cylinder=37, protocol="s1", **wd):
@@ -86,9 +89,25 @@ def test_sense_estimate_and_bounded_home(media):
     drive.motor(True)
     assert abs(drive.period_us - 200_000) < 50
     assert drive.estimate() == (37, "id")
-    with pytest.raises(r1581.TrackError):
+    with pytest.raises(r1581.TrackError) as short:
         drive.home(20)
+    trace = short.value.trace
+    assert trace["busy_seen"] and trace["end"] == "deadline" and drive.cylinder is None
+    assert trace["pulses"] == 20 == sim.wd.pulses and trace["track_register"] == 0xEB
+    assert not trace["forced_status"] & r1581.ST_T0
+    assert 19.5 * r1581.STEP_US <= trace["elapsed_us"] < 19.5 * r1581.STEP_US + 1000
     drive.home(17)
+    trace = drive.home_trace
+    assert trace["end"] == "deadline" and trace["pulses"] == 17 and trace["settled_t0"]
+    assert sim.wd.pulses == 37 and trace["track_register"] == 0xEE
+    assert trace["last_status"] & r1581.ST_T0 and trace["forced_status"] & r1581.ST_T0
+    assert trace["result"] == 0
+    drive.home(3)
+    trace = drive.home_trace
+    assert (
+        trace["end"] == "busy_fell" and trace["pulses"] == 0 == trace["track_register"]
+    )
+    assert sim.wd.pulses == 37
     assert drive.cylinder == 0 and drive.sense()["t0"]
     no_stops(sim)
 
@@ -96,9 +115,55 @@ def test_sense_estimate_and_bounded_home(media):
 def test_home_never_passes_the_estimate_without_tr00(media):
     sim, drive = ram_rig(media, cylinder=12, tr00=T0_NEVER)
     drive.motor(True)
-    with pytest.raises(r1581.TrackError):
+    with pytest.raises(r1581.TrackError) as err:
         drive.home(12)
+    assert err.value.trace["pulses"] == 12 == sim.wd.pulses
+    assert err.value.trace["end"] == "deadline"
     no_stops(sim)
+
+
+def test_home_needs_tr00_again_after_settling(media, monkeypatch):
+    sim, drive = ram_rig(media, cylinder=5)
+    sense = drive.sense
+    monkeypatch.setattr(drive, "sense", lambda: sense() | {"t0": False})
+    with pytest.raises(r1581.TrackError, match="after settling") as err:
+        drive.home(5)
+    assert err.value.trace["result"] == 0 and not err.value.trace["settled_t0"]
+    assert drive.cylinder is None and sim.wd.cylinder == 0
+    with pytest.raises(r1581.TrackError, match="before homing"):
+        drive.seek(3)
+    no_stops(sim)
+
+
+def test_tr00_is_read_once_an_idle_force_interrupt_clears_busy(media):
+    sim, drive = ram_rig(media, cylinder=39, force_busy=4 * STATUS_VALID)
+    drive.motor(True)
+    drive.home(39)
+    trace = drive.home_trace
+    assert trace["settled_t0"] and trace["settled_status"] & (ST_BUSY | ST_T0) == ST_T0
+    assert trace["pulses"] == 39 and trace["first_status"] == 0xA1
+    assert (trace["last_status"], trace["forced_status"]) == (0xA5, 0xA4)
+    no_stops(sim)
+
+
+def test_sense_reads_tr00_at_rest_without_a_step_pulse(media):
+    sim, drive = ram_rig(media, cylinder=0, force_busy=4 * STATUS_VALID)
+    drive.motor(True)
+    assert drive.read_id()["c"] == 0
+    state = drive.sense()
+    assert state["t0"] and state["status"] & ST_BUSY == 0
+    assert drive.estimate() == (0, "tr00")
+    drive.home(0)
+    assert (drive.home_trace["result"], drive.home_trace["settled_t0"]) == (0, True)
+    assert sim.wd.pulses == 0 and sim.wd.cylinder == 0
+    no_stops(sim)
+
+
+def test_restore_trace_of_a_command_the_wd_never_ran():
+    trace = r1581.restore_trace(3, 0x80, 120, (0x80, 0x80, 0x80, 39))
+    assert not trace["busy_seen"] and trace["end"] == "busy_fell"
+    assert trace["pulses"] == 0 and trace["track_register"] == 39
+    assert r1581.restore_trace(0, 0, 0, (0, 0, 0, 0)) == {"steps": 0, "result": 0}
 
 
 def test_seek_bounds_and_ids(media):
@@ -321,8 +386,12 @@ def test_cli_homeprobe_dry_and_step(cli_rig, media, capsys):
     dry = cli.main(["homeprobe", "--dev", "9", "--transport", "s4", "--headers"], cbm)
     assert (dry["estimate"], dry["source"], dry["steps"]) == (25, "id", 25)
     assert sim.wd.cylinder == 25
+    capsys.readouterr()
     with pytest.raises(r1581.TrackError, match="within 0 steps"):
         cli.main(["homeprobe", "--dev", "9", "--transport", "s4", "--step"], cbm)
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["homed"] is False and failed["restore"]["steps"] == 0
+    assert failed["restore"]["result"] & 0x80 and "error" in failed
     assert sim.wd.cylinder == 25
     with pytest.raises(ValueError):
         cli.main(
@@ -354,6 +423,7 @@ def test_cli_homeprobe_dry_and_step(cli_rig, media, capsys):
         cbm,
     )
     assert out["homed"] and sim.wd.cylinder == 25
+    assert out["restore"]["pulses"] == 25 and out["restore"]["end"] == "deadline"
     assert capsys.readouterr().out
     no_stops(sim)
 
@@ -380,6 +450,49 @@ def test_cli_streamprobe(cli_rig, media, tmp_path):
     assert {tuple(i[:3]) for i in out["ids"]} >= {(39, 0, r) for r in range(1, 11)}
     info = cli.main(["info", str(save)])
     assert info
+    no_stops(sim)
+
+
+def test_cli_streamprobe_sequence_of_hw11(media, monkeypatch, tmp_path):
+    """streamprobe --max-steps 0 --cylinder 39 --revolutions 2 from cylinder 0, the
+    WD holding busy after an idle force interrupt as the 1581 does."""
+    monkeypatch.setattr(r1581.time, "sleep", lambda s: None)
+    monkeypatch.setattr(r1581, "invalidate", lambda cbm, dev, sleep=None: True)
+    cbm = simsrq.make(
+        model="1581", dev=DEV, firmware=12, timeout_us=WATCHDOG_IDLE_S * 1e6
+    )
+    cbm.drive.wd = Wd(media, cylinder=0, force_busy=4 * STATUS_VALID)
+    args = ["streamprobe", "--dev", "9", "--max-steps", "0", "--cylinder", "39"]
+    out = cli.main(
+        args + ["--revolutions", "2", "--save", str(tmp_path / "s.npz")], cbm
+    )
+    assert out["home"]["source"] == "tr00" and out["home"]["homed"]
+    assert out["adapter"] == ["done", "done"] and out["drive"] == ["done", "done"]
+    assert out["track_stream"]["bytes"] >= 2 * 6249
+    assert {tuple(i[:3]) for i in out["ids"]} >= {(39, 0, r) for r in range(1, 11)}
+    assert cbm.drive.wd.pulses == 2 * 39
+    no_stops(cbm.drive)
+
+
+def test_cli_streamprobe_reports_the_track_stream_when_a_later_step_fails(
+    cli_rig, media, monkeypatch, capsys
+):
+    cbm, sim = cli_rig(media, 0)
+
+    def lost(_self, _count):
+        raise r1581.TrackError("drive left the monitor")
+
+    monkeypatch.setattr(r1581.Mfm1581, "read_ids", lost)
+    with pytest.raises(r1581.TrackError, match="left the monitor"):
+        cli.main(
+            ["streamprobe", "--dev", "9", "--max-steps", "0", "--cylinder", "39"], cbm
+        )
+    out = json.loads(capsys.readouterr().out)
+    assert out["home"]["homed"] and out["home"]["restore"]["result"] == 0
+    stream = out["track_stream"]
+    assert (stream["adapter"], stream["drive_end"]) == ("done", "done")
+    assert stream["bytes"] >= 6249 and stream["rev_status"] == [0x80]
+    assert sim.wd.cylinder == 0
     no_stops(sim)
 
 

@@ -17,7 +17,12 @@
 ;             (c - 1/2) STEP_US after the command stops the WD between pulse
 ;             c and pulse c + 1. A = 0 with TR00 sensed (track register 0),
 ;             $80 | type I status without it, $FF for c too large; c = 0 only
-;             checks TR00. P_T1 = microseconds the command ran.
+;             checks TR00. For c > 0, P_T1 = microseconds from a stamp
+;             before the command to its end; P_RS = its first valid status,
+;             the last status before the force interrupt (bit 0: stopped by
+;             the deadline), the type I status after it and the track
+;             register then ($FF less the pulses issued when stopped by the
+;             deadline; 0 when the WD found TR00 itself).
 ;  4 seek     WD Seek from the track register to P_ARG (<= MAX_CYL, else
 ;             A = $FF and nothing moves); A = status.
 ;  5 index    two rising index edges (type I status IP): times in P_T0,
@@ -70,34 +75,38 @@ P_PB:   .res 1
 P_T0:   .res 3
 P_T1:   .res 3
 P_ID:   .res 6
+P_RS:   .res 4
 wraps:  .res 1
 tmo:    .res 1
 fill:   .res 1
 trksave: .res 1
 pages:  .res 1
-run:    .res 1
-mode:   .res 1
-wcmd:   .res 1
 count:  .res 2
 due:    .res 3
 t:      .res 3                  ; elapsed lo, hi, wraps
 raw:    .res 3                  ; timer B high, low, high again
 
-; Command A, then 67 cycles: past the 32 us the datasheet asks between a
-; command write and a status read, and the 16 us after a force interrupt.
-wdcmd:  WDTEST
-        sta WDCMD
-        ldx #12
-:       dex
-        bne :-
+; Command A; A = its first valid status (mfm.inc WDISSUE).
+wdcmd:  WDISSUE
         rts
 
-; Type I status: force interrupt, then the status register.
+; Type I status with T0 live: force interrupt, then a Seek to the track
+; register's own value (data register = track register: no step pulse,
+; datasheet Seek flowchart), each waited out until idle. T0 is updated only
+; by a type I command (datasheet status register note 4; an idle $D0 leaves
+; it clear on the 1581); the WD alone sees TR00 (schematic sheet 2) and the
+; DOS never reads it. A = status, X = track register, Y clobbered.
 status1:
         lda #WD_FORCE
-        jsr wdcmd
+        jsr wdgo
         WDTEST
-        lda WDSTAT
+        ldx WDTRK
+        WDTEST
+        stx WDDAT
+        lda #WD_SEEK
+; Command A, then A = its status once busy reads clear (mfm.inc WDIDLE).
+wdgo:   jsr wdcmd
+        WDIDLE
         rts
 
 ; A wrap seen: count it and spend a unit of the timeout; Z set when it ran
@@ -198,15 +207,12 @@ side:   lda CIA_PA
         sta CIA_PA
         rts
 
-; due = (c - 1/2) STEP_US, the deadline from the command.
+; due = (c - 1/2) STEP_US from a stamp taken before the command.
 restore:
         jsr setup
         ldx P_ARG
         bne :+
-        and #ST_T0
-        beq rfail
-        lda #0
-        rts
+        jmp rdone
 :       cpx #MAX_CYL + 1
         bcs rbad
         lda #<(-STEP_US / 2)
@@ -226,13 +232,13 @@ restore:
         inc due + 2
 :       dex
         bne :--
-        lda #WD_RESTORE
-        jsr wdcmd
         jsr now
         ldx #0
         jsr keep
-rpoll:  WDTEST
-        lda WDSTAT
+        lda #WD_RESTORE
+        jsr wdcmd
+        sta P_RS
+rpoll:  sta P_RS + 1
         lsr
         bcc rdone
         jsr elapsed
@@ -242,11 +248,18 @@ rpoll:  WDTEST
         sbc due + 1
         lda t + 2
         sbc due + 2
+        bcs rdone
+        WDTEST
+        lda WDSTAT
         bcc rpoll
 rdone:  jsr elapsed
         ldx #3
         jsr keep
         jsr status1                     ; stops the WD before pulse c + 1
+        sta P_RS + 2
+        WDTEST
+        ldx WDTRK
+        stx P_RS + 3
         and #ST_T0
         beq rfail
         lda #0
@@ -515,7 +528,8 @@ wsd:    jsr wait
         rts
 
 ; Write X when the WD asks (inline in the run loops); the command's end leaves
-; through wait.
+; through wait. A wrap only spends the timeout (no time is kept here): 8
+; cycles, which a token read between two writes leaves room for.
 .macro WPUT
         .local wp, ok
 wp:     WDTEST
@@ -526,7 +540,7 @@ wp:     WDTEST
         bne ok
         bit CIA_ICR
         bpl wp
-        jsr spend
+        dec tmo
         bne wp
         jmp tmout
 ok:     WDTEST
@@ -595,3 +609,6 @@ incp:   iny
         bne :+
         inc ptr + 1
 :       rts
+
+run:    .res 1
+wcmd:   .res 1

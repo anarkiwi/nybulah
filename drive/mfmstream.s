@@ -88,18 +88,14 @@ TMO:    .res 1
         sta base + 4
 .endmacro
 
-; Command A, then 67 cycles before a status read (datasheet: 32 us).
-wdcmd:  WDTEST
-        sta WDCMD
-        ldx #12
-:       dex
-        bne :-
+; Command A; A = its first valid status (mfm.inc WDISSUE).
+wdcmd:  WDISSUE
         rts
 
+; Force interrupt; A = the status once idle (mfm.inc WDIDLE), Y clobbered.
 force:  lda #WD_FORCE
         jsr wdcmd
-        WDTEST
-        lda WDSTAT
+        WDIDLE
         rts
 
 ; Z set when a wrap used up the timeout.
@@ -241,12 +237,6 @@ dend:   WDTEST
         sta last
         STAMP last
         jmp record
-; Add the first stamp's wrap flag to wraps.
-seen:   lda first + 1
-        lsr
-        adc wraps
-        sta wraps
-        rts
 
 ; Send one queued byte before the command's first DRQ (entered by jmp from
 ; w0, back by jmp): the status is read at -14 (DRQ: no send, the byte now),
@@ -322,10 +312,6 @@ stat:   .res 1                  ; the REC payload continues: status, flags,
 flags:  .res 1                  ; count
 count:  .res 2
 REC_LEN = * - first
-acc:    .res 1
-bits:   .res 1
-nb:     .res 1
-py:     .res 1
 
 
         .segment "CODE2"
@@ -333,6 +319,17 @@ py:     .res 1
 
 q:      .res QMASK + 1
         .assert >q = >(q + QMASK), error, "q crosses a page"
+acc:    .res 1
+bits:   .res 1
+nb:     .res 1
+py:     .res 1
+
+; Add the first stamp's wrap flag to wraps.
+seen:   lda first + 1
+        lsr
+        adc wraps
+        sta wraps
+        rts
 
 ; Queue X bytes from first + Y as six-bit chunks, most significant bit
 ; first, the last chunk padded with zeros.

@@ -66,20 +66,29 @@ def summary_1581(track, ids):
 
 
 def execute_1581(args, cbm):
-    """Home within --max-steps, then a Read Track stream and a Read Address stream."""
-    with r1581.session(cbm, args.dev, "s4") as drive:
-        drive.motor(True)
-        report = {"home": disk1581.dry(drive, args.headers)}
-        disk1581.home(drive, report["home"], args.max_steps)
-        drive.seek(args.cylinder)
-        drive.side(args.side)
-        track = drive.read_track(args.revolutions)
-        ids = drive.read_ids(args.ids)
-        report |= summary_1581(track, ids)
-        if args.save:
-            save_captures(args.save, [track, ids])
-            report["saved"] = str(args.save)
-    print(json.dumps(report))
+    """Home within --max-steps, then a Read Track stream and a Read Address stream;
+    the report so far (with how the Read Track stream ended) is printed also when a
+    later step fails."""
+    report = {}
+    try:
+        with r1581.session(cbm, args.dev, "s4") as drive:
+            drive.motor(True)
+            report["home"] = disk1581.dry(drive, args.headers)
+            disk1581.home(drive, report["home"], args.max_steps)
+            drive.seek(args.cylinder)
+            drive.side(args.side)
+            track = drive.read_track(args.revolutions)
+            report["track_stream"] = track.meta | {
+                "bytes": len(track.data),
+                "rev_status": list(track.rev_status),
+            }
+            ids = drive.read_ids(args.ids)
+            report |= summary_1581(track, ids)
+            if args.save:
+                save_captures(args.save, [track, ids])
+                report["saved"] = str(args.save)
+    finally:
+        print(json.dumps(report, default=int))
     return report
 
 

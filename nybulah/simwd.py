@@ -33,7 +33,8 @@ WBUMPS, WINNER, WOUTER, WISTOP, WT0MODE, WWP, WDISK, WCHG, WPULSES = range(
 WPER, WIDX, WSPIN, WWLEN, WNT, WCAP, WCHIP, WVIOL, WEARLY, WRNG, WFI = range(
     W0 + 34, W0 + 45
 )
-WID = W0 + 45
+WCW, WOLD, WFIB, WFBUSY, WT0LIVE = range(W0 + 45, W0 + 50)
+WID = W0 + 50
 WLW = WID + 6
 WEND = WLW + 4
 
@@ -54,7 +55,14 @@ MO_IDLE_IP = 9  # ds: MO drops after 9 idle revolutions
 DAM_WINDOW = 43  # ds read sector: DAM within 43 bytes of the ID CRC (MFM)
 WSEC_DRQ, WSEC_GAP = 2, 22  # ds write sector flowchart and text (MFM)
 WT_FIRST = 3  # ds write track: first byte within 3 byte times
-EARLY = 16 * CPU_HZ // 1_000_000  # ds: register read-back 16 us after a write (MFM)
+# ds status register table, MFM (sm sheet 2: DDEN grounded), WD CLK 8 MHz from the same
+# Y1 as the CPU: command write -> busy bit, -> status bits 1-7; register write -> read-back
+# of the same register; ds type IV: force interrupt -> next command
+BUSY_VALID, STATUS_VALID = (us * CPU_HZ // 1_000_000 for us in (24, 32))
+EARLY = FORCE_GAP = 16 * CPU_HZ // 1_000_000
+DIR_SETUP = (
+    24 * CPU_HZ // 1_000_000
+)  # ds type I: DIRC valid 24 us before the first pulse
 IDAM_MIN, DAM_FIRST, DAM_LAST, DAM_NORMAL = 0xFC, 0xF8, 0xFB, 0xFA  # ds type II
 SYNC = 0xA1
 PA_SIDE, PA_RDY, PA_MOTOR, PA_CHNG = 0x01, 0x02, 0x04, 0x80  # iodef.src port A
@@ -203,14 +211,21 @@ def mo_idle(w, c):
 
 @kernel
 def start(w, m, c):
-    """A command (not Force Interrupt) written while not busy."""
+    """A command (not Force Interrupt) written while not busy: MO rises for every one
+    (ds pin MO: "enable the spindle motor prior to read, write or stepping operations");
+    h = 0 with MO low adds the spin-up wait."""
     cmd = w[WCMD]
     mo_idle(w, c)
     w[WTYPE] = 1 if cmd < 0x80 else (2 if cmd < 0xC0 else 3)
+    w[WT0LIVE] = w[WTYPE] == 1
     w[WSTAT] = BUSY
     w[WN] = w[WIP] = w[WSYN] = w[WCRCN] = 0
-    if not cmd & H_FLAG and not w[WMO]:
-        w[WMO], w[WPH] = 1, SPIN
+    spin = not cmd & H_FLAG and not w[WMO]
+    w[WMO] = 1
+    if not spin:
+        w[WSU] = 1
+    if spin:
+        w[WPH] = SPIN
         cursor(w, m, c, True)
     else:
         go(w, m, c)
@@ -232,7 +247,7 @@ def main(w, m, c):
     if w[WTYPE] == 1:
         if cmd < 0x10:
             w[WTRK], w[WDAT] = 0xFF, 0
-        w[WPH], w[WT], w[WN] = STEP, c, 0
+        w[WPH], w[WT], w[WN] = STEP, c + DIR_SETUP, 0
         return
     if ((cmd & 0xE0) == 0xA0 or cmd >= 0xF0) and w[WWP]:
         w[WSTAT] |= WPROT
@@ -551,11 +566,27 @@ def status(w, c):
     """Status register: type I shows MO, WP, SU, SE, CRC, T0, IP live (ds summary)."""
     mo_idle(w, c)
     mo = MO if w[WMO] else 0
+    if c < w[WFIB]:
+        return BUSY | mo
     if w[WTYPE] != 1:
         return w[WSTAT] & ~MO | mo
     v = w[WSTAT] & (BUSY | CRCE | RNF) | mo | (SU if w[WSU] else 0)
-    v |= (T0 if tr00(w) else 0) | (IP if index_pulse(w, c) else 0)
+    v |= (T0 if w[WT0LIVE] and tr00(w) else 0) | (IP if index_pulse(w, c) else 0)
     return v | (WPROT if w[WWP] else 0)
+
+
+@kernel
+def visible(w, c, count):
+    """Status as read at c: the register before the last command write until its bit 0
+    is valid BUSY_VALID cycles on and its bits 1-7 STATUS_VALID on (ds); count adds an
+    early read."""
+    v, dt = status(w, c), c - w[WCW]
+    if dt >= STATUS_VALID:
+        return v
+    w[WEARLY] += count
+    if dt < BUSY_VALID:
+        return w[WOLD]
+    return v & BUSY | w[WOLD] & ~BUSY
 
 
 @kernel
@@ -564,7 +595,7 @@ def wd_read(w, m, reg, c, pc):
     wd_run(w, m, c)
     access(w, pc)
     if reg == 0:
-        return status(w, c)
+        return visible(w, c, 1)
     if c - w[WLW + reg] < EARLY:
         w[WEARLY] += 1
     if reg == 3:
@@ -574,12 +605,18 @@ def wd_read(w, m, reg, c, pc):
 
 @kernel
 def force(w, c):
-    """Force Interrupt: end a command (status kept) or show type I status."""
+    """Force Interrupt: end a command (status kept) or show type I status without T0
+    until a type I command runs (ds status note 4: T0 is polled after a type I command;
+    1581 hardware reads $80 idle on cylinder 0), which a $D0
+    written while idle holds back for WFBUSY cycles: busy with the type I bits clear
+    (1581 hardware; the datasheet gives no duration, the DOS waits for busy to clear,
+    msub.src wdabort)."""
     w[WFI] = c
     if w[WSTAT] & BUSY:
         done(w, c)
     else:
-        w[WTYPE], w[WSTAT] = 1, 0
+        w[WTYPE], w[WSTAT], w[WSU], w[WFIB] = 1, 0, 0, c + w[WFBUSY]
+        w[WT0LIVE] = 0
 
 
 @kernel
@@ -588,12 +625,13 @@ def wd_write(w, m, reg, v, c, pc):
     Interrupt and the data register are accepted (ds)."""
     wd_run(w, m, c)
     access(w, pc)
-    busy = w[WSTAT] & BUSY
+    busy = w[WSTAT] & BUSY or c < w[WFIB]
     if reg == 0:
+        w[WOLD], w[WCW] = visible(w, c, 0), c
         if v & 0xF0 == 0xD0:
             force(w, c)
         elif not busy:
-            if c - w[WFI] < EARLY:
+            if c - w[WFI] < FORCE_GAP:
                 w[WEARLY] += 1
             w[WCMD] = v
             start(w, m, c)
@@ -732,13 +770,15 @@ class Wd:  # pylint: disable=too-many-public-methods
     """WD1772 (or WD1770 step rates) and the 1581 mechanism holding a disk.
 
     Steps past ``stops`` (outer, inner cylinder) count in bumps / inner_stops; ``tr00`` is
-    T0_OK or a failed sensor (T0_NEVER, T0_ALWAYS); ``spinup`` is in cycles.
+    T0_OK or a failed sensor (T0_NEVER, T0_ALWAYS); ``spinup`` is in cycles, as is
+    ``force_busy``, how long a $D0 written while idle keeps busy set.
     """
 
     def __init__(self, media=None, cylinder=0, write_protect=False, **kw):
         w = self.w = np.zeros(WEND, np.int64)
         w[WCHIP] = CHIPS.index(kw.pop("chip", 1772))
         w[WSPIN] = kw.pop("spinup", 0)
+        w[WFBUSY] = kw.pop("force_busy", 0)
         w[WT0MODE] = kw.pop("tr00", T0_OK)
         w[WOUTER], w[WISTOP] = kw.pop("stops", (OUTER_STOP, INNER_STOP))
         w[WRNG] = kw.pop("seed", 0) & 0x7FFFFFFF
@@ -746,7 +786,7 @@ class Wd:  # pylint: disable=too-many-public-methods
         if kw:
             raise TypeError(f"unexpected {sorted(kw)}")
         w[WCYL], w[WWP], w[WDIR], w[WTYPE], w[WHEAD] = cylinder, write_protect, 1, 1, 1
-        w[WLW : WLW + 4] = w[WFI] = -NEVER
+        w[WLW : WLW + 4] = w[WFI] = w[WCW] = -NEVER
         self.media, self.flat = None, np.zeros(1, np.uint8)
         self.insert(media, 0, changed)
 
@@ -821,7 +861,8 @@ class Wd:  # pylint: disable=too-many-public-methods
 
     @property
     def early(self):
-        """Read-backs or commands within 16 us of a write or Force Interrupt."""
+        """Accesses inside the datasheet's delays: status reads after a command write,
+        read-backs after a register write, commands after a Force Interrupt."""
         return self._get(WEARLY)
 
     @property

@@ -494,6 +494,59 @@ drive 8 the 1571 and a formatted disk inserted:
 | head motion by the DOS | Restore at power-on and reset, in job error recovery, format and burst query | `dskint.src`, `job.src`, `burstc.src`, `patch.src` |
 | fast host flag | an idle 1581 sets it after 8 SRQ rises (shift register in input mode, `irq.src`, lock bit set at init) and clears it only on UNLISTEN, UNTALK or a framing error (`sieee.src`); while set a TALK answers over the shift register | DOS source |
 
+### WD177x programmed I/O timing
+
+The WD's 8 MHz CLK and the CPU's 2 MHz come from the same 16 MHz Y1 (sheet 2), and
+DDEN is grounded, so the data sheet's MFM column applies in exact CPU cycles:
+
+| from | to | delay | cycles | source |
+|---|---|---|---|---|
+| command register write | busy (status bit 0) valid | 24 us | 48 | WD1772 datasheet, status register "Delay Req'd", MFM |
+| command register write | status bits 1-7 valid | 32 us | 64 | same table |
+| register write | read of the same register | 16 us | 32 | same table; "Floppy Disk Controller Devices" |
+| Force Interrupt | next command | 16 us | 32 | type IV commands |
+| type I command | first step pulse | 24 us or more (DIRC valid before it) | 48 | type I commands |
+| Write Track | first Data Register load | within 3 byte times (32 us each) | 192 | Write Track |
+
+The DOS issues every command through `wdbusy` (`msub.src`): write, poll until busy
+reads set, then `delay16`; `wdunbusy` polls until it reads clear; `wdabort` waits
+three `delay40` after `$D0`. nybulah issues every command and force interrupt
+through `WDISSUE` (`drive/mfm.inc`): the first status read comes 5 n + 5 = 65
+cycles after the write (n = 12 loop passes), past both validity delays, so a
+busy bit that reads clear there means the command has ended; no command follows
+a force interrupt sooner. The simulator (`simwd`) returns the register as it was
+before a command write until each delay has passed and counts such reads in
+`early`; every 1581 drive-code test asserts none.
+
+Type I status (IP, MO) is shown after a type I command or a force interrupt
+while idle, but T0 is updated only by a type I command (datasheet status note 4):
+on the 1581 an idle `$D0` reads `$80` with the head on cylinder 0
+(`artifacts/hw11/dry2.json`). TR00 reaches only the WD (sheet 2: drive pin 26 to
+WD pin 23, not the CIA), and the DOS never reads T0 (only Restore uses TR00). So
+`sense` and every homing check force an interrupt, then issue a Seek to the
+track register's own value (data register = track register: no step pulse,
+Seek flowchart) and read T0 once it ends. A `$D0` written while idle can read busy, with T0 and IP clear, past the
+datasheet's delays (status `$81` with the head on TR00, `artifacts/hw11`); the
+datasheet gives no duration and the DOS waits for busy to clear after `$D0`
+(`wdabort`). nybulah does the same (`WDIDLE`, bounded by a timer B wrap) after
+every force interrupt, so T0 is read only once busy reads clear. A command
+written in that window is not accepted. The h flag (bit 3, set in every command as by the DOS) skips the six-index
+spin-up wait; MO still rises with each command and falls after nine idle index
+pulses, so with the spindle stopped status bit 7 stays set (hardware runs show
+`$80` idle). MO is not wired on the 1581: CIA PA2 runs the motor, and Restore and
+Seek step without it.
+
+A bounded Restore reports what the WD did (`restore` in `homeprobe` JSON, also
+when homing fails): `first_status` (busy should be set: `busy_seen`), `end`
+(`busy_fell`: the WD found TR00 itself, before the last allowed pulse;
+`deadline`: the (c - 1/2) x 12 ms force interrupt stopped it, the normal end
+when c equals the distance, since the WD checks TR00 a step time after each
+pulse), `last_status`, `forced_status` (after the zero-step Seek; T0 decides), `track_register` (`$FF`
+less the pulses when stopped by the deadline, 0 when the WD found TR00),
+`elapsed_us`, `pulses`, `settled_status` and `settled_t0` (TR00 sensed again
+after the 18 ms settling time; homing fails without it and the head is not moved
+again).
+
 nybulah uses no ROM routine and no DOS variable, so a JiffyDOS 1581 ROM behaves as the
 stock one. Its only DOS interface is the job queue at `$0002` (job 0), documented in
 the 1581 user's guide, to run job `$82` (controller reset: track cache invalidated,
@@ -545,7 +598,9 @@ to lose only for step 5.
    docker run --rm --device=/dev/bus/usb nybulah homeprobe --dev 9 --transport s4 --headers --step --max-steps N
    ```
 
-   Expect `homed` true.
+   Expect `homed` true and `restore` with `busy_seen` true, `end` `deadline`,
+   `pulses` equal to the estimate, T0 (`$04`) in `forced_status` and
+   `settled_t0` true.
 4. One track, streamed (homes as in 3 first):
 
    ```sh
