@@ -294,14 +294,8 @@ class Capture:  # pylint: disable=too-many-instance-attributes
 
     def _tb_reads(self):
         """TB T2 read times, with the timer wraps TS resolves."""
-        arr = passes.tb_arrivals(self.tb)
-        if self.ts is None:
-            return arr.read
-        period = float(np.median(np.diff(arr.read)))
-        wraps = passes.ts_wraps(arr, self.ts_syncs(), period, self.base >= 0, self.tb)[
-            0
-        ]
-        return passes.tb_arrivals(self.tb, wraps).read
+        timing = self.syncs.timing
+        return passes.tb_arrivals(self.tb).read if timing is None else timing[1].read
 
     @property
     def rpm(self):

@@ -4,7 +4,7 @@ import re
 import numpy as np
 import pytest
 
-from nybulah import passes
+from nybulah import eventalign, passes
 from nybulah.analysis.gcr import bits_per_revolution, to_bits
 from nybulah.formats import D64, d64_to_g64
 from nybulah.nibbler import READ, Capture, cell_cycles
@@ -73,15 +73,9 @@ def test_tb_windows_hold_every_arrival(sync_capture):
     begin = int(np.searchsorted(times, reads[-2][1]))
     first = stream.find(cap.data[cap.base : cap.base + 64].tobytes(), begin)
     gap = np.diff(times[first:][: len(cap.tb)])[1:]
-    arr = passes.tb_arrivals(cap.tb, _wraps(cap))
+    arr = cap.syncs.timing[1]
     lo, hi = arr.lo[2:] - arr.hi[1:-1], arr.hi[2:] - arr.lo[1:-1]
     assert arr.valid.all() and ((gap > lo) & (gap <= hi + 1e-6)).all()
-
-
-def _wraps(cap):
-    arr = passes.tb_arrivals(cap.tb)
-    period = float(np.median(np.diff(arr.read)))
-    return passes.ts_wraps(arr, cap.ts_syncs(), period, True, cap.tb)[0]
 
 
 def squash(bits):
@@ -180,10 +174,10 @@ def test_run_range_excess_that_fits_neither_takes_the_nearer():
 
 def test_align_follows_slips():
     events = np.arange(6)
-    consistent = np.zeros((6, 2 * passes.BAND + 1), bool)
-    consistent[:3, passes.BAND] = True
-    consistent[3:, passes.BAND + 1] = True
-    consistent[4, passes.BAND + 1] = False
+    consistent = np.zeros((6, 17), bool)
+    consistent[:3, 8] = True
+    consistent[3:, 9] = True
+    consistent[4, 9] = False
     offs, matched = passes.align(consistent)
     assert offs.tolist() == [0, 0, 0, 1, 1, 1] and matched.tolist() == [
         1,
@@ -195,6 +189,77 @@ def test_align_follows_slips():
     ]
     assert passes.align(np.zeros((0, 3), bool))[0].size == 0
     del events
+
+
+def test_window_min_matches_brute_force():
+    """The first lexicographic least of (a, b) in every window."""
+    rng = np.random.default_rng(0)
+    a, b = rng.integers(0, 4, 40).astype(float), rng.integers(0, 3, 40)
+    key = a * 3 + b
+    for below, above in ((0, 0), (3, 2), (50, 0), (0, 50), (5, 5)):
+        for fn in (eventalign.window_min, eventalign.window_min.py_func):
+            arg = fn(a, b, below, above)
+            want = [
+                max(0, c - below)
+                + int(np.argmin(key[max(0, c - below) : c + above + 1]))
+                for c in range(len(a))
+            ]
+            assert arg.tolist() == want
+
+
+def test_align_slips_bounded_free_and_weighed():
+    """Any slip costs one, bounded per event by rise and fall; a free rise costs
+    nothing; changes land only on land columns; weight breaks ties."""
+    consistent = np.zeros((4, 41), bool)
+    consistent[:2, 20] = consistent[2:, 30] = True
+    assert passes.align(consistent)[0].tolist() == [0, 0, 10, 10]
+    offs, matched = passes.align(consistent, rise=[0, 0, 5, 5])
+    assert offs.tolist() == [0, 0, 0, 0] and matched.tolist() == [1, 1, 0, 0]
+    longer = np.zeros((5, 41), bool)
+    longer[:2, 20] = longer[2:, 30] = True
+    land = np.ones(longer.shape, bool)
+    land[1:3, 30] = False
+    assert passes.align(longer, land=land)[0].tolist() == [0, 0, 0, 10, 10]
+    consistent[2:, 18] = True
+    assert passes.align(consistent, fall=[0, 0, 1, 1])[0].tolist() == [0, 0, 10, 10]
+    assert passes.align(consistent, free=[0, 0, 10, 0])[0].tolist() == [0, 0, 10, 10]
+    weight = np.zeros(consistent.shape)
+    weight[2:, 18] = 1.0
+    assert passes.align(consistent, weight=weight)[0].tolist() == [0, 0, -2, -2]
+    last = np.zeros((3, 21), bool)
+    last[:2, 10] = last[2, 4] = True
+    assert passes.align(last)[0].tolist() == [0, 0, 0]
+    weight = np.zeros(last.shape)
+    weight[2, 4] = 1.0
+    assert passes.align(last, weight=weight)[0].tolist() == [0, 0, -6]
+
+
+def test_recurs_on_either_side_of_a_boundary():
+    rng = np.random.default_rng(1)
+    turn = rng.integers(0, 256, 100, dtype=np.uint8)
+    data = np.concatenate((turn, turn[:40]))
+    data[[116, 124]] ^= 1
+    again = passes.recurs(data, 100, span=8)
+    assert again[12] and again[28] and not again[20]
+    assert again[5] and not again[60]
+
+
+def test_monotone_reindex_and_suspect():
+    # pylint: disable=protected-access
+    pos = np.array([10, 11, 12, 13, 11, 12, 20, 21])
+    keep, after = passes._monotone(pos)
+    assert keep.tolist() == [1, 0, 0, 0, 1, 1, 1, 1] and after[1] == 11
+    arr = passes.Arrivals(
+        np.arange(8.0), np.arange(8.0) - 1, np.arange(8.0), np.ones(8, bool)
+    )
+    out = passes._reindex(arr, pos, keep)
+    assert len(out.read) == 12 and out.read[[0, 1, 2]].tolist() == [0, 4, 5]
+    assert np.isinf(out.lo[3:10]).all() and not out.valid[3:10].any()
+    definite = np.array([2, 5, 9])
+    sus = passes._suspect(12, definite, np.array([True, False, True]))
+    assert np.flatnonzero(sus).tolist() == [3, 4, 5, 6, 7, 8]
+    sus = passes._suspect(12, definite, np.array([True, True, False]))
+    assert np.flatnonzero(sus).tolist() == list(range(6, 12))
 
 
 def test_best_offset_and_byte_period():
@@ -314,3 +379,20 @@ def test_hw_ts_anchor_drawn_off_its_angle():
         placed = cap.base + cap.ts_syncs()[0]
         drawn = not np.isin(placed[placed < len(data)], latched).all()
         assert drawn == (side == "b")
+
+
+def test_follow_compiled_and_python_agree():
+    """The compiled path search is the Python one."""
+    rng = np.random.default_rng(2)
+    n, width = 12, 30
+    args = (
+        (rng.random((n, width)) < 0.7).astype(float),
+        rng.random((n, width)) < 0.8,
+        rng.random((n, width)) / (n + 1),
+        width // 2,
+        rng.integers(0, 3, n),
+        rng.integers(0, width, n),
+        rng.integers(0, width, n),
+    )
+    fn = eventalign._follow  # pylint: disable=protected-access
+    assert fn(*args).tolist() == fn.py_func(*args).tolist()

@@ -412,6 +412,16 @@ over `--window` bytes against byte index) with each excursion's start byte,
 peak percent, oscillation period and decay in ms, and its angle from the
 pattern start and, with streams, from the index.
 
+BITS, TB and TS each read their own revolution, so the no-flux `weak` region can
+read as bytes in one pass and as ones run into the `resync` sync in another,
+and the passes then latch different byte counts after it. The merge places TB
+and TS on the BITS bytes allowing such slips: TB and TS land, where they can,
+on each other's syncs that fit their timing, a BITS sync that swallowed bytes
+another pass latched is timed across them, TS's timer wraps go to the TB byte
+on its BITS boundary, and where TB slipped unseen TS measures the syncs. The
+speed trace takes only TB intervals the merge placed on single latched bytes.
+Bytes read from no flux are not 8 written cells and can still move it.
+
 1. Write on #8 (homes within `--max-steps` outward steps, never bumps; seeks to
    H; writes a probe then the pattern on halftrack H side 0 only). Note `cells`.
 

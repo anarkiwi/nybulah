@@ -146,22 +146,9 @@ def flux_knots(cap):
 def tb_knots(rec):
     """``(bits, tau, error)`` of the bytes a TB pass timed: each byte ends in its
     arrival window (:func:`nybulah.passes.tb_arrivals`), taken at the middle."""
-    from .. import passes
     from ..nibbler import cell_cycles
 
-    arr = passes.tb_arrivals(rec.tb)
-    if rec.ts is not None:
-        period = float(np.median(np.diff(arr.read)))
-        found = passes.ts_wraps(arr, rec.ts_syncs(), period, rec.base >= 0, rec.tb)
-        arr = passes.tb_arrivals(rec.tb, found[0])
-    ok, latched = passes.capable(rec.data)
-    pos = passes._tb_positions(  # pylint: disable=protected-access
-        arr,
-        max(rec.base, 0),
-        (ok, passes.sync_weights(ok, latched)),
-        rec.base >= 0,
-        None,
-    )[0]
+    pos, arr = rec.syncs.timing
     seg = segments(rec)
     timed = np.isfinite(arr.lo) & np.isfinite(arr.hi) & arr.valid
     timed &= (pos >= 0) & (pos < len(seg.data))

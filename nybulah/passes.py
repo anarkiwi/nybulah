@@ -12,6 +12,7 @@ import numba
 import numpy as np
 
 from .analysis.capture import trailing_ones
+from .eventalign import align
 from .analysis.gcr import NOMINAL_RPM, SYNC_MIN_BITS, bit_rate, to_bits
 
 TB_CHAIN = 12
@@ -44,7 +45,6 @@ FASTEST_BYTE = CELLS * CPU_HZ / bit_rate(3) * NOMINAL_RPM / RPM_MAX
 TS_LATE_MERGE = int(np.ceil((TS_ITER + TS_WRAP_EXTRA + TS_RESUME) / FASTEST_BYTE)) - 1
 PIN = 4
 P_SPAN = 256
-BAND = 8
 UNBOUNDED = -1
 REPEAT_SPAN = 16
 PERIOD_ROUNDS = 4
@@ -280,35 +280,6 @@ def best_offset(events, mask):
     return int(offsets[i]), int(vals[i])
 
 
-def align(consistent, free=None):
-    """Offsets (columns ``-band..band``) per event, by dynamic programming.
-
-    Minimises inconsistent events plus the total change of offset between
-    consecutive events, from offset 0; an increase of up to ``free[i]`` just
-    before event i costs nothing. Returns ``(offsets, matched)``.
-    """
-    consistent = np.asarray(consistent, bool)
-    n, width = consistent.shape
-    if not n:
-        return np.zeros(0, np.int64), np.zeros(0, bool)
-    free = np.zeros(n, np.int64) if free is None else np.asarray(free, np.int64)
-    o = np.arange(width)
-    delta = o[:, None] - o[None, :]
-    miss = (~consistent).astype(np.int64)
-    steps = [np.where((delta >= 0) & (delta <= f), 0, np.abs(delta)) for f in free]
-    fwd, back = np.zeros((n, width), np.int64), np.zeros((n, width), np.int64)
-    fwd[0] = np.abs(o - width // 2) + miss[0]
-    for i in range(1, n):
-        total = fwd[i - 1][None, :] + steps[i]
-        back[i] = np.argmin(total, axis=1)
-        fwd[i] = total[o, back[i]] + miss[i]
-    path = np.zeros(n, np.int64)
-    path[-1] = int(np.argmin(fwd[-1]))
-    for i in range(n - 1, 0, -1):
-        path[i - 1] = back[i, path[i]]
-    return path - width // 2, consistent[np.arange(n), path]
-
-
 def sync_weights(ok, ones):
     """Evidence of a sync before each byte: -log of the share of BITS boundaries
     latching that many ones (0 where no sync fits).
@@ -342,47 +313,69 @@ def _likeliest_shift(events, ok, weight):
     return int(best[np.argmax(score[best])])
 
 
-def _aligned(events, ok, weight, circular):
-    """DP offsets of ``events`` onto ``ok``; ``(offs, matched, misses, weight)``.
+def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
+    events, base, evidence, anchored, rev=None, rise=None, known=None, free=None
+):
+    """Per-event BITS offsets for pass events landing on capable positions.
 
-    Linear positions past either end constrain nothing; circular ones wrap.
-    """
-    pos = events[:, None] + np.arange(-BAND, BAND + 1)[None, :]
-    if circular:
-        pos, inside = pos % len(ok), np.ones(pos.shape, bool)
-    else:
-        inside = (pos > 0) & (pos < len(ok))
-        pos = np.clip(pos, 0, len(ok) - 1)
-    offs, matched = align(~inside | ok[pos])
-    rows, col = np.arange(len(events)), offs + BAND
-    counted = matched & inside[rows, col]
-    return (
-        offs,
-        matched,
-        int((~matched).sum()),
-        float(weight[pos[rows, col]][counted].sum()),
-    )
-
-
-def _events_offsets(events, base, ok, weight, anchored, rev=None):
-    """Per-event BITS offsets for pass events landing on ``ok`` positions.
-
-    Over a known revolution of ``rev`` bytes an anchored pass keeps its
-    anchor unless another alignment explains the events better: fewer
-    misses, then more :func:`sync_weights`. Without one an anchored pass is
-    taken as placed and events past either end constrain nothing.
+    ``evidence`` is ``(capable, weight)`` of the BITS boundaries; ``known``
+    is optionally ``(positions, fits)``, where another pass placed syncs and
+    which of them each event's sync fits: among equally consistent
+    alignments, events landing on syncs they fit outweigh any ``weight``.
+    The passes read different revolutions, so an unstable stretch can latch
+    different byte counts in each: the offset changes there by any amount
+    that keeps positions increasing, rising by at most ``rise`` (the bytes
+    the pass's own sync at the event could have held), or by up to ``free``
+    bytes at no cost. Over a known revolution of ``rev`` bytes positions are
+    circular; otherwise events past either end of the pass's own placement
+    constrain nothing. A pass starts at its anchor, or unanchored at the
+    shift putting most events on ``ok``, and its first event may move off
+    that start by any amount.
     """
     events = base + np.asarray(events, np.int64)
+    if events.size == 0:
+        return np.zeros(0, np.int64), np.zeros(0, bool)
+    ok, weight = evidence
     if rev:
         ok, weight = _fold(ok, rev, np.logical_or), _fold(weight, rev, np.maximum)
-    shifts = [0] if anchored else []
-    if rev and len(events):
-        shifts.append((_likeliest_shift(events, ok, weight) + base) % rev - base)
-    elif not anchored:
-        shifts.append(best_offset(events, ok)[0])
-    fits = [_aligned(events + s, ok, weight, bool(rev)) for s in shifts]
-    i = min(range(len(fits)), key=lambda j: (fits[j][2], -fits[j][3]))
-    return fits[i][0] + shifts[i], fits[i][1]
+        shift = 0
+        if not anchored:
+            shift = (_likeliest_shift(events, ok, weight) + base) % rev - base
+        offsets = shift + np.arange(-(rev // 2), rev - rev // 2)
+        pos = (events[:, None] + offsets) % rev
+        inside = np.ones(pos.shape, bool)
+    else:
+        shift = 0 if anchored else best_offset(events, ok)[0]
+        lo = min(shift, -int(events.max()))
+        offsets = np.arange(lo, max(shift, len(ok) - int(events.min())) + 1)
+        pos = events[:, None] + offsets
+        inside = (pos > 0) & (pos < len(ok))
+        pos = np.clip(pos, 0, len(ok) - 1)
+    hit = inside & ok[pos]
+    weight = np.where(hit, weight[pos], 0.0)
+    if known is not None:
+        where, fits = known
+        col = where[None, :] - events[:, None] - offsets[0]
+        col = col % rev if rev else col
+        i, j = np.nonzero(fits & (col >= 0) & (col < len(offsets)))
+        seen = np.zeros(hit.shape, bool)
+        seen[i, col[i, j]] = True
+        weight += (seen & hit) * (1.0 + weight.max(axis=1, initial=0.0).sum())
+    fall = np.diff(events, prepend=events[0]) - 1
+    rise = np.full(len(events), len(offsets)) if rise is None else np.array(rise)
+    fall[0] = rise[0] = len(offsets)
+    start = int(np.searchsorted(offsets, shift))
+    placed = np.arange(len(offsets)) == start
+    cols, matched = align(
+        hit | (~inside & placed),
+        free=free,
+        land=inside,
+        weight=weight,
+        start=start,
+        rise=rise,
+        fall=fall,
+    )
+    return shift + cols, matched
 
 
 @dataclasses.dataclass
@@ -391,7 +384,11 @@ class Syncs:  # pylint: disable=too-many-instance-attributes
 
     A run (latched and hidden ones) lies in ``[lo, hi]`` (hi -1: unbounded);
     ``latched`` counts its ones in the bytes before it. Sync context is known
-    for bytes ``first`` to ``valid``.
+    for bytes ``first`` to ``valid``. ``intervals`` (from a TB pass) are the
+    BITS index after each TB byte interval and its cycles, NaN unless the
+    interval holds exactly one latched byte; ``timing`` the BITS index of each
+    TB byte (-1 where a slip skipped it) and their arrivals with the timer
+    wraps TS resolved.
     """
 
     positions: np.ndarray
@@ -403,6 +400,8 @@ class Syncs:  # pylint: disable=too-many-instance-attributes
     byte_cycles: float | None = None
     unmatched: int = 0
     first: int = 0
+    intervals: tuple | None = None
+    timing: tuple | None = None
 
     @property
     def hidden(self):
@@ -468,59 +467,6 @@ def wrap_fits(waits, fine, xlo, xhi):
     hi = np.floor((xhi - fine) / 256).astype(np.int64)
     w = lo[..., None] + np.arange(max(int((hi - lo).max(initial=0)) + 1, 1))
     return w, (w <= hi[..., None]) & explained(waits[..., None] + 256 * w)
-
-
-def _ts_candidates(arr, count, iters, period, tb, fine):
-    """Candidate TB bytes ``k`` (count +- BAND) per TS sync, their wrap counts and fits."""
-    n = len(arr.read)
-    plo, phi = ts_pulse(iters)
-    slack = TB_LOOP + TB_OUT[-1][0]
-    k = count[:, None] + np.arange(-BAND, BAND + 1)[None, :]
-    kk = np.clip(k, 1, n - 1)
-    waits = np.concatenate(([TB_BVS], tb_intervals(tb)[0]))[kk]
-    w, fits = wrap_fits(
-        waits,
-        fine[kk],
-        (plo * (1 - DRIFT) - slack)[:, None],
-        (phi * (1 + DRIFT) + PRE_ONES * period / CELLS + slack)[:, None],
-    )
-    return k, w, fits
-
-
-def _pick_wraps(n, count, w, fits, offs, matched):
-    """Fewest fitting wrap count and the spread of further fits at each matched byte."""
-    rows, col = np.arange(len(count)), offs + BAND
-    first = np.argmax(fits[rows, col], axis=1)
-    last = fits.shape[2] - 1 - np.argmax(fits[rows, col, ::-1], axis=1)
-    hit = count + offs
-    sel = matched & (hit >= 1) & (hit < n)
-    fewest, spread = np.zeros(n, np.int64), np.zeros(n, np.int64)
-    fewest[hit[sel]] = w[rows, col, first][sel]
-    spread[hit[sel]] = (last - first)[sel]
-    return fewest, spread
-
-
-def ts_wraps(arr, ts, period, anchored, tb):
-    """TB timer wraps after each TS sync: ``(fewest, spread, unmatched)``.
-
-    A sync's TB wait is its TS release wait, within the poll and sample
-    slack and ``DRIFT`` of motor speed between the passes, plus 256-cycle
-    wraps that leave a wait the drive loop can end on. ``spread`` counts
-    the further wrap counts that also fit. A release seen on TS's wrap path
-    (iterations a multiple of 256) can merge up to ``TS_LATE_MERGE`` byte
-    readies, so later counts may run that many short.
-    """
-    count, iters = ts
-    n = len(arr.read)
-    fine = np.diff(arr.read, prepend=0.0) - period
-    if not anchored:
-        count = count + best_offset(count, fine > period / CELLS)[0]
-    k, w, fits = _ts_candidates(arr, count, iters, period, tb, fine)
-    late = (iters >= 256) & (iters % 256 == 0)
-    free = np.concatenate(([0], np.where(late[:-1], TS_LATE_MERGE, 0)))
-    offs, matched = align((k < 1) | (k >= n) | fits.any(axis=2), free)
-    fewest, spread = _pick_wraps(n, count, w, fits, offs, matched)
-    return fewest, spread, int((~matched).sum())
 
 
 def _runs(arr, breaks, hidden):
@@ -603,18 +549,90 @@ def tb_excess(arr, breaks, period, error, hidden):
     return np.concatenate(([-np.inf], lo)), np.concatenate(([np.inf], hi))
 
 
-def _tb_positions(arr, base, evidence, anchored, rev):
-    """BITS index of each TB byte, following slips at the definite syncs.
+def _definite(arr):
+    """``(syncs, excess)``: TB bytes with a sync surely before them (more than a
+    cell beyond a byte period), and the least extra cycles before each."""
+    period = float(np.median(np.diff(arr.read))) if len(arr.read) > 1 else 0.0
+    excess = arr.lo[1:] - arr.hi[:-1] - period
+    syncs = np.flatnonzero(excess > period / CELLS) + 1
+    return syncs, excess[syncs - 1]
 
-    ``evidence`` is ``(capable, sync weights)`` of the BITS bytes.
+
+def _tb_positions(  # pylint: disable=too-many-arguments
+    arr, base, evidence, anchored, rev, known=None
+):
+    """BITS index of each TB byte, following slips at the definite syncs; the
+    definite syncs and which landed on a BITS boundary that explains them.
+
+    ``evidence`` is ``(capable, sync weights)`` of the BITS bytes; ``known``
+    is optionally ``(positions, fits, need, trusted)``: where TS placed
+    syncs, which of them each definite sync fits, which definite syncs TS
+    must have seen, and the BITS index up to which it saw every one: only
+    those explain such a sync. A slip rises by at most the bytes the sync's
+    wait could hold as latched (timer wraps TS confirmed were the same sync
+    in both passes).
     """
     n = len(arr.read)
     period = float(np.median(np.diff(arr.read))) if n > 1 else 0.0
-    definite = np.flatnonzero(arr.lo[1:] - arr.hi[:-1] - period > period / CELLS) + 1
-    offs, matched = _events_offsets(definite, base, *evidence, anchored, rev)
+    definite, _ = _definite(arr)
+    room = arr.hi[definite] - arr.lo[definite - 1] - period
+    room /= period * (1 - DRIFT)
+    rise = np.where(np.isfinite(room), np.floor(room), n).astype(np.int64)
+    offs, matched = _events_offsets(
+        definite, base, evidence, anchored, rev, rise, known and known[:2]
+    )
     which = np.clip(np.searchsorted(definite, np.arange(n), "right") - 1, 0, None)
     pos = base + np.arange(n) + (offs[which] if len(definite) else 0)
-    return pos, int((~matched).sum())
+    if known is not None:
+        where, fits, need, trusted = known
+        need = need & (pos[definite] <= trusted)
+        q = pos[definite]
+        q = np.where(q < len(evidence[0]), q, q - (rev or 0))
+        landed = (fits & (where[None, :] == q[:, None])).any(axis=1)
+        landed |= (q <= 0) | (q >= len(evidence[0]))
+        matched &= ~need | landed
+    return pos, definite, matched
+
+
+def _suspect(n, definite, matched):
+    """TB bytes between the matched definite syncs around each unmatched one,
+    where the TB pass may have slipped against the BITS bytes unseen."""
+    out = np.zeros(n + 1, np.int64)
+    hit = definite[matched]
+    for k in definite[~matched]:
+        i = np.searchsorted(hit, k)
+        out[hit[i - 1] + 1 if i else 0] += 1
+        out[hit[i] if i < len(hit) else n] -= 1
+    return np.cumsum(out[:n]) > 0
+
+
+def _monotone(pos):
+    """``(keep, after)``: TB bytes whose BITS index precedes every later one's (a
+    slip back drops the bytes it skips), and the least index from each on."""
+    after = np.minimum.accumulate(pos[::-1])[::-1]
+    return pos < np.append(after[1:], np.iinfo(np.int64).max), after
+
+
+def _reindex(arr, pos, keep):
+    """Arrivals over consecutive BITS indices from ``pos[keep][0]``: the kept TB
+    bytes, and untimed bytes the TB pass never latched."""
+    at = pos[keep] - pos[keep][0]
+    lo, hi = np.full(at[-1] + 1, -np.inf), np.full(at[-1] + 1, np.inf)
+    read, valid = np.full(at[-1] + 1, np.nan), np.zeros(at[-1] + 1, bool)
+    lo[at], hi[at], read[at], valid[at] = (
+        arr.lo[keep],
+        arr.hi[keep],
+        arr.read[keep],
+        arr.valid[keep],
+    )
+    return Arrivals(read, lo, hi, valid)
+
+
+def recurs(data, period, span=REPEAT_SPAN):
+    """Per boundary q: the ``span`` bytes before or after it recur a ``period`` on,
+    so a sync there is one a revolution later."""
+    after = _repeats(np.asarray(data, np.uint8), period, span)
+    return after | np.concatenate((np.zeros(span, bool), after[:-span]))
 
 
 def _classify(arrs, capable_k, latched_k, ts_end):
@@ -648,44 +666,102 @@ def _classify(arrs, capable_k, latched_k, ts_end):
     return runs, float(np.median(period))
 
 
-def merge_tb(  # pylint: disable=too-many-arguments
+def _plain(arr, pos, keep, definite, synced):
+    """TB byte intervals and the BITS index after each; NaN unless one latched
+    byte lies in it: the loop explains the wait, both ends keep consecutive
+    BITS indices, and neither TB nor the merge put a sync there."""
+    keep, after = keep
+    plain = keep[1:] & keep[:-1] & (np.diff(pos) == 1) & arr.valid[1:]
+    plain &= ~np.isin(np.arange(1, len(pos)), definite) & ~synced[1:]
+    return after[1:], np.where(plain, np.diff(arr.read), np.nan)
+
+
+def _wrapped(tb, steady, place, ts):
+    """Arrivals for each fitting wrap count of the TB bytes TS syncs were placed
+    on (``steady``: BITS boundary per TB byte, -1 where none), and the TB
+    bytes whose wait fits no wrap count of their TS sync."""
+    if place is None:
+        return [tb_arrivals(tb)], np.zeros(0, np.int64)
+    wraps, spread, unfit = _ts_wraps_at(tb, steady, place, ts[1])
+    arrs = [
+        tb_arrivals(tb, wraps + np.minimum(spread, j)) for j in range(spread.max() + 1)
+    ]
+    return arrs, unfit
+
+
+def _demote(runs, suspect, latched, cell, ts_seen):
+    """Run ranges where the TB pass may have slipped unseen: unbounded above, and
+    no sync where TS (when ``ts_seen``) would have seen it and placed none."""
+    for v in np.flatnonzero(suspect):
+        if v in runs:
+            run, lo, _ = runs[v]
+            seen = ts_seen and (lo - PRE_ONES) * cell > TS_PB7_GAP
+            runs[v] = (0, int(latched[v]), UNBOUNDED) if seen else (run, lo, UNBOUNDED)
+    return runs
+
+
+def merge_tb(  # pylint: disable=too-many-arguments,too-many-locals
     data, base, tb, ts=None, anchored=True, revolution=None, ts_end=None
 ):
     """Syncs of a BITS pass from TB (and TS for long syncs), TB[0] at ``data[base]``.
 
     ``ts`` is ``(count, iterations)`` from :func:`ts_syncs`, covering TB
     bytes before ``ts_end``; past it a sync's length is unbounded above. With
-    the ``revolution`` in bytes, bytes before TB starts are timed a turn on.
+    the ``revolution`` in bytes, bytes before TB starts are timed a turn on
+    where the BITS bytes recur. TS measures the boundaries TB cannot, and a
+    TS sync TB's wait there cannot hold marks the TB pass as slipped around it.
     """
     data = np.asarray(data, np.uint8)
     tb = np.asarray(tb, np.int64)
     ok, latched = capable(data)
-    arr = tb_arrivals(tb)
-    unmatched, arrs = 0, [arr]
-    if ts is not None and len(ts[0]):
-        wraps, spread, unmatched = ts_wraps(
-            arr, ts, float(np.median(np.diff(arr.read))), anchored, tb
-        )
-        arrs = [
-            tb_arrivals(tb, wraps + np.minimum(spread, j))
-            for j in range(spread.max() + 1)
-        ]
-        arr = arrs[0]
-    evidence = (ok, sync_weights(ok, latched))
-    pos, missed = _tb_positions(arr, base, evidence, anchored, anchored and revolution)
-    steady = np.where(pos < len(data), pos, pos - (revolution or len(data)))
-    inside = (steady > 0) & (steady < len(data))
+    place, trusted, (pos, events, matched) = _place(
+        data,
+        base,
+        tb,
+        ts,
+        anchored,
+        revolution,
+        ts_end,
+        (ok, sync_weights(ok, latched)),
+    )
+    missed = int((~matched).sum())
+    keep, after = _monotone(pos)
+    tb_steady = np.where(pos < len(data), pos, pos - (revolution or len(data)))
+    arrs, unfit = _wrapped(tb, np.where(keep, tb_steady, -1), place, ts)
+    unfit = np.setdiff1d(unfit[pos[unfit] <= trusted], events)
+    order = np.argsort(np.concatenate((events, unfit)), kind="stable")
+    events = np.concatenate((events, unfit))[order]
+    matched = np.concatenate((matched, np.zeros(len(unfit), bool)))[order]
+    p = pos[keep][0] + np.arange(pos[keep][-1] - pos[keep][0] + 1)
+    suspect = np.zeros(len(p), bool)
+    suspect[pos[keep] - p[0]] = _suspect(len(tb), events, matched)[keep]
+    again = recurs(data, revolution) if revolution else np.zeros(len(data) + 1, bool)
+    steady = np.where(p < len(data), p, p - (revolution or len(data)))
     at = np.clip(steady, 0, len(data) - 1)
-    runs, byte_cycles = _classify(arrs, inside & ok[at], latched[at], ts_end)
+    inside = (steady > 0) & (steady < len(data)) & ((p < len(data)) | again[at])
+    end = None if ts_end is None else after[min(ts_end, len(tb) - 1)] - p[0]
+    runs, byte_cycles = _classify(
+        [_reindex(a, pos, keep) for a in arrs], inside & ok[at], latched[at], end
+    )
+    cell = byte_cycles / CELLS * (1 - DRIFT)
+    runs = _demote(runs, suspect, latched[at], cell, place is not None)
     rows = [
         (int(q), *run)
-        for k, run in runs.items()
-        for q in (pos[k], pos[k] - revolution if revolution else -1)
-        if 0 < q < len(data)
+        for v, run in runs.items()
+        for q in (p[v], p[v] - revolution if revolution else -1)
+        if 0 < q < len(data) and (q == p[v] or again[q])
     ]
-    first = 0 if anchored else int(np.clip(pos[min(1, len(tb) - 1)], 0, len(data)))
-    valid = len(data) if anchored else int(np.clip(pos[-1] + 1, first, len(data)))
-    return _syncs(rows, latched, (first, valid), byte_cycles, unmatched + missed)
+    timed = {r[0] for r in rows if r[3] >= 0}
+    if place is not None:
+        more = _ts_rows(*place, ts[1], byte_cycles / CELLS)
+        rows += [r for r in more if r[0] not in timed]
+    first = 0 if anchored else int(np.clip(p[min(1, len(p) - 1)], 0, len(data)))
+    valid = len(data) if anchored else int(np.clip(p[-1] + 1, first, len(data)))
+    out = _syncs(rows, latched, (first, valid), byte_cycles, missed + len(unfit))
+    synced = np.isin(tb_steady, out.positions)
+    out.intervals = _plain(arrs[0], pos, (keep, after), events, synced)
+    out.timing = (np.where(keep, pos, -1), arrs[0])
+    return out
 
 
 def _low_rows(positions, est, plo, phi, cell, n):
@@ -702,33 +778,155 @@ def _low_rows(positions, est, plo, phi, cell, n):
     return rows
 
 
+def _ts_place(  # pylint: disable=too-many-arguments,too-many-locals
+    data, base, ts, byte, anchored, revolution, evidence, known=None
+):
+    """``(positions, syncs, unmatched, trusted)``: BITS boundaries of the TS syncs
+    (``byte`` cycles per byte) and which sync each is, landing where they can
+    on the syncs of another pass they fit (``known``, as
+    :func:`_events_offsets`). With the ``revolution`` in bytes a sync is also
+    placed a turn away where the BITS bytes recur. TS places every sync it
+    could see up to BITS index ``trusted``, where it first slips against the
+    BITS bytes.
+    """
+    count, iters = ts
+    _, phi = ts_pulse(iters)
+    rise = np.floor(phi / (byte * (1 - DRIFT))).astype(np.int64)
+    late = (iters >= 256) & (iters % 256 == 0)
+    free = np.concatenate(([0], np.where(late[:-1], TS_LATE_MERGE, 0)))
+    offs, matched = _events_offsets(
+        count, base, evidence, anchored, revolution, rise, known, free
+    )
+    step = np.diff(offs, prepend=0 if anchored else offs[:1])
+    slip = np.flatnonzero((step < 0) | (step > free))
+    trusted = np.inf
+    if len(slip):
+        trusted = base + count[slip[0] - 1] + offs[slip[0] - 1] if slip[0] else -np.inf
+    sel = np.flatnonzero(matched)
+    pos = base + count[sel] + offs[sel]
+    if revolution:
+        again = recurs(data, revolution)
+        turn = pos % revolution
+        both = np.stack((turn, turn + revolution))
+        use = (both == pos) | again[np.minimum(turn, len(data))]
+        pos, sel = both[use], np.tile(sel, (2, 1))[use]
+    inside = (pos > 0) & (pos < len(data))
+    return pos[inside], sel[inside], int((~matched).sum()), trusted
+
+
+def _ts_rows(pos, sel, iters, cell):
+    """``(position, run, lo, hi)`` rows of placed TS syncs from SYNC low time."""
+    plo, phi = ts_pulse(iters[sel])
+    return _low_rows(pos, (plo + phi) / 2, plo, phi, cell, np.inf)
+
+
+def _ts_window(iters, period):
+    """Extra cycles a TB byte's interval spans around each TS sync's SYNC low
+    time, with the poll and sample slack and ``DRIFT`` between the passes."""
+    plo, phi = ts_pulse(iters)
+    slack = TB_LOOP + TB_OUT[-1][0]
+    return (
+        plo * (1 - DRIFT) - slack,
+        phi * (1 + DRIFT) + PRE_ONES * period / CELLS + slack,
+    )
+
+
+def _fits(tb, iters):
+    """``(definite, fits, need)``: the TB definite syncs, which TS syncs each fits
+    (its wait, up to timer wraps, inside the SYNC low time) and which TS,
+    polling PB7 at most ``TS_PB7_GAP`` apart, must have seen."""
+    arr = tb_arrivals(tb)
+    period = float(np.median(np.diff(arr.read)))
+    definite, excess = _definite(arr)
+    xlo, xhi = _ts_window(iters, period)
+    fine = np.diff(arr.read, prepend=0.0)[definite] - period
+    _, fits = wrap_fits(
+        tb_intervals(tb)[0][definite - 1][:, None],
+        fine[:, None],
+        xlo[None, :],
+        xhi[None, :],
+    )
+    low = excess - (PRE_ONES - MIN_LATCHED) * period / CELLS
+    return definite, fits.any(axis=2), low * (1 - DRIFT) > TS_PB7_GAP
+
+
+def _place(  # pylint: disable=too-many-arguments,too-many-locals
+    data, base, tb, ts, anchored, revolution, ts_end, evidence
+):
+    """TB and TS placed on the BITS bytes, each landing where it can on the
+    other's syncs it fits: TB alone, TS on it, then TB on TS. Returns the TS
+    placement, the BITS index up to which TS saw every sync it could, and
+    :func:`_tb_positions`."""
+    arr = tb_arrivals(tb)
+    rev = anchored and revolution
+    pos, definite, matched = _tb_positions(arr, base, evidence, anchored, rev)
+    if ts is None or np.size(ts[0]) == 0:
+        return None, -np.inf, (pos, definite, matched)
+    _, fits, need = _fits(tb, ts[1])
+    q = pos[definite]
+    q = np.where(q < len(data), q, q - (rev or 0))
+    byte = float(np.median(np.diff(arr.read)))
+    *place, _, trusted = _ts_place(
+        data,
+        base,
+        ts,
+        byte,
+        anchored,
+        revolution,
+        evidence,
+        (q[matched], fits[matched].T),
+    )
+    need &= definite < (ts_end or len(tb) + 1)
+    known = (place[0], fits[:, place[1]], need, trusted)
+    return place, trusted, _tb_positions(arr, base, evidence, anchored, rev, known)
+
+
+def _ts_wraps_at(tb, steady, place, iters):
+    """TB timer wraps at the TB bytes whose BITS boundary (``steady``, -1 where
+    none) a TS sync was placed on: the fewest wrap counts leaving a wait the
+    drive loop can end on inside the TS sync's SYNC low time, the spread of
+    further fitting counts, and the TB bytes whose wait fits none; a TS sync
+    on a boundary TB did not time constrains nothing."""
+    where, sel = place
+    arr = tb_arrivals(tb)
+    period = float(np.median(np.diff(arr.read)))
+    order = np.argsort(steady, kind="stable")
+    at = np.searchsorted(steady[order], where)
+    k = order[np.minimum(at, len(order) - 1)]
+    found = (steady[k] == where) & (k > 0)
+    k, sel = k[found], sel[found]
+    xlo, xhi = _ts_window(iters[sel], period)
+    w, fits = wrap_fits(
+        tb_intervals(tb)[0][k - 1],
+        np.diff(arr.read, prepend=0.0)[k] - period,
+        xlo,
+        xhi,
+    )
+    hit = fits.any(axis=1)
+    first = np.argmax(fits, axis=1)
+    last = fits.shape[1] - 1 - np.argmax(fits[:, ::-1], axis=1)
+    fewest, spread = np.zeros(len(tb), np.int64), np.zeros(len(tb), np.int64)
+    fewest[k[hit]] = w[hit, first[hit]]
+    spread[k[hit]] = (last - first)[hit]
+    return fewest, spread, k[~hit]
+
+
 def merge_ts(  # pylint: disable=too-many-arguments
     data, base, ts, cell, anchored=True, revolution=None
 ):
     """Syncs of a BITS pass from TS alone: exact positions, lengths from SYNC low time.
 
-    With the ``revolution`` in bytes each sync is placed on every turn.
+    With the ``revolution`` in bytes each sync is also placed a turn away
+    where the BITS bytes recur.
     """
     data = np.asarray(data, np.uint8)
-    count, iters = ts
     ok, latched = capable(data)
-    weight = sync_weights(ok, latched)
-    offs, matched = _events_offsets(count, base, ok, weight, anchored, revolution)
-    plo, phi = ts_pulse(iters)
-    sel = np.flatnonzero(matched)
-    pos = base + count[sel] + offs[sel]
-    if revolution:
-        pos = (pos % revolution)[None, :] + [[0], [revolution]]
-        sel = np.tile(sel, 2)
-    rows = _low_rows(
-        np.ravel(pos),
-        (plo[sel] + phi[sel]) / 2,
-        plo[sel],
-        phi[sel],
-        cell,
-        len(data),
+    evidence = (ok, sync_weights(ok, latched))
+    pos, sel, unmatched, _ = _ts_place(
+        data, base, ts, CELLS * cell, anchored, revolution, evidence
     )
-    return _syncs(rows, latched, (0, len(data)), None, int((~matched).sum()))
+    rows = _ts_rows(pos, sel, ts[1], cell)
+    return _syncs(rows, latched, (0, len(data)), None, unmatched)
 
 
 def stream_syncs(data, syncs, cell):
