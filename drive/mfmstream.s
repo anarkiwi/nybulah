@@ -63,8 +63,8 @@ END_ATN  = $48
 ST_NOGO  = $FF
 F_TIMEOUT = $01
 QMASK    = $1F
-; xum1541 firmware v12 x_timing.h SRQ_STREAM_POLLS: the longest silence after
-; a byte the adapter waits through.
+; xum1541 x_timing.h SRQ_STREAM_POLLS: the longest silence after a byte the
+; adapter waits through (firmware v14 or later; v12 and v13 waited 3.6 ms).
 ADAPTER_GAP_US = 20000
 KEEP_PASSES = 256               ; kc wraps: a KEEP per 256 passes
 .assert KEEP_PASSES = 256, error, "kc counts down from 0"
