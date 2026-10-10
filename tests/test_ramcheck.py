@@ -12,7 +12,7 @@ from test_stream import RAM_PASS_US, rig
 
 from nybulah import cli, ramcheck
 from nybulah.formats import D64, d64_to_g64
-from nybulah.nibbler import Capture, Nibbler
+from nybulah.nibbler import HOME_HALFTRACK, Capture, Nibbler
 from nybulah.simdisk import Media, disk_drive
 from nybulah.simhost import SimCBM, SimMonitor
 
@@ -111,3 +111,12 @@ def test_1571_ram_captures_add_no_syncs_to_the_stream(halftrack, repeat):
     (vs,) = out["against"]
     assert vs["sectors"] == out["sectors_ok"] == (19 if halftrack == 36 else 18)
     assert vs["extra_syncs"] == vs["missing_syncs"] == 0 and vs["differ"] <= 1
+
+
+def test_1571_locate_places_the_head_from_headers_after_a_reset(make_rig, g64):
+    drive, nib = make_rig("1571", Media.from_g64(g64), halftrack=40)
+    drive.write(0x22, 0)
+    with pytest.raises(ValueError, match="38 outward steps"):
+        ramcheck.locate(nib, 37)
+    assert ramcheck.locate(nib, 38) == HOME_HALFTRACK == drive.mech.halftrack
+    assert drive.mech.bumps == drive.mech.inner_stops == 0
