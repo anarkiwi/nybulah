@@ -325,9 +325,11 @@ def sync_weights(ok, ones):
 
 
 def _fold(a, rev, op):
-    """``a`` over one revolution of ``rev`` bytes, its repeat merged by ``op``."""
+    """``a`` over one revolution of ``rev`` bytes, every repeat merged by ``op``."""
     out = a[:rev].copy()
-    out[: len(a) - rev] = op(out[: len(a) - rev], a[rev:])
+    for k in range(rev, len(a), rev):
+        seg = a[k : k + rev]
+        out[: len(seg)] = op(out[: len(seg)], seg)
     return out
 
 
