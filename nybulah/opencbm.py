@@ -2,7 +2,9 @@
 
 import ctypes
 import ctypes.util
+import fcntl
 import os
+import pathlib
 
 IEC_DATA = 0x01
 IEC_CLOCK = 0x02
@@ -61,6 +63,35 @@ _XFER = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_void_p, ctypes.c_uint)
 _STREAM = "opencbm_plugin_srq2_stream"
 _SET_TIMEOUT = ctypes.CFUNCTYPE(ctypes.c_int, _FD, ctypes.c_uint)
 
+XUM1541_VID, XUM1541_PID = 0x16D0, 0x0504
+SYSFS_USB = "/sys/bus/usb/devices"
+USBFS = "/dev/bus/usb"
+_IOC_NRBITS = 8
+
+
+def _io(kind, nr):
+    """Linux _IO(type, nr) (asm-generic/ioctl.h): no direction, no size."""
+    return ord(kind) << _IOC_NRBITS | nr
+
+
+USBDEVFS_RESET = _io("U", 20)
+
+
+def usb_nodes(sysfs=SYSFS_USB, usbfs=USBFS, vid=XUM1541_VID, pid=XUM1541_PID):
+    """usbfs nodes (usbfs/BBB/DDD) of every USB device vid:pid listed in sysfs."""
+    nodes = []
+    for d in sorted(p.parent for p in pathlib.Path(sysfs).glob("*/idVendor")):
+        try:
+            attr = {
+                k: int((d / k).read_text(), 16 if k.startswith("id") else 10)
+                for k in ("idVendor", "idProduct", "busnum", "devnum")
+            }
+        except (OSError, ValueError):
+            continue
+        if (attr["idVendor"], attr["idProduct"]) == (vid, pid):
+            nodes.append(f"{usbfs}/{attr['busnum']:03d}/{attr['devnum']:03d}")
+    return nodes
+
 
 class OpenCBMError(IOError):
     """A libopencbm call reported failure."""
@@ -94,12 +125,38 @@ class OpenCBM:
 
     def __init__(self, adapter=None, lib=None):
         self.lib = lib or load_library()
+        self.adapter = adapter
+        self._open()
+
+    def _open(self):
         self.fd = _FD()
+        self._plugin = {}
         if self.lib.cbm_driver_open_ex(
-            ctypes.byref(self.fd), adapter.encode() if adapter else None
+            ctypes.byref(self.fd), self.adapter.encode() if self.adapter else None
         ):
             raise OpenCBMError("cbm_driver_open_ex failed")
-        self._plugin = {}
+
+    def usb_reset(self, sysfs=SYSFS_USB, usbfs=USBFS):
+        """USB-reset the xum1541 (USBDEVFS_RESET on its usbfs node) and reopen
+        the driver: clears an adapter whose firmware no longer runs its command
+        loop, which a RESET request cannot reach."""
+        nodes = usb_nodes(sysfs, usbfs)
+        if len(nodes) != 1:
+            raise OpenCBMError(
+                f"USB reset needs exactly one {XUM1541_VID:04x}:{XUM1541_PID:04x} "
+                f"adapter, found {len(nodes)}"
+            )
+        self.close()
+        try:
+            fd = os.open(nodes[0], os.O_WRONLY)
+            try:
+                fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            raise OpenCBMError(f"USBDEVFS_RESET on {nodes[0]}: {e}") from e
+        finally:
+            self._open()
 
     def close(self):
         """Release the driver handle."""

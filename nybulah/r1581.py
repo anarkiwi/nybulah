@@ -337,10 +337,14 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         size = 64 * math.ceil(2 * revs * (TRACK_BYTES + 64) / 64)
         mon = self.mon
         mon.transact(b"J" + struct.pack("<H", CODE_BASE))
+        t0 = mon.clock()
         raw = mon.cbm.srq2_stream(size)
+        elapsed = mon.clock() - t0
         reply = mon.link.response(3)
         mon.touch()
-        return ms.MfmStream.parse(raw, reply[0])
+        got = ms.MfmStream.parse(raw, reply)
+        got.elapsed_s = round(elapsed, 6)
+        return got
 
     def read_track(self, revolutions=1):
         """Read Track ``revolutions`` times: a "track" MfmCapture."""
@@ -403,7 +407,10 @@ def _revs(e):
 
 
 def _meta(got):
-    return {"adapter": got.adapter, "drive_end": got.drive_end, "reply": got.reply}
+    meta = {"adapter": got.adapter, "drive_end": got.drive_end, "reply": got.reply}
+    if not got.complete:
+        meta["diagnosis"] = got.diagnosis()
+    return meta
 
 
 def invalidate(cbm, dev, sleep=None, clock=time.monotonic):

@@ -320,6 +320,18 @@ def test_stream_without_a_turning_disk_times_out(media):
     no_stops(sim)
 
 
+def test_stream_index_wait_timeout_returns_to_the_monitor(media):
+    """An index wait that times out (no disk turning) ends the stream and returns
+    END_TIMEOUT from J; the drive is back in the monitor."""
+    _, sim, drive = stream_rig(media, cylinder=0)
+    drive.home(0)
+    got = drive.stream([ms.entry(ms.OP_INDEX)])
+    assert got.drive_end == "timeout" and got.reply[:2] == (0x44, 1)
+    assert got.commands[-1].timeout and got.commands[-1].data.size == 0
+    assert drive.sense()["t0"]
+    no_stops(sim)
+
+
 def random_d81(seed):
     """A D81 of random sectors, no errors."""
     rng = np.random.default_rng(seed)
@@ -380,7 +392,8 @@ def test_throttled_host_overruns_and_the_drive_stops(media, monkeypatch):
     slow = cbm.srq2_stream
     monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
     got = drive.stream([ms.entry(ms.OP_READ_TRACK, 8)])
-    assert got.adapter == "overrun" and got.reply == 0x48
+    assert got.adapter == "overrun" and got.reply[0] == 0x48
+    assert got.diagnosis()["drive"] == "atn" and got.reply[1] == 1
     monkeypatch.setattr(cbm, "srq2_stream", slow)
     assert drive.read_track(1).meta["adapter"] == "done"
     no_stops(sim)
@@ -515,6 +528,22 @@ def test_cli_streamprobe_sequence_of_hw11(media, monkeypatch, tmp_path):
     assert {tuple(i[:3]) for i in out["ids"]} >= {(39, 0, r) for r in range(1, 11)}
     assert cbm.drive.wd.pulses == 2 * 39
     no_stops(cbm.drive)
+
+
+def test_cli_streamprobe_stops_at_a_short_track_stream(cli_rig, media, monkeypatch):
+    cbm, sim = cli_rig(media, 0)
+    slow = cbm.srq2_stream
+    monkeypatch.setattr(cbm, "srq2_stream", lambda n: slow(n, packet_us=4 * 1024))
+    monkeypatch.setattr(r1581.Mfm1581, "read_ids", None)
+    args = ["streamprobe", "--dev", "9", "--max-steps", "0", "--cylinder", "39"]
+    out = cli.main(args, cbm)
+    stream = out["track_stream"]
+    assert stream["adapter"] == "overrun" and "ids" not in out
+    diag = stream["diagnosis"]
+    assert diag["drive"] == "atn" and diag["entries_started"] == 1
+    assert diag["codes"]["start"] == 1 and diag["data_bytes"] >= max(stream["bytes"], 1)
+    assert diag["elapsed_s"] > 0
+    no_stops(sim)
 
 
 def test_cli_streamprobe_reports_the_track_stream_when_a_later_step_fails(

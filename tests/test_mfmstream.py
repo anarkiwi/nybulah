@@ -62,14 +62,39 @@ def test_parse_commands_and_index():
     rec2 = stamp(0, 400) + stamp(0, 500) + bytes([0x10, 1, 3, 0])
     meta = [ms.M_START, ms.M_KEEP, ms.M_INDEX, *pack(stamp(0, 50))]
     meta += [ms.M_REC, *pack(rec1), ms.M_REC, *pack(rec2), 0x44]
-    got = ms.MfmStream.parse(frame(data, meta), reply=0x44)
+    raw = frame(data, meta)
+    got = ms.MfmStream.parse(raw, reply=b"\x44\x02\x80")
     assert got.adapter == "done" and got.drive_end == "timeout" and not got.complete
-    assert got.keepalives == 1 and got.reply == 0x44
+    assert got.keepalives == 1 and got.reply == (0x44, 2, 0x80)
+    diag = got.diagnosis()
+    assert diag["drive"] == "timeout" and diag["entries_started"] == 2
+    assert diag["wd_status"] == 0x80 and diag["data_bytes"] == len(data)
+    assert diag["raw_bytes"] == len(raw)
+    assert diag["codes"] == {
+        "start": 1,
+        "rec": 2,
+        "keep": 1,
+        "index": 1,
+        "end_timeout": 1,
+    }
     assert list(got.index_us) == [50]
     first, second = got.commands
     assert bytes(first.data) == data[:6] and bytes(second.data) == data[6:]
     assert (first.t_first, first.t_end, first.status) == (100, 300, 0)
     assert second.timeout and second.status == 0x10
+
+
+@pytest.mark.parametrize(
+    "reply, drive",
+    [(None, "no reply"), ((0xFF, 0, 0x80), "never saw the host's go")]
+    + [((0x00, 0, 0), "reply $00 is no end code"), ((0x40, 1, 0), "done")],
+)
+def test_diagnosis_names_the_reply(reply, drive):
+    raw = bytes([ESC, ms.M_START, 0x4E, ESC, 0x8C])
+    got = ms.MfmStream.parse(raw, reply=reply)
+    diag = got.diagnosis()
+    assert diag["drive"] == drive and diag["codes"] == {"start": 1}
+    assert got.adapter == "timeout" and diag["data_bytes"] == 1
 
 
 def test_list_entries():

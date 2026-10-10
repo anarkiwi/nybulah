@@ -13,7 +13,9 @@
 ;   sec  sector register
 ;   rep  bits 6-0: times to run the entry (1-127); bit 7: sector + 1 each
 ; TMO: timer B wraps (65536 us) a command or an index wait may take.
-; Returns A = the end code, or ST_NOGO when the host never asserted CLK.
+; Returns A = the end code, or ST_NOGO when the host never asserted CLK;
+; X = the entries started (commands issued and index waits), Y = the WD
+; status at the return.
 ;
 ; Metadata (bit 7 clear, low bits 00, never $40-$4C outside the END family;
 ; then chunks %dddddd01 of 24 bit values, most significant first):
@@ -54,7 +56,7 @@ END_TIMEOUT = $44
 END_ATN  = $48
 ST_NOGO  = $FF
 F_TIMEOUT = $01
-QMASK    = $3F
+QMASK    = $1F
 KEEP_MASK = $E0
 PB_CLKIN = $04
 STAMP_LO = 22                   ; write (or status read) -> timer B low read
@@ -312,6 +314,8 @@ stat:   .res 1                  ; the REC payload continues: status, flags,
 flags:  .res 1                  ; count
 count:  .res 2
 REC_LEN = * - first
+; Queued at once at most: a KEEP not yet sent, a REC, END.
+.assert 1 + 1 + (8 * REC_LEN + 5) / 6 + 1 <= QMASK, error, "queue too short"
 
 
         .segment "CODE2"
@@ -323,6 +327,7 @@ acc:    .res 1
 bits:   .res 1
 nb:     .res 1
 py:     .res 1
+issued: .res 1
 
 ; Add the first stamp's wrap flag to wraps.
 seen:   lda first + 1
@@ -412,13 +417,19 @@ abort:  jsr force
         lda #END_ATN
         jmp finish
 
-; Wait for type I status IP = A with w0's housekeeping, the WD idle.
+; Wait for type I status IP = A with w0's housekeeping, the WD idle; ATN and
+; the timeout leave through abort and timeout without returning.
 iwait:  sta sc
 :       bit CIA_PB
-        bmi abort
+        bmi iab
         jsr tick
         bne :+
+        pla
+        pla
         jmp timeout
+iab:    pla
+        pla
+        jmp abort
 :       lda qhead
         cmp qtail
         beq :+
@@ -460,6 +471,7 @@ stream: lda #0
         sta lp
         sta wraps
         sta rep
+        sta issued
         WDTEST
         lda WDTRK
         sta trksave
@@ -470,6 +482,9 @@ stream: lda #0
         bne :+
         jsr tick
         bne :-
+        ldx issued
+        WDTEST
+        ldy WDSTAT
         lda #ST_NOGO
         rts
 :       lda CIA_PB
@@ -510,6 +525,7 @@ next:   ldy lp
         and #$7F
         sta rep
 again:  dec rep
+        inc issued
         lda TMO
         sta tmo
         lda #1
@@ -560,5 +576,8 @@ finish: pha
         lda trksave
         WDTEST
         sta WDTRK
+        ldx issued
+        WDTEST
+        ldy WDSTAT
         pla
         rts

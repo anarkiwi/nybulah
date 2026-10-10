@@ -665,7 +665,15 @@ Read Track starts at the leading edge of an index pulse and ends at the next
 show whether the WD caught the next edge or waited a revolution. A command that
 outlasts TMO wraps (six revolutions at the measured period: the WD gives up Read
 Sector and Read Address after five) is force-interrupted and ends the stream with
-END_TIMEOUT.
+END_TIMEOUT; an index wait that outlasts it ends the same way.
+
+J returns A = the END code (or `ST_NOGO` $FF when the host never asserted CLK),
+X = the entries started (commands issued plus index waits) and Y = the WD status.
+A stream that is not `done`/`done` carries a diagnosis in its capture meta
+(`MfmStream.diagnosis`): the reply decoded, the metadata codes and data bytes the
+adapter delivered whether or not a record framed them, the adapter output size and
+how long the receive took (the adapter's 20 ms gap timeout against its I/O timeout
+for no first fall). `streamprobe` stops after such a Read Track stream.
 
 ### Without streaming
 

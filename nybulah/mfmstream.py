@@ -11,6 +11,8 @@ import numpy as np
 from .stream import Stream
 
 M_START, M_REC, M_KEEP, M_INDEX = 0x04, 0x0C, 0x14, 0x1C
+CODES = {M_START: "start", M_REC: "rec", M_KEEP: "keep", M_INDEX: "index"}
+ST_NOGO = 0xFF  # drive/mfmstream.s: the host never asserted CLK
 END = {0x40: "done", 0x44: "timeout", 0x48: "atn"}
 CHUNK = 0x01
 STAMP_ICR, STAMP_LO = 4, 22  # drive/mfmstream.s STAMP: cycles after the reference
@@ -69,25 +71,56 @@ class Command:
 
 
 @dataclasses.dataclass
-class MfmStream:
-    """A parsed 1581 stream: commands, index times, how it ended."""
+class MfmStream:  # pylint: disable=too-many-instance-attributes
+    """A parsed 1581 stream: commands, index times, how it ended.
+
+    ``reply`` is the (A, X, Y) the drive's J returned: the end code, the entries
+    it started, the WD status; ``codes`` counts the metadata codes received and
+    ``data_bytes`` every data byte, recorded or not.
+    """
 
     commands: list
     index_us: np.ndarray
     adapter: str
     drive_end: str | None
     keepalives: int
-    reply: int | None = None
+    reply: tuple | None = None
+    codes: dict = dataclasses.field(default_factory=dict)
+    raw_bytes: int = 0
+    data_bytes: int = 0
+    elapsed_s: float | None = None
 
     @property
     def complete(self):
         """The drive ended the list itself and the adapter lost nothing."""
         return self.adapter == "done" and self.drive_end == "done"
 
+    def diagnosis(self):
+        """What the drive and the adapter reported, for a stream that fell short."""
+        a, issued, status = self.reply or (None, None, None)
+        drive = (
+            "no reply"
+            if a is None
+            else (
+                "never saw the host's go"
+                if a == ST_NOGO
+                else END.get(a, f"reply ${a:02X} is no end code")
+            )
+        )
+        return {
+            "drive": drive,
+            "entries_started": issued,
+            "wd_status": status,
+            "codes": self.codes,
+            "raw_bytes": self.raw_bytes,
+            "data_bytes": self.data_bytes,
+            "elapsed_s": self.elapsed_s,
+        }
+
     @classmethod
     def parse(cls, raw, reply=None):
-        """Split adapter output into commands with their records; reply is the A the
-        drive's J returned."""
+        """Split adapter output into commands with their records; reply is the
+        (A, X, Y) the drive's J returned."""
         s = Stream.parse(raw)
         records, ends, keep = _records(s.val)
         stamps = [stamp_us(r[k : k + 5]) for kind, r in records for k in _stamps(kind)]
@@ -104,7 +137,16 @@ class MfmStream:
             at += n
         end = ends[-1] if ends else None
         index = np.array(index, np.int64)
-        return cls(commands, index, s.adapter, end, keep, reply)
+        names = {**CODES, **{k: f"end_{v}" for k, v in END.items()}}
+        values, counts = np.unique(s.val[s.val & 0x03 != CHUNK], return_counts=True)
+        codes = {
+            names.get(v, f"${v:02X}"): c
+            for v, c in zip(values.tolist(), counts.tolist())
+        }
+        reply = None if reply is None else tuple(int(v) for v in reply)
+        return cls(
+            commands, index, s.adapter, end, keep, reply, codes, len(raw), len(s.data)
+        )
 
 
 def _stamps(kind):

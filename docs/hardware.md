@@ -201,6 +201,16 @@ derived boot bound, what was seen, that a drive is holding the bus and needs a
 power cycle, and that nothing was sent. No drive entry is marked failed for
 it, and `hwcheck`'s recovery does not reset again.
 
+The xum1541 firmware performs a RESET request only from its command loop, so
+an adapter wedged mid-transfer keeps its own CLK and DATA asserted and never
+resets the bus. A drive released by RESET lets go of the lines in reset and
+through its diagnostic, so lines held in one unchanged state from the reset to
+the outer limit (`Bus.adapter_held`) blame the adapter: `reset` (and
+`recover`) then USB-resets it once (`USBDEVFS_RESET` on the `16d0:0504` usbfs
+node, `OpenCBM.usb_reset`), pulses RESET again and settles within a new outer
+limit, marking the step `usb_reset`. Lines still held after that are reported
+as above. The `usbreset` step does the USB reset and then `reset` on request.
+
 A drive that does not answer once the lines are free fails its step and the
 script stops; `--keep-going` skips only that drive's later steps. A hung DOS
 holds its ATN acknowledge, so it blocks every other drive's transactions too:

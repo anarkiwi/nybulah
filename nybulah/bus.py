@@ -32,6 +32,8 @@ from .opencbm import (
 
 STEPS = """steps (one per argument or per --script line, # comments):
   reset                  pulse RESET; wait until no drive holds CLK or DATA
+                         (a wedged adapter is USB-reset once, then RESET again)
+  usbreset               USB-reset the adapter, then reset
   wait DEV...            until each drive's DOS answers its error channel
   status DEV...          read the error channel
   command DEV "CMD"      DOS command; done when its status reads back
@@ -46,9 +48,10 @@ T_AT = 1e-3
 RESET_HOLD_S = 0.1
 DETECT = range(8, 31)
 JOB_QUEUE = range(0x00, 0x0B)
-OPS = ("reset", "detect", "wait", "status", "command", "dir", "identify")
+OPS = ("reset", "usbreset", "detect", "wait", "status", "command", "dir", "identify")
 LINES = {"ATN": IEC_ATN, "CLK": IEC_CLOCK, "DATA": IEC_DATA, "RESET": IEC_RESET}
 LINES["SRQ"] = IEC_SRQ
+RESET_ORIGINS = ("reset", "usb reset")
 
 
 def diagnostic_cycles(rom_pages, ram_pages):
@@ -314,6 +317,23 @@ class Bus:  # pylint: disable=too-many-instance-attributes
                 self.sleep(min(delay, wait))
                 delay *= 2
 
+    def adapter_held(self):
+        """Whether the adapter, not a drive, is the likely holder of CLK or DATA.
+
+        A RESET pulse restarts every drive, which releases its bus lines while
+        held in reset and through its boot diagnostic. Every sample since the
+        reset showing one unchanged state with CLK or DATA low, never released,
+        means the reset never reached the drives: the adapter performs RESET
+        only once its command loop is free, so it is wedged and is the one
+        asserting the lines.
+        """
+        tl = self.timeline
+        return (
+            tl["from"] in RESET_ORIGINS
+            and len(tl["transitions"]) == 1
+            and bool({"CLK", "DATA"} & set(tl["transitions"][0][1]))
+        )
+
     def held_report(self, held):
         """Plain words for lines still held at the outer limit."""
         names = " and ".join(n for n, b in LINES.items() if held & b)
@@ -321,10 +341,17 @@ class Bus:  # pylint: disable=too-many-instance-attributes
         tl = self.timeline
         released = tl["released"] or "never"
         seen = f"{len(tl['transitions'])} line states seen, released at {released}"
+        who = "a drive is holding the bus and needs a power cycle"
+        if self.adapter_held():
+            who = "the adapter is holding the bus; " + (
+                "a USB reset did not clear it and it needs a power cycle"
+                if tl["from"] == "usb reset"
+                else "a USB reset of the adapter (bus step usbreset) clears it"
+            )
         return (
             f"{names} still held {self.clock() - self.base():.2f} s after {start}, past "
-            f"every derived boot bound ({self.outer_s:.2f} s); {seen}; a drive is "
-            "holding the bus and needs a power cycle; nothing was sent"
+            f"every derived boot bound ({self.outer_s:.2f} s); {seen}; {who}; "
+            "nothing was sent"
         )
 
     def ready(self, dev, limit, span):
@@ -349,15 +376,33 @@ class Bus:  # pylint: disable=too-many-instance-attributes
         if dev not in self.known:
             self.ready(dev, self.boot_limit(), self.outer_s)
 
-    def reset(self, _dev=None, _arg=None):
-        """Pulse RESET; watch the lines until every drive has released them."""
+    def _reset(self, origin):
+        """Pulse RESET and settle within the outer limit from it."""
         self.idle()
         self.cbm.reset()
         self.known.clear()
         self.low, self.reset_at, self.first_sample = {}, self.clock(), None
-        self._timeline("reset")
+        self._timeline(origin)
         self.settle(self.boot_limit())
         return {"settled_s": self.rel(), "timeline": self.timeline}
+
+    def reset(self, _dev=None, _arg=None):
+        """Pulse RESET; watch the lines until every drive has released them. A
+        wedged adapter holding them (adapter_held) is USB-reset once."""
+        try:
+            return self._reset("reset")
+        except BusHeld:
+            if not (self.adapter_held() and hasattr(self.cbm, "usb_reset")):
+                raise
+        return self.usbreset()
+
+    def usbreset(self, _dev=None, _arg=None):
+        """USB-reset the adapter, then pulse RESET and settle."""
+        if not hasattr(self.cbm, "usb_reset"):
+            raise ValueError("adapter cannot be USB-reset")
+        self.cbm.usb_reset()
+        self.hands_off = False
+        return self._reset("usb reset") | {"usb_reset": True}
 
     def status(self, dev, _arg=None):
         """The error channel, waiting for the drive first."""
@@ -429,7 +474,8 @@ def recover(cbm, dev, resets=2, timeout=None):
     """Release the host's lines, reset the bus and wait until dev answers.
 
     Returns the drive's status string. A second reset covers a drive that let
-    the lines go but did not answer; held lines end it untouched (BusHeld).
+    the lines go but did not answer; a wedged adapter is USB-reset by
+    Bus.reset; lines still held end it untouched (BusHeld).
     """
     bus = Bus(cbm, OUTER_S if timeout is None else timeout)
     error = None
@@ -455,7 +501,7 @@ def parse(line):
     op, args, arg = words[0], words[1:], None
     if op not in OPS:
         raise ValueError(f"unknown step {op!r}")
-    if op in ("reset", "detect"):
+    if op in ("reset", "usbreset", "detect"):
         if args:
             raise ValueError(f"{op} takes no arguments")
         return [(op, None, None)]
