@@ -292,8 +292,28 @@ def test_main_prints_report(monkeypatch, capsys):
     monkeypatch.setattr(vb, "writes", lambda *a: calls.append(a) or {"w": 1})
     monkeypatch.setattr(vb, "stream", lambda *a, **k: calls.append((a, k)) or {"s": 2})
     assert vb.main(["writes", "--cylinder", "3"]) == {"w": 1}
-    assert vb.main(["stream", "--code2", "0x782", "--head", "4"]) == {"s": 2}
+    assert vb.main(["stream", "--code2", "0x782", "--head", "4", "--peers"]) == {"s": 2}
     assert calls[0] == (None, 3, 0)
-    args, kw = calls[1]
-    assert args[4] == 0x782 and kw == {"under": None, "head_writes": 4}
+    _, kw = calls[1]
+    assert kw == {"code2": 0x782, "under": None, "head_writes": 4, "peers": True}
     assert '"s": 2' in capsys.readouterr().out
+
+
+def test_j_command_is_the_burst_the_monitor_reads_into_ptr():
+    assert vb.j_command(0x0300) == bytes([0x00, 0x03, 0, 0, ord("J")])
+
+
+def test_first_keep_spans_start_to_the_first_keepalive():
+    rows = [
+        {"clock": c, "reg": r, "value": v}
+        for c, r, v in [
+            (5, "ICR", 0x83),
+            (10, "SDR", 0x04),
+            (40, "PRB", 0x14),
+            (300, "SDR", 0x14),
+            (900, "SDR", 0x14),
+        ]
+    ]
+    assert vb.first_keep(rows) == 290
+    assert vb.first_keep(rows[:3]) is None
+    assert vb.first_keep(rows[3:]) is None
