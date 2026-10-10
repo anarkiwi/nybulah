@@ -45,7 +45,7 @@ $(OUT)/ciaprobe_1581.bin: ciaprobe.s
 	ld65 -t none -S '$$0300' -o $@ $(OUT)/ciaprobe_1581.o
 	rm -f $(OUT)/ciaprobe_1581.o
 
-$(OUT)/%_1581.bin: %.s mfm.cfg mfm.inc
+$(OUT)/%_1581.bin: %.s mfm.cfg mfm.inc wdtest.inc
 	ca65 -t none -o $(OUT)/$*_1581.o $<
 	ld65 -C mfm.cfg -o $@ $(OUT)/$*_1581.o
 	rm -f $(OUT)/$*_1581.o
@@ -65,17 +65,17 @@ $(OUT)/ciaprobe.bin: ciaprobe.s
 	ld65 -t none -S '$$0300' -o $@ $(OUT)/ciaprobe.o
 	rm -f $(OUT)/ciaprobe.o
 
-$(OUT)/track_%.bin: track.s track.cfg
+$(OUT)/track_%.bin: track.s track.cfg wdtest.inc
 	ca65 -t none -D MODEL=$* -o $(OUT)/track_$*.o $<
 	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -D PASSPG='$$$(PASSPG_$*)' -o $@ $(OUT)/track_$*.o
 	rm -f $(OUT)/track_$*.o
 
-$(OUT)/seek_1571.bin: track.s track.cfg
+$(OUT)/seek_1571.bin: track.s track.cfg wdtest.inc
 	ca65 -t none -D MODEL=1571 -D SEEK=1 -o $(OUT)/seek_1571.o $<
 	ld65 -C track.cfg -S '$$$(TRACK_BASE)' -D PASSPG='$$$(PASSPG_1571)' -o $@ $(OUT)/seek_1571.o
 	rm -f $(OUT)/seek_1571.o
 
-$(OUT)/stream_1571.bin: stream.s stream.cfg
+$(OUT)/stream_1571.bin: stream.s stream.cfg wdtest.inc
 	ca65 -t none -o $(OUT)/stream_1571.o $<
 	ld65 -C stream.cfg -S '$$$(TRACK_BASE)' -o $@ $(OUT)/stream_1571.o
 	rm -f $(OUT)/stream_1571.o

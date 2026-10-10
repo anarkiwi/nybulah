@@ -9,6 +9,8 @@ from nybulah import r1581, vice
 from nybulah import vicebench as vb
 from nybulah.analysis import mfm
 from nybulah.formats import d71, d81
+from nybulah.monitor import drivecode
+from nybulah.nibbler import CODE_BASE, PREP, RESULT, SEEK_CODE, ZP
 
 pytestmark = [
     pytest.mark.vice,
@@ -159,3 +161,23 @@ def test_1571_via_registers_match_cpu(tmp_path):
         c0 = v.clock(space)
         mon.sleep(0.05)
         assert v.clock(space) - c0 >= 50_000
+
+
+def test_1571_prep_takes_type_i_status(tmp_path):
+    """prep (seek_1571) ends a stray type II command on VICE's WD1770: a force
+    interrupt, then a Seek to the track register's own value, both seen through."""
+    path = tmp_path / "disk.d71"
+    path.write_bytes(d71.write_d71(d71.D71(np.zeros((d71.D71_SECTORS, 256)))))
+    with vice.Vice({8: ("1571", path)}) as v:
+        mon = vice.DriveMonitor(v, 8, model="1571").start()
+        mon.write(CODE_BASE, drivecode(SEEK_CODE))
+        mon.write(ZP, bytes([0x0C, 0, 0, 1, 1]))
+        mon.poke(0x2001, 0x11)
+        mon.poke(0x2003, 0x22)
+        mon.poke(0x2000, 0x80)
+        assert mon.read(0x2000, 1)[0] & 1
+        assert mon.jsr(PREP)[0] == 0
+        wdst = mon.read(ZP + RESULT["wdst"], 1)[0]
+        regs = mon.read(0x2000, 4)
+        assert not wdst & 1 and not regs[0] & 1
+        assert regs[1] == regs[3] == 0x11

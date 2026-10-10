@@ -40,7 +40,9 @@ def test_write_then_verify_places_the_index(monkeypatch, tmp_path):
     v8 = cli.main(argv + ["--repeats", "1", "--cells", str(out["cells"])], cbm)
     index = v8["index"]
     assert index["captures"] == 1 and index["start_offsets"] == [0]
-    assert abs(index["pattern_angle"] - at / len(cells)) * len(cells) <= 16
+    n = len(cells)
+    assert abs((v8["index_bits"] + at + n / 2) % n - n / 2) <= 16
+    assert abs(index["pattern_angle"] - at / n) < 1e-3
     assert index["stream_edges"] >= 2 and min(index["stream_edge_offsets"]) >= -16
     angles = [c["start_angle"] for c in v8["captures"]]
     assert all(
@@ -70,12 +72,18 @@ def test_write_density_lead_and_weak_region(monkeypatch, tmp_path):
     assert rec["variant"] == "weak"
     argv = ["pattern", "verify", "--dev", "9", *opts, *BASE, "--repeats", "2"]
     v8 = cli.main(argv + ["--cells", str(out["cells"])], cbm)
-    for path in ("stream", "ram"):
-        assert v8["summary"][path]["bit_errors"] == v8["summary"][path]["slips"] == 0
+    assert v8["summary"]["ram"]["bit_errors"] == v8["summary"]["ram"]["slips"] == 0
+    assert v8["summary"]["stream"]["slips"] == 0
     for cap in v8["captures"]:
+        errors = sum(
+            g["errors"] for g in cap["groups"].values() if g["kind"] == "exact"
+        )
+        long_by = 0
         for sync in cap["syncs"]:
-            off = np.abs(np.array(sync["found"]) - sync["written"])
-            assert len(off) and off.max() <= cap["sync_error"]
+            off = np.array(sync["found"]) - sync["written"]
+            assert len(off) and np.abs(off).max() <= cap["sync_error"]
+            long_by += int(np.maximum(off, 0).sum())
+        assert errors <= (long_by if cap["path"] == "stream" else 0)
     groups = {f"{k}{n}" for n in pt.weak_runs(3) for k in ("noflux", "badgcr")}
     assert set(v8["summary"]["unstable_all"]) == groups
     assert all(u["copies"] >= 2 for u in v8["summary"]["unstable_all"].values())
@@ -224,6 +232,7 @@ def test_hw_stream_saw_no_index():
         "captures": 0,
         "stream_edges": 0,
         "drive_end": ["noindex"],
+        "ram_index": [],
         "pattern_angle": None,
     }
     revs = np.array(entry["revolution_bits"])

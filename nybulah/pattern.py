@@ -20,7 +20,7 @@ from .analysis.gcr import NOMINAL_RPM, bit_rate, bits_per_revolution
 from .disk import Archive, TrackJob, revolution_cells, revolution_stream
 from .monitor import Monitor
 from .nibbler import CPU_HZ, HOME_HALFTRACK, MAX_HALFTRACK, ST_NOINDEX, Capture
-from .nibbler import Nibbler
+from .nibbler import Nibbler, index_sense
 from .ramcheck import digest, drive_options, locate
 from .ramprobe import identify_model
 from .speed import WINDOW, speed_trace
@@ -255,9 +255,9 @@ def _offsets(pos, index, revolution):
 
 def _index(entries, aligned, revolution):
     """The index's track position: the circular mean of the starts of RAM
-    captures begun at an index edge. Stream INDEX metadata can trail its edge
-    (drive/stream.s checks the index only with no metadata due), so stream
-    edges are reported against it, not used for it."""
+    captures begun at an index edge. Stream INDEX metadata lands up to a few
+    bytes after its edge, so stream edges are reported against it, not used
+    for it."""
     starts = [
         al.track_position([0])[0]
         for cap, al, _ in aligned
@@ -270,6 +270,11 @@ def _index(entries, aligned, revolution):
         "captures": len(starts),
         "stream_edges": len(edges),
         "drive_end": sorted({str(s["drive"]) for s in streams}),
+        "ram_index": [
+            {"status": cap.status, "wd_status": index_sense(cap)[0]}
+            for cap, _, _ in aligned
+            if cap.parsed is None and cap.start == "index"
+        ],
         "pattern_angle": None,
     }
     if index is not None:
@@ -280,10 +285,12 @@ def _index(entries, aligned, revolution):
 
 
 def _stream_edges(cap, al):
-    """A stream's INDEX metadata as track positions, and how the stream ended."""
+    """A stream's INDEX metadata as track positions, how the stream ended, the WD1770
+    status it began from and its index level at the end."""
     edges = cap.index_bits()
     bits = al.track_position(edges).tolist() if al.found else []
-    return {"edges": len(edges), "bits": bits} | cap.stream_status
+    sense = dict(zip(("wd_status", "index_level"), index_sense(cap)))
+    return {"edges": len(edges), "bits": bits} | cap.stream_status | sense
 
 
 def compare(truth, named, window=WINDOW):
