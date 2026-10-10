@@ -504,6 +504,14 @@ Commands, with H the pattern's halftrack, N the homing bound, C the written
    docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern verify --dev 10 --transport s3 --halftrack H --repeats 3 --cells C --save /data/artifacts/pattern/dev10
    ```
 
+When neither DOS's track nor the headers under the head place it (a blank or
+unformatted halftrack after a reset), `--search-steps S` on `write`, `verify`,
+`cells` and `halftracks` steps the head outwards one halftrack at a time, at
+most S steps, until headers place it or, on a 1571, the track 00 sensor turns
+on and homing takes over; S steps with neither is refused. S is the caller's
+promise that the head is at least S + 2 halftracks from the stop (it never
+reaches the stop). On a 1571 the search's steps count towards `--max-steps`.
+
 Saved captures are compared again offline with
 `nybulah pattern compare --truth artifacts/pattern/dev8/truth.json artifacts/pattern/dev8/*.npz`.
 
