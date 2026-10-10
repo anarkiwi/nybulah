@@ -133,6 +133,30 @@ def _run(sync, depth, circular):
     return run
 
 
+SYNC_CELLS = (0x4489, 0x5224)  # A1 and C2 with their missing clock
+
+
+def cells(data, prev=0):
+    """MFM cells (clock, data per bit, most significant first) of bytes written after
+    a byte ending in bit ``prev``."""
+    bits = np.unpackbits(np.asarray(data, np.uint8))
+    before = np.concatenate(([prev & 1], bits[:-1]))
+    return np.stack((1 - (before | bits), bits), axis=1).ravel()
+
+
+def false_syncs(data, prev=0):
+    """Cell offsets in data's MFM where an A1 or C2 sync pattern appears off the cell
+    phase (valid MFM never carries one in phase): where Read Track, its mark
+    detector on throughout, re-frames and from there delivers clock bits as data."""
+    c = cells(data, prev)
+    if len(c) < 16:
+        return np.zeros(0, np.int64)
+    words = np.lib.stride_tricks.sliding_window_view(c, 16) @ (
+        1 << np.arange(15, -1, -1)
+    )
+    return np.flatnonzero(np.isin(words, SYNC_CELLS))
+
+
 def find_marks(data, mark=None, circular=False):
     """``(pos, cls)`` of the address marks: the byte after a run of sync bytes.
 

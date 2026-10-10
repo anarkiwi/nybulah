@@ -20,8 +20,10 @@ from .monitor import Monitor, drivecode
 
 CODE_BASE, CODE2, SPLIT = 0x0300, 0x0782, 0x0200
 CIA_PA = 0x4000
-MFM_CODE, STREAM_CODE, EDGE_CODE = "mfm_1581", "mfmstream_1581", "ipprobe_1581"
-TAGS = {MFM_CODE: b"NYMF", STREAM_CODE: b"NYMS", EDGE_CODE: b"NYIP"}
+MFM_CODE, STREAM_CODE = "mfm_1581", "mfmstream_1581"
+EDGE_CODE, POLL_CODE = "ipprobe_1581", "rtpoll_1581"
+TAGS = {MFM_CODE: b"NYMF", STREAM_CODE: b"NYMS", EDGE_CODE: b"NYIP", POLL_CODE: b"NYRP"}
+POLL_RING = 0x1400  # drive/rtpoll.s RING
 ENTRY = dict(
     zip(
         "sense motor side restore seek index readaddr readsec writesec writetrk"
@@ -408,6 +410,20 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         self.cache_used = True
         raw = self.mon.read(BUFFER, (hi << 8 | lo) * EDGE_LEN)
         return edge_times(np.frombuffer(raw, np.uint8).reshape(-1, EDGE_LEN))
+
+    def poll_track(self, pad):
+        """Read Track through drive/rtpoll.s, the status polled every 18 + 5 pad cycles:
+        (status, bytes read, the last POLL_RING of them in order); status ST_FAIL when
+        no byte came."""
+        if not 1 <= pad <= 255:
+            raise ValueError("pad must be 1..255")
+        self._load(POLL_CODE)
+        self.mon.write(self._p, bytes([pad, self._tmo(2)]))
+        status, lo, hi = self.mon.jsr(CODE_BASE)
+        self.cache_used = True
+        n = lo | hi << 8
+        ring = np.frombuffer(self.mon.read(BUFFER, min(n, POLL_RING)), np.uint8)
+        return status, n, np.roll(ring, -(n % POLL_RING)) if n > POLL_RING else ring
 
     def read_track(self, revolutions=1):
         """Read Track ``revolutions`` times: a "track" MfmCapture."""

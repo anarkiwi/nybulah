@@ -15,7 +15,7 @@ BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
 	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin $(OUT)/ciaprobe.bin) \
 	$(M1581:%=$(OUT)/monitor_%_1581.bin) $(OUT)/ciaprobe_1581.bin \
-	$(OUT)/sdrgap.bin $(OUT)/sdrgap_1581.bin $(OUT)/ipprobe_1581.bin \
+	$(OUT)/sdrgap.bin $(OUT)/sdrgap_1581.bin $(OUT)/ipprobe_1581.bin $(OUT)/rtpoll_1581.bin \
 	$(MFM:%=$(OUT)/%_1581.bin) $(OUT)/ramtest_10.bin $(OUT)/ramtest_11.bin \
 	$(OUT)/vicerx_c128.bin
 
@@ -55,6 +55,11 @@ $(OUT)/ipprobe_1581.bin: ipprobe.s mfm.inc wdtest.inc
 	ca65 -t none -o $(OUT)/ipprobe_1581.o $<
 	ld65 -t none -S '$$0300' -o $@ $(OUT)/ipprobe_1581.o
 	rm -f $(OUT)/ipprobe_1581.o
+
+$(OUT)/rtpoll_1581.bin: rtpoll.s mfm.inc wdtest.inc
+	ca65 -t none -o $(OUT)/rtpoll_1581.o $<
+	ld65 -t none -S '$$0300' -o $@ $(OUT)/rtpoll_1581.o
+	rm -f $(OUT)/rtpoll_1581.o
 
 $(OUT)/sdrgap.bin: sdrgap.s
 	ca65 -t none -o $(OUT)/sdrgap.o $<
@@ -102,6 +107,6 @@ $(OUT)/sense_1571.bin: sense.s sense.cfg
 	rm -f $(OUT)/sense_1571.o
 
 clean:
-	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/sdrgap*.bin $(OUT)/ipprobe_*.bin $(OUT)/mfm*.bin $(OUT)/ramtest_*.bin $(OUT)/vicerx_*.bin
+	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/sdrgap*.bin $(OUT)/ipprobe_*.bin $(OUT)/rtpoll_*.bin $(OUT)/mfm*.bin $(OUT)/ramtest_*.bin $(OUT)/vicerx_*.bin
 
 .PHONY: all clean
