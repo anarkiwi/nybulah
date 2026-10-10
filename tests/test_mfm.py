@@ -315,3 +315,28 @@ def test_compare_revolutions_weak():
     assert len(weak) == 1 and weak[0]["rev"] == 2
     assert (weak[0]["start"], weak[0]["end"]) == (100, 103)
     assert list(mfm.runs([0, 1, 1, 0, 1])[0]) == [1, 4]
+
+
+def _word(c):
+    return int("".join(map(str, c)), 2)
+
+
+def test_cells_carry_clocks_between_zero_bits():
+    """A1 encodes to 0x44A9 (the 0x4489 sync is it with a clock missing); a 1 bit
+    before suppresses the first clock."""
+    assert _word(mfm.cells([0xA1])) == 0x44A9
+    assert _word(mfm.cells([0x00], prev=1)) == 0x2AAA
+    assert _word(mfm.cells([0x00])) == 0xAAAA
+
+
+def test_false_syncs_find_off_phase_sync_patterns():
+    """Valid MFM never carries a sync in phase; data whose cells hold 0x5224 or 0x4489
+    off phase is where Read Track re-frames; gap and sync fill carry none."""
+    assert mfm.false_syncs(np.zeros(512, np.uint8)).size == 0
+    assert mfm.false_syncs(np.full(64, mfm.GAP_BYTE, np.uint8)).size == 0
+    assert mfm.false_syncs([0x12]).size == 0
+    hit = mfm.false_syncs([0x00, 0x29], prev=1)
+    assert hit.tolist() == [15] and hit[0] % 2
+    assert _word(mfm.cells([0x00, 0x29], prev=1)[15:31]) in mfm.SYNC_CELLS
+    rng = np.random.default_rng(0)
+    assert mfm.false_syncs(rng.integers(0, 256, 512, dtype=np.uint8), 1).size

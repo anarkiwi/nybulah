@@ -855,3 +855,20 @@ def test_status_edges_follow_the_index_after_a_seek(media):
     with pytest.raises(ValueError):
         drive.status_edges([0xD0] * 5, 0x87, 1)
     no_stops(sim)
+
+
+@pytest.mark.parametrize("pad", [1, 3])
+def test_poll_track_reads_a_revolution(media, pad):
+    """drive/rtpoll.s: one revolution through a fixed poll, the ring's last bytes in
+    order, its sectors decoding; pad out of range refused."""
+    _, sim, drive = stream_rig(media)
+    drive.motor(True)
+    status, n, ring = drive.poll_track(pad)
+    assert status & ST_BUSY == 0
+    assert abs(n - mfm.TRACK_BYTES) < 16 and len(ring) == r1581.POLL_RING
+    sec = mfm.decode_track(ring).sectors
+    whole = sec[sec["data_pos"] + mfm.SECTOR_BYTES + 3 <= len(ring)]
+    assert len(whole) >= 7 and whole["data_ok"].all()
+    with pytest.raises(ValueError):
+        drive.poll_track(0)
+    no_stops(sim)

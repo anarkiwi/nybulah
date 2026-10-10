@@ -356,9 +356,33 @@ changed:
 docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" -v "$PWD/artifacts:/data/artifacts" --entrypoint python3 nybulah /tools/ipprobe.py --dev 9 --save /data/artifacts/ipprobe-1581.json
 ```
 
-Measured on the 1581 (firmware v14, 12 revolutions): `seek` 12 IP rises 199992
-to 200517 us apart, IP high 2.9 to 3.4 ms, live after MO fell; `force` and
+Measured on the 1581 (firmware v14, 12 revolutions): `seek` 12 IP rises 200247
+to 200261 us apart, IP high 3.14 to 3.17 ms, live after MO fell; `force` and
 `seek_force` no IP edge at all (status `$80`, then `$00` when MO fell).
+
+`tools/rtslips.py` homes a 1581, reads the cylinder's sectors through
+`readsec` as the reference, streams Read Sector, then `--captures` streamed
+single-revolution Read Tracks; it classifies each bad data field as a
+re-frame at a false sync (`mfm.false_syncs`: an A1 or C2 sync pattern off the
+cell phase inside the data, where Read Track, its mark detector on
+throughout, re-frames and then delivers clock bits as data) or bytes lost,
+with the timer B wraps inside the loss's span. `--pads` runs Read Track
+through `drive/rtpoll.s`, which polls the status every 18 + 5 P cycles (a
+byte waits at most 31 + 5 P), for the WD's DRQ window:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" -v "$PWD/artifacts:/data/artifacts" --entrypoint python3 nybulah /tools/rtslips.py --dev 9 --max-steps N --captures 40 --save /data/artifacts/rtslips.json
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" -v "$PWD/artifacts:/data/artifacts" --entrypoint python3 nybulah /tools/rtslips.py --dev 9 --max-steps N --captures 0 --pads 1 2 3 4 5 6 --reps 4 --save /data/artifacts/rtpoll.json
+```
+
+Measured on the 1581 (cylinder 39, firmware v14): every Read Track ends with
+Lost Data, `rtpoll` at a 23-cycle pass included, with no byte missing, so
+Read Track's `$84` does not mark a lost byte. Waits up to 41 cycles lose
+nothing; 46 and 51 lose the misframed byte before an A1 sync (harmless to the
+decode); 56 and over lose bytes throughout. Every byte the stream lost inside
+a data field had a timer B wrap in its span (the `dl` wrap pass, 58 cycles).
+Random sector data carries a false sync in practically every field, so Read
+Track recovers only sparse sectors; Read Sector reads them all.
 
 ## Disk survey (read-only)
 
@@ -856,7 +880,7 @@ to lose only for step 5.
    Measured with firmware v14 (`artifacts/stream-1581-39-v14.npz`): the track
    stream `done`/`done`, 6254 and 6257 bytes, 200226 and 200232 us, Read Track
    status `$84` (Lost Data) on both revolutions and two sector errors in the
-   decode; the ids stream ended `timeout` at its index wait (`op 0`): the type I
+   decode (Read Track's re-framing and the stream's wrap pass: `tools/rtslips.py`, issue #56); the ids stream ended `timeout` at its index wait (`op 0`): the type I
    status never showed IP: the index op polls after `$D0` only, which leaves IP
    clear on this WD (`tools/ipprobe.py`, issue #57). The stamps of Read Track, which the WD starts at an index edge, place
    the index without the wait.
