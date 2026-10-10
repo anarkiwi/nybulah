@@ -415,6 +415,9 @@ each region's bit offset, length and expected bits, the density, the measured
 
 `verify` aligns each capture to the pattern: FFT cross-correlation places each
 revolution's copy, a banded edit distance then counts per group bit errors,
+its band widened to reach every stable stretch between unstable regions (each
+placed by its own exact bits, since an unstable region reads at any length, so
+a misread there shows as its insertions or deletions only),
 insertions and deletions (sync length differences reported apart, per sync as
 written against found), the drift and the $55 byte framing, the revolution
 length read against `--cells`, and per unstable group (`weak`, or each
@@ -450,6 +453,15 @@ another pass latched is timed across them, TS's timer wraps go to the TB byte
 on its BITS boundary, and where TB slipped unseen TS measures the syncs. The
 speed trace takes only TB intervals the merge placed on single latched bytes.
 Bytes read from no flux are not 8 written cells and can still move it.
+Over a known revolution a pass position inside the BITS bytes is that byte;
+only positions past their ends stand for the byte a whole turn away, since the
+turns need not latch the same count across the weak region. One ambiguity
+remains: a TB or TS event in the weak region (a cell or two of extra wait) and
+the `resync` sync can both land, after one slip, on capable bytes of BITS weak
+data, costing no more than the true slip with the weak event unmatched; the
+sync weights then favour the false landing, restoring a run of hidden ones the
+BITS pass never saw (inside the weak region, so `verify` counts it as `weak`
+insertions).
 
 `cells` writes a probe sync on `--halftrack` (destroying that halftrack only,
 once per density) and measures the cells per revolution at each of

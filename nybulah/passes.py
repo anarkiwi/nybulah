@@ -304,6 +304,18 @@ def _fold(a, rev, op):
     return out
 
 
+def nearest_turn(u, n, rev):
+    """BITS indices for positions ``u`` of a revolution of ``rev`` bytes over
+    ``n`` captured bytes: ``u`` inside them, else the nearest copy whole turns
+    away inside them."""
+    u = np.asarray(u, np.int64)
+    return np.where(
+        u < 0,
+        u + rev * ((rev - 1 - u) // rev),
+        np.where(u >= n, u - rev * ((u - n) // rev + 1), u),
+    )
+
+
 def _likeliest_shift(events, ok, weight):
     """Circular shift putting most ``events`` on ``ok``, then the most ``weight``."""
     size = len(ok)
@@ -326,8 +338,11 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
     different byte counts in each: the offset changes there by any amount
     that keeps positions increasing, rising by at most ``rise`` (the bytes
     the pass's own sync at the event could have held), or by up to ``free``
-    bytes at no cost. Over a known revolution of ``rev`` bytes positions are
-    circular; otherwise events past either end of the pass's own placement
+    bytes at no cost. Over a known revolution of ``rev`` bytes a position
+    past either end of the BITS bytes stands for its nearest copy a whole
+    number of turns away inside them (:func:`nearest_turn`); one inside them
+    is itself, as the bytes need not recur where the turns latched different
+    counts. Otherwise events past either end of the pass's own placement
     constrain nothing. A pass starts at its anchor, or unanchored at the
     shift putting most events on ``ok``, and its first event may move off
     that start by any amount.
@@ -342,7 +357,8 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
         if not anchored:
             shift = (_likeliest_shift(events, ok, weight) + base) % rev - base
         offsets = shift + np.arange(-(rev // 2), rev - rev // 2)
-        pos = (events[:, None] + offsets) % rev
+        ok, weight = evidence
+        pos = nearest_turn(events[:, None] + offsets, len(ok), rev)
         inside = np.ones(pos.shape, bool)
     else:
         shift = 0 if anchored else best_offset(events, ok)[0]
@@ -355,11 +371,14 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
     weight = np.where(hit, weight[pos], 0.0)
     if known is not None:
         where, fits = known
-        col = where[None, :] - events[:, None] - offsets[0]
-        col = col % rev if rev else col
-        i, j = np.nonzero(fits & (col >= 0) & (col < len(offsets)))
         seen = np.zeros(hit.shape, bool)
-        seen[i, col[i, j]] = True
+        if rev:
+            for j, w in enumerate(where):
+                seen |= fits[:, j : j + 1] & (pos == w)
+        else:
+            col = where[None, :] - events[:, None] - offsets[0]
+            i, j = np.nonzero(fits & (col >= 0) & (col < len(offsets)))
+            seen[i, col[i, j]] = True
         weight += (seen & hit) * (1.0 + weight.max(axis=1, initial=0.0).sum())
     fall = np.diff(events, prepend=events[0]) - 1
     rise = np.full(len(events), len(offsets)) if rise is None else np.array(rise)
