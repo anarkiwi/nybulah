@@ -126,7 +126,7 @@ def locate(nib, max_steps):
     """1571: home within max_steps outward steps (never bumping); 1541: locate."""
     if nib.model != "1571":
         return nib.locate()
-    plan = homeprobe.dry(nib)
+    plan = homeprobe.dry(nib, headers=True)
     if plan["outward_steps"] > max_steps:
         raise ValueError(
             f"homing needs {plan['outward_steps']} outward steps, over {max_steps}"
