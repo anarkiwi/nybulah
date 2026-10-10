@@ -26,13 +26,13 @@
 ;               t_first and t_end (5 bytes each), WD status, flags (bit 0:
 ;               forced out by the timeout), data byte count (lo, hi)
 ;   $1C INDEX   the stamp (5 bytes, 7 chunks) of a rising index edge
-; A stamp is timer B wraps, ICR bit 1 at the read, timer B high, low, high
-; (nybulah.mfmstream.stamp_us turns it into microseconds).
+; A stamp is timer B wraps and timer B high at the last poll, then timer B
+; high, low, high (nybulah.mfmstream.stamp_us turns it into microseconds).
 ;   $40 END   $44 END_TIMEOUT (the last REC was forced out)   $48 END_ATN
 ; A command's data bytes are contiguous in the stream; its REC counts them
 ; and follows them. Timer B low is read STAMP_LO cycles after the first
-; byte's SDR write (t_first), the status read that saw the command end
-; (t_end) or the index (INDEX); ICR STAMP_ICR cycles after it.
+; byte's SDR write (t_first); t_end and INDEX are stamped a few
+; instructions after the status read that saw the command end or the index.
 ;
 ; Rules, t = 0 at an SDR write (protocol.md):
 ; - SDR writes 40 or more cycles apart: the 8520's shifter is idle (it flags
@@ -43,8 +43,13 @@
 ;   more after it and 2 or more before a data write;
 ; - metadata goes out between commands with the WD idle (plain), or before
 ;   a command's first DRQ one byte at a time (send), the status read at
-;   most 30 cycles apart throughout.
-; ICR bit 1 is read for timer B wraps; ICR bit 3 follows every byte.
+;   most 31 cycles apart (45 around queuing a KEEP).
+; Wraps are read from timer B itself: every wait polls the high byte, and
+; bit 15 rising is a wrap (phase holds it from the last poll). ICR is not
+; polled: an ICR read in the cycle before timer B underflows loses the
+; flag (the 6526/8520 timer B bug). A stamp's own timer B reads resolve a
+; wrap since the last poll (bit 15 risen against phase), which the next
+; poll then counts. ICR bit 3 follows every byte; only finish waits for it.
 
         .include "mfm.inc"
 
@@ -63,19 +68,23 @@ QMASK    = $1F
 ADAPTER_GAP_US = 20000
 KEEP_PASSES = 256               ; kc wraps: a KEEP per 256 passes
 .assert KEEP_PASSES = 256, error, "kc counts down from 0"
-W0_PASS = 50                    ; cycles of a w0 pass that sends nothing
-BW_PASS = 76                    ; cycles of a bwait pass that sends nothing
-.assert KEEP_PASSES * W0_PASS < ADAPTER_GAP_US * CPU_MHZ, error, "w0 keepalive"
-.assert KEEP_PASSES * BW_PASS < ADAPTER_GAP_US * CPU_MHZ, error, "bwait keepalive"
+W0_PASS = 51                    ; cycles of the shortest w0 pass
+; The longest pass that sends nothing (w0: the one queuing a KEEP; bwait: one
+; queuing a KEEP and counting a wrap), which also bounds a sending pass up
+; to its write and after it. Between two writes: KEEP_PASSES counted passes,
+; one with a wrap that counts none, and the two writes' passes.
+W0_LONG = 72
+BW_LONG = 120
+.assert (KEEP_PASSES + 2) * W0_LONG < ADAPTER_GAP_US * CPU_MHZ, error, "w0 keepalive"
+.assert (KEEP_PASSES + 2) * BW_LONG < ADAPTER_GAP_US * CPU_MHZ, error, "bwait keepalive"
 FORCE_WRAPS = 2                 ; mfm.inc WDIDLE's bound on busy after $D0
 PB_CLKIN = $04
-STAMP_LO = 22                   ; write (or status read) -> timer B low read
-STAMP_ICR = 4                   ; write (or status read) -> ICR read
+STAMP_LO = 19                   ; write (or status read) -> timer B low read
 
 qhead   = $30
 kc      = $31                   ; wait passes left to the next KEEP (0: 256)
 cnt     = $32                   ; data bytes of the command
-tmo     = $34
+phase   = $34                   ; timer B high at the last poll (bit 15)
 wraps   = $35
 qtail   = $36
 
@@ -85,12 +94,11 @@ qtail   = $36
         .byte "NYMS"
 L:      .res 16
 TMO:    .res 1
-; ICR then timer B into base + 1 .. base + 4, 34 cycles: the ICR read at 4,
-; the low byte at 22 (STAMP_ICR, STAMP_LO). base + 0 holds wraps, stored
-; before.
+; phase then timer B into base + 1 .. base + 4, 31 cycles: the low byte
+; read at 19 (STAMP_LO). base + 0 holds wraps, stored before with no poll
+; in between.
 .macro STAMP base
-        lda CIA_ICR
-        and #ICR_TB
+        lda phase
         sta base + 1
         lda CIA_TBHI
         sta base + 2
@@ -133,7 +141,8 @@ plain:  ldy qhead
         rts                             ; t = 40
 
 ; Before the command's first DRQ: ATN, wraps, one queued byte or a
-; keepalive at a time; the status read every 30 cycles or less.
+; keepalive at a time; the status read every 31 cycles or less (45 around
+; queuing a KEEP), a DRQ's byte read within 56 cycles.
         ALIGN4 1
 w0:     WDOK
         lda WDSTAT                      ; 4     u = 4
@@ -143,25 +152,38 @@ w0:     WDOK
         BR bcc, wend                    ; 2     ended without data
         bit CIA_PB                      ; 4
         BR bmi, wabort                  ; 2
-        lda CIA_ICR                     ; 4
-        and #ICR_TB                     ; 2
-        BR bne, wwrap                   ; 2
+        lda CIA_TBHI                    ; 4
+        eor phase                       ; 3
+        BR bmi, wwrap                   ; 2     bit 15 changed
         WDOK
-        lda WDSTAT                      ; 4     u = 30
+        lda WDSTAT                      ; 4     u = 31
         and #ST_DRQ                     ; 2
         BR bne, dfirst                  ; 2
         lda qhead                       ; 3
         cmp qtail                       ; 3
         BR bne, wsend                   ; 2
         dec kc                          ; 5
-        BR bne, w0                      ; 3     u = 50: the next read at 54
-        lda #M_KEEP
-        jsr put
-        jmp w0
+        BR bne, w0                      ; 3     u = 51: the next read at 55
+        ldy qtail                       ; 3     put, inline: Y clobbered
+        lda #M_KEEP                     ; 2
+        sta q,y                         ; 5
+        iny                             ; 2
+        tya                             ; 2
+        and #QMASK                      ; 2
+        sta qtail                       ; 3
+        jmp w0                          ; 3     u = 72: the next read at 76
 wsend:  jmp send
-wwrap:  inc wraps
-        dec tmo
-        bne w0
+; Bit 15 changed: the status first, then the new phase; a rise is a wrap.
+wwrap:  WDOK
+        lda WDSTAT                      ; 4     u = 32
+        and #ST_DRQ                     ; 2
+        BR bne, dfirst                  ; 2
+        lda CIA_TBHI                    ; 4
+        sta phase                       ; 3
+        BR bpl, w0                      ; 3 / 2 u = 46: the next read at 50
+        inc wraps                       ; 5
+        dec tmo                         ; 6
+        BR bne, w0                      ; 3     u = 59: the next read at 63
         lda #0                          ; no data: the record spans the wait
         sta cnt
         jmp timeout
@@ -171,9 +193,7 @@ wabort: jmp abort
 wend:   WDTEST
         lda WDSTAT
         sta stat
-        lda wraps
-        sta last
-        STAMP last
+        jsr stampl
         jsr dup
         lda #0
         sta cnt
@@ -190,22 +210,25 @@ dup:    ldx #4
 
 ; First byte: read at once, written 11 cycles later (w0 reads the status 39
 ; or more cycles after send's write, so this write is 40 or more after it),
-; then stamped.
+; then stamped; dl's first status read at 42.
         ALIGN4 1
 dfirst: WDOK
         ldx WDDAT                       ; 4
         lda wraps                       ; 3
         sta first                       ; 4
         stx CIA_SDR                     ; 4     t = 0
-dstamp: STAMP first                     ; 34
-        jmp dl                          ; 3     the status read at 41
+dstamp: STAMP first                     ; 31
+        ldy tmo                         ; 4     dl counts the timeout in Y
+        jmp dl                          ; 3
 
 ; Data loop: from a write at t = 0 the status is read at 24 (28 when the
-; count carries) and every 27 cycles while no DRQ, ATN checked on each pass;
-; a DRQ seen (before BUSY: a command's last byte may wait after BUSY clears)
-; is written 17 cycles after its status read: writes are 41 or more apart and
-; a byte waits at most 27 + 13 cycles in the data register.
-        ALIGN4 2
+; count carries) and every 28 cycles while no DRQ, ATN checked on each pass;
+; a pass that sees bit 15 change takes the new phase before the next read,
+; 36 cycles after the last (45 for a wrap). A DRQ seen (before BUSY: a
+; command's last byte may wait after BUSY clears) is written 17 cycles
+; after its status read: writes are 41 or more apart and a byte waits at
+; most 45 + 13 cycles in the data register. Y holds the timeout's wraps.
+        ALIGN4 1
 dl:     WDOK
         lda WDSTAT                      ; 4     t = 24
         lsr                             ; 2
@@ -214,12 +237,15 @@ dl:     WDOK
         BR bcc, dend                    ; 2
         bit CIA_PB                      ; 4
         BR bmi, dabort                  ; 2
-        lda CIA_ICR                     ; 4
-        and #ICR_TB                     ; 2
-        BR beq, dl                      ; 3     status every 27 cycles
-        inc wraps
-        dec tmo
-        bne dl
+        lda CIA_TBHI                    ; 4
+        eor phase                       ; 3
+        BR bpl, dl                      ; 3     status every 28 cycles
+        eor phase                       ; 3
+        sta phase                       ; 3
+        BR bpl, dl                      ; 3 / 2 the next read 36 after
+        inc wraps                       ; 5
+        dey                             ; 2
+        BR bne, dl                      ; 3     the next read 45 after
         jmp timeout
 dd:     nop                             ; 2
         WDOK
@@ -238,10 +264,7 @@ dabort: jmp abort
 dend:   WDTEST
         lda WDSTAT
         sta stat
-        jsr seen
-        lda wraps
-        sta last
-        STAMP last
+        jsr stampl
         jmp record
 
 ; Send one queued byte before the command's first DRQ (entered by jmp from
@@ -249,8 +272,8 @@ dend:   WDTEST
 ; 4 and 28; a DRQ seen after the write has its byte read at 13 or 37 and
 ; written at 40 or 48. The next status read in w0 is at 39; a DRQ seen
 ; before the write reaches dfirst's read 12 cycles later.
-        ALIGN4 1
-send:   ldy qhead                       ; 4
+        ALIGN4 2
+send:   ldy qhead                       ; 3
         ldx q,y                         ; 4
         WDOK
         lda WDSTAT                      ; 4     t = -14
@@ -266,7 +289,7 @@ send:   ldy qhead                       ; 4
         iny                             ; 2
         tya                             ; 2
         and #QMASK                      ; 2
-        sta qhead                       ; 4     t = 18
+        sta a:qhead                     ; 4     t = 18
         lda #PB_FSDIR                   ; 2
         sta CIA_PB                      ; 4     t = 24: CLK released
         WDOK
@@ -282,7 +305,7 @@ s4:     WDOK
         iny                             ; 2
         tya                             ; 2
         and #QMASK                      ; 2
-        sta qhead                       ; 4
+        sta a:qhead                     ; 4
         lda wraps                       ; 3
         sta first                       ; 4
         stx CIA_SDR                     ; 4     t = 40
@@ -330,7 +353,7 @@ rep:    .res 1
 lp:     .res 1
 trksave: .res 1
 sc:     .res 1
-first:  .res 5                  ; wraps, ICR & TB, timer B high, low, high
+first:  .res 5                  ; wraps, phase, timer B high, low, high
 last:   .res 5
 stat:   .res 1                  ; the REC payload continues: status, flags,
 flags:  .res 1                  ; count
@@ -351,22 +374,20 @@ bits:   .res 1
 nb:     .res 1
 py:     .res 1
 sm:     .res 1
+tmo:    .res 1                  ; wraps left of the timeout
 
-; Z set when a wrap used up the timeout.
-tick:   lda CIA_ICR
-        and #ICR_TB
-        beq :+
+; Poll timer B: bit 15 changed is the new phase, a rise a wrap spent from
+; the timeout; Z set when it ran out, clear otherwise.
+tick:   lda CIA_TBHI
+        eor phase
+        bpl :+
+        eor phase
+        sta phase
+        bpl :+
         inc wraps
         dec tmo
         rts
 :       lda #1
-        rts
-
-; Add the first stamp's wrap flag to wraps.
-seen:   lda first + 1
-        lsr
-        adc wraps
-        sta wraps
         rts
 
 ; Queue X bytes from first + Y as six-bit chunks, most significant bit
@@ -413,11 +434,13 @@ rec:    sta flags
         ldx #REC_LEN
         jmp pack
 
-record: lda last + 1
-        lsr
-        adc wraps
-        sta wraps
-        lda #0
+; The end stamp into last.
+stampl: lda wraps
+        sta last
+        STAMP last
+        rts
+
+record: lda #0
         jsr rec
         jmp nextcmd
 
@@ -429,9 +452,7 @@ timeout:
         lda #FORCE_WRAPS
         sta tmo
         jsr fwait
-        lda wraps
-        sta last
-        STAMP last
+        jsr stampl
         lda cnt
         ora cnt + 1
         bne :+
@@ -496,7 +517,6 @@ index:  jsr fwait
         lda wraps
         sta first
         STAMP first
-        jsr seen
         lda #M_INDEX
         jsr put
         ldy #0
@@ -514,6 +534,8 @@ stream: lda #0
 :       sta state,x
         dex
         bpl :-
+        lda CIA_TBHI
+        sta phase
         WDTEST
         lda WDTRK
         sta trksave

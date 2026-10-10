@@ -5,6 +5,7 @@ VIA, WD177x) through the binary monitor; skipped unless x64sc and x128 are insta
 import numpy as np
 import pytest
 
+from nybulah import mfmstream as ms
 from nybulah import r1581, vice
 from nybulah import vicebench as vb
 from nybulah.analysis import mfm
@@ -126,7 +127,7 @@ def test_1581_writes_report():
     assert report["d81_side_ok"]
 
 
-KEEP_PASSES, W0_PASS = 256, 50  # drive/mfmstream.s
+KEEP_PASSES, W0_PASS = 256, 51  # drive/mfmstream.s
 
 
 def test_1581_read_track_streams_to_c128():
@@ -144,6 +145,24 @@ def test_1581_read_track_streams_to_c128():
     assert report["sectors_ok"] == [mfm.SECTORS] * 2
     assert report["metadata_head"][0] == "$04"
     assert any("SDR   $04" in line for line in report["head"])
+
+
+def test_1581_stream_stamps_every_wrap():
+    """mfmstream_1581 stamps a run of index edges, then Read Track twice: every index
+    period and every revolution's span is one revolution, with no wrap lost to an ICR
+    read racing timer B's underflow, whatever the phase."""
+    report = vb.stream(
+        cylinder=CYL, side=1, revolutions=2, index_waits=ms.REP_MAX, seed=11
+    )
+    assert (report["adapter"], report["drive_end"]) == ("done", "done")
+    assert report["sectors_ok"] == [mfm.SECTORS] * 2
+    periods = np.diff(report["index_us"])
+    spans = [c["t_end_us"] - c["t_first_us"] for c in report["commands"]]
+    assert len(periods) == ms.REP_MAX - 1
+    for got in (periods, spans):
+        assert np.all(
+            np.abs(np.asarray(got) - r1581.NOMINAL_US) < r1581.NOMINAL_US // 100
+        )
 
 
 def test_1571_via_registers_match_cpu(tmp_path):

@@ -82,7 +82,8 @@ python -m nybulah.vicebench stream [--drivecode DIR] [--code2 0x0782] [--under D
   the sectors decoded from each revolution against the D81, and the drive cycles
   from START to the first KEEP. `--head N` also traces every CIA and WD register
   access from the call to the Nth SDR write. `--peers` puts a 1571 on unit 8 and
-  a 1541 on unit 10, as on the hardware bus.
+  a 1541 on unit 10, as on the hardware bus. `--index-waits N` stamps N index
+  edges before the Read Track (`index_us`; every command carries its stamps).
 
 `--drivecode DIR` takes another build's `.bin` files, for example a branch built
 with `make -C drive OUT=DIR`. `--code2` sets where the stream code's second part
@@ -109,17 +110,20 @@ sheets:
 
 - An ICR read returns and clears every flag, including SP (data sheet: "the
   interrupt data register is cleared ... when read"; VICE
-  `core/ciacore.c:1288-1352`). `w0` reads ICR on every pass and so clears the
-  SP flag of each byte. No send path in `mfmstream.s` waits for SP: writes are spaced by
-  cycle count (40 or more apart), and the one SP wait, in `finish`, is bounded.
-  A lost flag cannot hang the stream.
+  `core/ciacore.c:1288-1352`), and touches nothing else: the read path updates
+  the timers and the interrupt state, never the shifter, its bit count, the
+  pending SDR byte or CNT (`ciacore_intsdr`). No send path in `mfmstream.s`
+  waits for SP: writes are spaced by cycle count (40 or more apart), and the one
+  SP wait, in `finish`, is bounded. The stream's loops poll timer B for wraps,
+  not ICR (protocol.md, "Stream engine"), so nothing in them clears SP now; a
+  cleared flag could not have hung the stream before either.
 - In output mode a written SDR byte starts at the next timer A underflow and
   shifts at half the underflow rate; the flag follows the eighth CNT pulse (data
   sheet, Serial Port). VICE models the same inside the drive's CIA, cycle by cycle
   (`ciacore.c:914-929`, `ciacore_intsdr` at `1723-1830`), and only the handover to
   the computer is byte-level (`drive/iec/cia1581d.c` `store_sdr`).
-- The leftover timer B flag (`$83` at the first ICR read) counts one wrap early.
-  It shortens the command timeout by one wrap and does not change the path.
+- Wraps come from timer B bit 15 against the phase taken at entry, so a timer
+  B flag left from before the call counts nothing.
 
 Every exit of the wait (`dfirst`, `wend`, `wwrap`, `wabort`) sends within a pass
 count or a record, and every one is reproduced on VICE. What remains of the
