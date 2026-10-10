@@ -59,6 +59,7 @@ F_CRA    = $04
 ENTRIES  = 32
 GAP_UNIT = 100                  ; cycles an idle unit (the loop below)
 LOG_LEN  = 16
+LOG_PAGES = 3                   ; pages cleared at entry: (ENTRIES + 2) * LOG_LEN
 ICR_AT   = 48                   ; SDR write -> the ICR read after it (48 or 49)
 GO_OUTER = 2                    ; x 65536 go polls of 13 cycles: 0.85 s
 
@@ -79,6 +80,18 @@ T:      .res 4 * ENTRIES + 4
 probe:  lda #0
         sta idx
         sta cnt
+        sta lp
+        lda #>LOG
+        sta lp + 1
+        tay
+        lda #0
+:       sta (lp),y                      ; the log cleared: a lost run is read
+        iny                             ; back over DOS M-R, no row stale
+        bne :-
+        inc lp + 1
+        ldx lp + 1
+        cpx #>LOG + LOG_PAGES
+        bne :-
         lda #<LOG
         sta lp
         lda #>LOG
