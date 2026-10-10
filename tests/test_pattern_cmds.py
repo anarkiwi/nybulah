@@ -225,6 +225,7 @@ def test_hw_stream_saw_no_index():
     assert report["index"] == {
         "captures": 0,
         "stream_edges": 0,
+        "stream_edges_unstable": [],
         "drive_end": ["noindex"],
         "ram_index": [],
         "pattern_angle": None,

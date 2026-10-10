@@ -270,11 +270,17 @@ def test_speed_excursion_period_and_decay():
 
 HW_PATTERN = pathlib.Path(__file__).parent / "data" / "hw" / "pattern"
 HW_RAM = sorted(HW_PATTERN.glob("*/*-ram-*.npz"))
+HW_WEAK = [
+    p
+    for p in HW_RAM
+    if json.loads((p.parent / pattern.TRUTH).read_text()).get("variant") == "weak"
+]
+HW_STANDARD = [p for p in HW_RAM if p not in HW_WEAK]
 
 
 def leading(truth):
-    """Groups written before the weak region."""
-    weak = region(truth, "weak.0")
+    """Groups written before the first unstable region."""
+    weak = next(r for r in truth.regions if r.kind == pt.UNSTABLE)
     return {r.group for r in truth.regions if r.offset < weak.offset}
 
 
@@ -293,7 +299,7 @@ def stray_syncs(truth, cap):
     }
 
 
-@pytest.mark.parametrize("path", HW_RAM, ids=lambda p: f"{p.parent.name}-{p.stem}")
+@pytest.mark.parametrize("path", HW_STANDARD, ids=lambda p: f"{p.parent.name}-{p.stem}")
 def test_hw_unstable_region_read_unlike_the_timing_passes(path):
     """1541 and 1571 RAM captures of the pattern whose weak region read into the
     resync's sync in some passes and as bytes in others: the leading regions
@@ -312,30 +318,28 @@ def test_hw_unstable_region_read_unlike_the_timing_passes(path):
         assert x["angle"]["pattern"][0] > lead
 
 
-AMBIGUOUS = {"h30"}
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        pytest.param(
-            p,
-            marks=pytest.mark.xfail(
-                p.parent.name in AMBIGUOUS,
-                reason="one TB slip landing a weak-region event and the resync "
-                "costs no more than the true slip (docs/hardware.md)",
-                strict=True,
-            ),
-        )
-        for p in HW_RAM
-    ],
-    ids=lambda p: f"{p.parent.name}-{p.stem}",
-)
+@pytest.mark.parametrize("path", HW_STANDARD, ids=lambda p: f"{p.parent.name}-{p.stem}")
 def test_hw_restored_syncs_end_on_written_syncs(path):
     """Every restored sync of a hardware RAM capture ends on a written sync or
     the weak region."""
     truth = pt.Truth.from_json(json.loads((path.parent / pattern.TRUTH).read_text()))
     assert not stray_syncs(truth, Capture.load(path))
+
+
+@pytest.mark.parametrize("path", HW_WEAK, ids=lambda p: f"{p.parent.name}-{p.stem}")
+def test_hw_weak_variant_runs_read_unlike_the_timing_passes(path):
+    """1571 RAM captures of the weak variant, its runs read as bytes in some
+    passes and as syncs in others: the leading regions read exactly, no exact
+    group slips by more than a bit, and the revolution over the stable bits is
+    the written one."""
+    truth = pt.Truth.from_json(json.loads((path.parent / pattern.TRUTH).read_text()))
+    entry = pattern.compare(truth, [(path.name, Capture.load(path))])["captures"][0]
+    for name, g in entry["groups"].items():
+        if g["kind"] != pt.UNSTABLE:
+            assert g["slips"] <= 1, name
+            assert name not in leading(truth) or g["errors"] == g["slips"] == 0
+    for rev in entry["revolution_bits"]:
+        assert abs(rev - truth.cells) < truth.cells * pt.UNMEASURED_TOLERANCE
 
 
 def test_unstable_region_read_longer_than_the_band():
@@ -357,6 +361,25 @@ def test_unstable_region_read_longer_than_the_band():
             assert g["errors"] == g["slips"] == 0, name
     assert rep["groups"]["weak"]["ins"] == extra
     assert al.band > extra
+
+
+def test_revolution_over_stable_bits_less_unstable_reads():
+    """A weak region read longer in the second copy leaves the revolution over
+    the stable bits the written one; with no stable bits matched in both copies
+    there is none. Stable positions come from stable bits only."""
+    truth = pt.make_truth(HALFTRACK, seed=3)
+    track = track_of(truth, 3000)
+    weak = region(truth, "weak.0")
+    c = np.tile(track, 2)
+    at = len(track) + weak.offset + weak.length // 2
+    c = np.insert(c, at, np.random.default_rng(1).integers(0, 2, 60, dtype=np.uint8))
+    al = pt.align(c, truth)
+    stable = truth.stable()
+    assert not stable[weak.offset : weak.offset + weak.length].any()
+    assert al.revolution(len(truth.bits), stable) == [len(track)]
+    assert al.revolution(len(truth.bits), np.zeros_like(stable)) == [None]
+    probe = np.array([100, len(track) + 100])
+    assert al.stable_position(probe, stable).tolist() == [100, 100]
 
 
 def test_stretch_shifts_skip_partial_and_insignificant_stretches():

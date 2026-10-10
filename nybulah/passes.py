@@ -13,6 +13,7 @@ import numpy as np
 
 from .analysis.capture import trailing_ones
 from .eventalign import align
+from .unstable import absorbable
 from .analysis.gcr import NOMINAL_RPM, SYNC_MIN_BITS, bit_rate, to_bits
 
 TB_CHAIN = 12
@@ -232,15 +233,16 @@ def _one_angle(keys, period):
 def choose_anchor(data, cell, period=None, steady=True):
     """``(base, anchor bytes)`` with ``data[base - k:base]`` as anchor, or None.
 
-    The window occurs at one angle, framed as on every revolution, and the
-    matcher finds it. Without a ``period`` the bytes must be ``steady`` and
-    no sync may fit before ``base`` or where TB is blind after it.
+    The window occurs at one angle, framed as on every revolution, clear of
+    unstable bytes, and the matcher finds it. Without a ``period`` the bytes must
+    be ``steady`` and no sync may fit before ``base`` or where TB is blind after it.
     """
     data = np.asarray(data, np.uint8)
     if period is None and not steady:
         return None
-    ok, _ = capable(data)
+    ok, latched = capable(data)
     blind = unmeasured_after_anchor(cell)
+    noisy = np.concatenate(([0], np.cumsum(absorbable(data, latched)[1])))
     limit = len(data) - blind
     if period is None:
         limit = min(limit, int(np.argmax(ok)) if ok.any() else limit)
@@ -256,7 +258,10 @@ def choose_anchor(data, cell, period=None, steady=True):
         for j in range(k):
             keys = keys << np.uint64(8) | windows[:, j].astype(np.uint64)
         starts = np.arange(k - 1, max(limit - k + 1, k - 1))
-        starts = starts[_one_angle(keys, period)[starts] & framed[starts + k * shift]]
+        clear = noisy[np.minimum(starts + k + blind, len(data))] == noisy[starts]
+        starts = starts[
+            _one_angle(keys, period)[starts] & framed[starts + k * shift] & clear
+        ]
         for s in starts[starts + k < best_base]:
             if _matcher_idle(data, s, k):
                 best, best_base = data[s : s + k].copy(), int(s + k)
@@ -330,34 +335,21 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
 ):
     """Per-event BITS offsets for pass events landing on capable positions.
 
-    ``evidence`` is ``(capable, weight)`` of the BITS boundaries; ``known``
-    is optionally ``(positions, fits)``, where another pass placed syncs and
-    which of them each event's sync fits: among equally consistent
-    alignments, events landing on syncs they fit outweigh any ``weight``.
-    The passes read different revolutions, so an unstable stretch can latch
-    different byte counts in each: the offset changes there by any amount
-    that keeps positions increasing, rising by at most ``rise`` (the bytes
-    the pass's own sync at the event could have held), or by up to ``free``
-    bytes at no cost. Over a known revolution of ``rev`` bytes a position
-    past either end of the BITS bytes stands for its nearest copy a whole
-    number of turns away inside them (:func:`nearest_turn`); one inside them
-    is itself, as the bytes need not recur where the turns latched different
-    counts. Otherwise events past either end of the pass's own placement
-    constrain nothing. A pass starts at its anchor, or unanchored at the
-    shift putting most events on ``ok``, and its first event may move off
-    that start by any amount.
+    ``evidence`` is ``(capable, weight, (absorb, noisy))`` of the BITS bytes
+    (:func:`nybulah.unstable.absorbable`), ``rise`` the bytes each event's own
+    measured run could hide; ``known`` as in docs/hardware.md (Test pattern).
     """
     events = base + np.asarray(events, np.int64)
     if events.size == 0:
         return np.zeros(0, np.int64), np.zeros(0, bool)
-    ok, weight = evidence
+    ok, weight, (absorb, noisy) = evidence
+    within = np.concatenate(([False], noisy[1:] & noisy[:-1]))
     if rev:
-        ok, weight = _fold(ok, rev, np.logical_or), _fold(weight, rev, np.maximum)
         shift = 0
         if not anchored:
-            shift = (_likeliest_shift(events, ok, weight) + base) % rev - base
+            folded = _fold(ok, rev, np.logical_or), _fold(weight, rev, np.maximum)
+            shift = (_likeliest_shift(events, *folded) + base) % rev - base
         offsets = shift + np.arange(-(rev // 2), rev - rev // 2)
-        ok, weight = evidence
         pos = nearest_turn(events[:, None] + offsets, len(ok), rev)
         inside = np.ones(pos.shape, bool)
     else:
@@ -379,7 +371,7 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
             col = where[None, :] - events[:, None] - offsets[0]
             i, j = np.nonzero(fits & (col >= 0) & (col < len(offsets)))
             seen[i, col[i, j]] = True
-        weight += (seen & hit) * (1.0 + weight.max(axis=1, initial=0.0).sum())
+        weight += (seen & hit) * (1.0 + np.max(weight, axis=1, initial=0.0).sum())
     fall = np.diff(events, prepend=events[0]) - 1
     rise = np.full(len(events), len(offsets)) if rise is None else np.array(rise)
     fall[0] = rise[0] = len(offsets)
@@ -387,12 +379,14 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
     placed = np.arange(len(offsets)) == start
     cols, matched = align(
         hit | (~inside & placed),
-        free=free,
+        absorb=np.where(inside, absorb[pos], 0),
         land=inside,
         weight=weight,
         start=start,
         rise=rise,
         fall=fall,
+        free=free,
+        soft=inside & within[pos],
     )
     return shift + cols, matched
 
@@ -591,13 +585,9 @@ def _tb_positions(  # pylint: disable=too-many-arguments
     """BITS index of each TB byte, following slips at the definite syncs; the
     definite syncs and which landed on a BITS boundary that explains them.
 
-    ``evidence`` is ``(capable, sync weights)`` of the BITS bytes; ``known``
-    is optionally ``(positions, fits, need, trusted)``: where TS placed
-    syncs, which of them each definite sync fits, which definite syncs TS
-    must have seen, and the BITS index up to which it saw every one: only
-    those explain such a sync. A slip rises by at most the bytes the sync's
-    wait could hold as latched (timer wraps TS confirmed were the same sync
-    in both passes).
+    ``evidence`` as :func:`_events_offsets`; ``known`` is optionally
+    ``(positions, fits, need, trusted)``: TS syncs, which each definite sync
+    fits, which TS must have seen, and the BITS index up to which it saw all.
     """
     n = len(arr.read)
     period = float(np.median(np.diff(arr.read))) if n > 1 else 0.0
@@ -741,6 +731,7 @@ def merge_tb(  # pylint: disable=too-many-arguments,too-many-locals
     data = np.asarray(data, np.uint8)
     tb = np.asarray(tb, np.int64)
     ok, latched = capable(data)
+    unstable = absorbable(data, latched)
     place, trusted, (pos, events, matched) = _place(
         data,
         base,
@@ -749,7 +740,7 @@ def merge_tb(  # pylint: disable=too-many-arguments,too-many-locals
         anchored,
         revolution,
         ts_end,
-        (ok, sync_weights(ok, latched)),
+        (ok, sync_weights(ok, latched), unstable),
     )
     missed = int((~matched).sum())
     keep, after = _monotone(pos)
@@ -786,7 +777,9 @@ def merge_tb(  # pylint: disable=too-many-arguments,too-many-locals
     valid = len(data) if anchored else int(np.clip(p[-1] + 1, first, len(data)))
     out = _syncs(rows, latched, (first, valid), byte_cycles, missed + len(unfit))
     synced = np.isin(tb_steady, out.positions)
-    out.intervals = _plain(arrs[0], pos, (keep, after), events, synced)
+    at, cycles = _plain(arrs[0], pos, (keep, after), events, synced)
+    noisy = unstable[1][np.clip(at - 1, 0, len(data) - 1)] & (at - 1 < len(data))
+    out.intervals = at, np.where(noisy, np.nan, cycles)
     out.timing = (np.where(keep, pos, -1), arrs[0])
     return out
 
@@ -948,7 +941,7 @@ def merge_ts(  # pylint: disable=too-many-arguments
     """
     data = np.asarray(data, np.uint8)
     ok, latched = capable(data)
-    evidence = (ok, sync_weights(ok, latched))
+    evidence = (ok, sync_weights(ok, latched), absorbable(data, latched))
     pos, sel, unmatched, _ = _ts_place(
         data, base, ts, CELLS * cell, anchored, revolution, evidence
     )
