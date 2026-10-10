@@ -95,6 +95,14 @@ class MfmStream:  # pylint: disable=too-many-instance-attributes
         """The drive ended the list itself and the adapter lost nothing."""
         return self.adapter == "done" and self.drive_end == "done"
 
+    @property
+    def in_step(self):
+        """The reply is the drive's J return (an END code or ST_NOGO), so the drive is
+        back in its monitor; else the bytes read as the reply were stream bytes."""
+        return self.reply is not None and (
+            self.reply[0] in END or self.reply[0] == ST_NOGO
+        )
+
     def diagnosis(self):
         """What the drive and the adapter reported, for a stream that fell short."""
         a, issued, status = self.reply or (None, None, None)

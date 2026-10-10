@@ -623,8 +623,10 @@ Address, Read Sector or Read Track, or an index edge wait, each up to 127 times
 (Read Sector optionally advancing the sector). Every byte the WD delivers goes
 straight to the shift register; metadata (CLK asserted) carries a record per command
 (`$0C`: two stamps, the WD status, a timeout flag and the byte count, packed into
-six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, whenever timer
-B bits 15-13 change while waiting, 8.2 ms, under the adapter's 20 ms) and the v12
+six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, every 256
+passes of a wait loop: before a command's first DRQ, for an index edge, and for
+busy to clear after a force interrupt; the passes are counted, not timed by timer
+B, and 256 of the longest pass fit in the adapter's 20 ms wait for the next byte) and the v12
 END family. `nybulah.mfmstream.MfmStream` parses it.
 
 Cycle tables (t = 0 at an SDR write, from the code):
@@ -673,7 +675,9 @@ A stream that is not `done`/`done` carries a diagnosis in its capture meta
 (`MfmStream.diagnosis`): the reply decoded, the metadata codes and data bytes the
 adapter delivered whether or not a record framed them, the adapter output size and
 how long the receive took (the adapter's 20 ms gap timeout against its I/O timeout
-for no first fall). `streamprobe` stops after such a Read Track stream.
+for no first fall). `streamprobe` stops after such a Read Track stream. A reply that is neither an END
+code nor `ST_NOGO` was read from a stream still running: `StreamLost` ends the
+session with no further transfer and the monitor is recovered by a bus reset.
 
 ### Without streaming
 

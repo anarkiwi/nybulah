@@ -14,6 +14,7 @@ import numpy as np
 from . import mfmstream as ms
 from .analysis import mfm
 from .formats.mfmcap import MfmCapture
+from .link import HandshakeTimeout
 from .monitor import Monitor, drivecode
 
 CODE_BASE, CODE2, SPLIT = 0x0300, 0x0790, 0x0200
@@ -66,6 +67,16 @@ class TrackError(IOError):
     def __init__(self, message, trace=None):
         super().__init__(message)
         self.trace = trace
+
+
+class StreamLost(HandshakeTimeout):
+    """The reply after a stream was not the drive's J return: the drive is still
+    streaming or left its monitor, so nothing more is sent to it (the monitor is
+    recovered); ``meta`` holds the stream's report."""
+
+    def __init__(self, message, meta):
+        super().__init__(message)
+        self.meta = meta
 
 
 def restore_trace(steps, result, elapsed_us, rs):
@@ -174,7 +185,7 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
     def close(self):
         """Motor off, the head back on the cylinder ``estimate`` found it on, the WD
         track register, side select, motor and LED outputs as found."""
-        if self._saved is None:
+        if self._saved is None or not self.mon.running:
             return
         self.motor(False)
         if self.cylinder is not None and self.entry is not None:
@@ -344,6 +355,11 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
         mon.touch()
         got = ms.MfmStream.parse(raw, reply)
         got.elapsed_s = round(elapsed, 6)
+        if not got.in_step:
+            mon.running = False
+            raise StreamLost(
+                f"stream ended {got.adapter}, drive out of step", _meta(got)
+            )
         return got
 
     def read_track(self, revolutions=1):
@@ -408,7 +424,7 @@ def _revs(e):
 
 def _meta(got):
     meta = {"adapter": got.adapter, "drive_end": got.drive_end, "reply": got.reply}
-    if not got.complete:
+    if not (got.complete and got.in_step):
         meta["diagnosis"] = got.diagnosis()
     return meta
 

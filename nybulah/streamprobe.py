@@ -78,7 +78,11 @@ def execute_1581(args, cbm):
             disk1581.home(drive, report["home"], args.max_steps)
             drive.seek(args.cylinder)
             drive.side(args.side)
-            track = drive.read_track(args.revolutions)
+            try:
+                track = drive.read_track(args.revolutions)
+            except r1581.StreamLost as e:
+                report["track_stream"] = e.meta
+                raise
             report["track_stream"] = track.meta | {
                 "bytes": len(track.data),
                 "rev_status": list(track.rev_status),
