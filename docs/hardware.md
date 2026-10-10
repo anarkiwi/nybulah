@@ -330,6 +330,51 @@ bytes. Every capture is saved under `--save`.
 docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah ramcheck --dev 8 --max-steps N --halftracks 36 50 --save /data/artifacts/ramcheck
 ```
 
+## Drive RAM test
+
+`nybulah ramtest` tests the drive RAM the captures use, separating RAM faults from
+link faults. Tested pages: zero page, the stack, the monitor (`$0500` up) and I/O
+(`ramprobe.io_mask`) excluded.
+
+| model | regions |
+| --- | --- |
+| 1541 | base `$0200-$04FF`, expansion `$8000-$9FFF` |
+| 1571 | base `$0200-$04FF`, expansion `$6000-$7FFF` |
+| 1581 | `$0200-$04FF`, `$0800-$1FFF` |
+
+1. Address check: every page filled with its page number, then with its offsets,
+   all written before any is read back. Pages that differ, and pages whose number
+   was read elsewhere, are unsafe to hold the test code.
+2. Transfer: seeded (`--seed`) random blocks and their inverse written over the
+   link and read back.
+3. March: `drive/ramtest.s` runs March C- (A. J. van de Goor, *Testing
+   Semiconductor Memories: Theory and Practice*, Wiley 1991:
+   ⇕(w0) ⇑(r0,w1) ⇑(r1,w0) ⇓(r0,w1) ⇓(r1,w0) ⇕(r0), detecting stuck-at,
+   transition, address decoder and coupling faults) at full CPU speed, one
+   element per monitor `J`, for each data background (`--backgrounds`): solid
+   (`$00`, `$FF` as its inverse), checkerboard (`$55`/`$AA` by address), the
+   word-oriented `$33` and `$0F` (van de Goor and Tlili, DATE 1998, intra-word
+   coupling) and the address's low and high bytes (decoder faults, aliasing). The
+   code is relocated to two disjoint sound placements (lowest first) and run from
+   each over every tested page outside it, so every page is tested at least once.
+   Each element counts mismatches per page and logs the first 16 (address,
+   expected, read).
+
+Tested RAM is backed up first and restored afterwards; `--repeats` repeats the
+transfer and march. The JSON report has per region the tested `bytes`,
+`untested` pages, `passes` (backgrounds x repeats), march `failures` with
+`failing_pages`, the `logged` failures and per failing address the OR/AND of the
+failing XORs with `stuck0`/`stuck1` (bits only ever read low/high); a coupling
+fault shows at its victim's address. The
+address check and transfer report their mismatches the same way; `ok` is false on
+any failure, mismatch or untested page.
+
+```sh
+docker run --rm --device=/dev/bus/usb nybulah ramtest --dev 8 --transport s4
+docker run --rm --device=/dev/bus/usb nybulah ramtest --dev 9 --transport s4
+docker run --rm --device=/dev/bus/usb nybulah ramtest --dev 10 --transport s3
+```
+
 The image's entrypoint is the `nybulah` command; `bench` and `ramprobe` are
 its other subcommands (`nybulah <command> --help`), e.g.
 `nybulah bench --dev 10 --protocol s3`.

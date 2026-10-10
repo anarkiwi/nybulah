@@ -3,7 +3,7 @@
 import argparse
 
 from . import bench, bus, diskcmd, homeprobe, hwcheck, pattern, ramcheck, ramprobe
-from . import streamprobe
+from . import ramtest, streamprobe
 from .imagecmd import Convert, Flux, Info, Map
 from .survey import Survey
 from .tool import run
@@ -14,6 +14,7 @@ COMMANDS = {
     "bench": bench,
     "ramprobe": ramprobe,
     "ramcheck": ramcheck,
+    "ramtest": ramtest,
     "pattern": pattern,
     "homeprobe": homeprobe,
     "streamprobe": streamprobe,
