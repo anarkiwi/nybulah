@@ -12,8 +12,8 @@ from test_stream import RAM_PASS_US, rig
 
 from nybulah import cli, ramcheck
 from nybulah.formats import D64, d64_to_g64
-from nybulah.nibbler import HOME_HALFTRACK, Capture, Nibbler
-from nybulah.simdisk import Media, disk_drive
+from nybulah.nibbler import HOME_HALFTRACK, Capture, Nibbler, TrackError
+from nybulah.simdisk import SENSOR_EDGES, Media, disk_drive
 from nybulah.simhost import SimCBM, SimMonitor
 
 HW = pathlib.Path(__file__).parent / "data" / "hw"
@@ -119,4 +119,15 @@ def test_1571_locate_places_the_head_from_headers_after_a_reset(make_rig, g64):
     with pytest.raises(ValueError, match="38 outward steps"):
         ramcheck.locate(nib, 37)
     assert ramcheck.locate(nib, 38) == HOME_HALFTRACK == drive.mech.halftrack
+    assert drive.mech.bumps == drive.mech.inner_stops == 0
+
+
+def test_1571_locate_searches_out_to_the_sensor(make_rig):
+    drive, nib = make_rig(
+        "1571", halftrack=SENSOR_EDGES[1] + 4, sensor_edge=SENSOR_EDGES[1]
+    )
+    drive.write(0x22, 0)
+    with pytest.raises(TrackError, match="nothing places"):
+        ramcheck.locate(nib, 40)
+    assert ramcheck.locate(nib, 40, 6) == HOME_HALFTRACK == drive.mech.halftrack
     assert drive.mech.bumps == drive.mech.inner_stops == 0
