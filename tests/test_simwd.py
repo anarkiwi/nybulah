@@ -360,6 +360,33 @@ def test_write_track_needs_its_first_byte_within_three_byte_times():
     assert st & LD and not st & BUSY and wd.media.track(0, 1)[2].all()
 
 
+@pytest.mark.parametrize("lead, lost", [(0, False), (40, False), (41, True)])
+def test_write_track_needs_each_byte_drq_lead_before_its_slot(lead, lost):
+    """Writing starts at the index (REV): byte 1 goes to slot 0, DRQ rises for byte 2,
+    which slot 1 takes a byte time (64 cycles) later; it is loaded 40 cycles ahead."""
+    wd = drive(MfmMedia(cylinders=1), drq_lead=lead)
+    wd.write(0, WRITE_TRACK, 0)
+    wd.write(3, 0x4E, simwd.STATUS_VALID)
+    assert not wd.read(0, REV - 1) & DRQ and wd.read(0, REV) & DRQ
+    wd.write(3, 0x4E, REV + 64 - 40)
+    assert bool(wd.read(0, REV + 64) & LD) == lost
+    first = simwd.BUSY_VALID + simwd.WT_FIRST * 64 - simwd.STATUS_VALID  # byte 1 due
+    assert wd.drq_slack == (first if lost else 40)
+
+
+@pytest.mark.parametrize("phase, late", [(0, 0), (0, 1), (63, 0), (63, 1)])
+def test_write_track_first_byte_due_three_byte_times_after_its_start(phase, late):
+    """The command starts BUSY_VALID after the byte boundary at or before its write,
+    DRQ up; the data register must be loaded within WT_FIRST byte times of that."""
+    wd = drive(MfmMedia(cylinders=1))
+    c = REV // 2 + phase
+    wd.write(0, WRITE_TRACK, c)
+    due = c - phase + simwd.BUSY_VALID + simwd.WT_FIRST * 64
+    wd.write(3, 0x4E, due - 1 + late)
+    st = wd.read(0, due + simwd.STATUS_VALID)
+    assert bool(st & LD) == bool(late) and bool(st & BUSY) != bool(late)
+
+
 def test_crc_preset_and_c2_marks():
     assert simwd.SYNC3 == 0xCDB4
     wd = drive(MfmMedia(cylinders=1))

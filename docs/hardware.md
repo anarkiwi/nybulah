@@ -507,6 +507,18 @@ DDEN is grounded, so the data sheet's MFM column applies in exact CPU cycles:
 | Force Interrupt | next command | 16 us | 32 | type IV commands |
 | type I command | first step pulse | 24 us or more (DIRC valid before it) | 48 | type I commands |
 | Write Track | first Data Register load | within 3 byte times (32 us each) | 192 | Write Track |
+| Write Track / Write Sector DRQ | next Data Register load | before the WD takes it, one byte time (32 us at 250 kbit/s) after DRQ | 64 | Write Track, Write Sector |
+
+The datasheet allows a write up to the next byte boundary; the DOS (`fmtrk`)
+writes within about 21 cycles of a DRQ, an unrolled loop per field. nybulah's
+Write Track feed (`writetrk`) decodes its run-length image between writes and
+keeps every write-to-write path, a token decode included, under a byte time, so
+a DRQ is written within one poll pass and the write (33 cycles) whatever the
+image, 31 or more cycles before the WD takes the byte; a decode between a DRQ
+and its write would eat into that margin, and on hardware a thin margin sets
+Lost Data (`$84`). `simwd` measures that margin (`drq_slack`) and can make
+the WD take each byte early (`drq_lead`); the tests run Write Track with the
+WD taking bytes 31 cycles early.
 
 The DOS issues every command through `wdbusy` (`msub.src`): write, poll until busy
 reads set, then `delay16`; `wdunbusy` polls until it reads clear; `wdabort` waits

@@ -527,88 +527,100 @@ wsd:    jsr wait
         ldx count
         rts
 
-; Write X when the WD asks (inline in the run loops); the command's end leaves
-; through wait. A wrap only spends the timeout (no time is kept here): 8
-; cycles, which a token read between two writes leaves room for.
-.macro WPUT
-        .local wp, ok
-wp:     WDTEST
-        lda WDSTAT
-        lsr
-        bcc wtd
-        and #ST_DRQ >> 1
-        bne ok
-        bit CIA_ICR
-        bpl wp
-        dec tmo
-        bne wp
-        jmp tmout
-ok:     WDTEST
-        stx WDDAT
+; Write Track feed: one loop for repeat tokens, one for literal tokens, X the
+; next byte, cnt the token's bytes left with it. A byte is made ready right
+; after the last write and written on DRQ. From one write to the next takes
+; less than a byte time (64 cycles) on every path, a token decoded between
+; them included (59 at most), so no token boundary eats into the next byte's
+; margin: a DRQ is written within one poll pass and the write, 33 cycles, and
+; the data register is loaded 31 or more cycles before the WD takes the byte
+; whatever the image. Wraps only spend the timeout.
+cnt      = len
+
+; The next token from (ptr),y: X its first byte, cnt its length, on to rep or
+; lit (the repeat or literal loop); token 0 goes to fin.
+.macro DECODE rep, lit, fin
+        .local literal
+        lda (ptr),y
+        beq fin
+        iny
+        bne :+
+        inc ptr + 1
+:       cmp #$80
+        bcs literal
+        sta cnt
+        lda (ptr),y
+        tax
+        iny
+        bne rep
+        inc ptr + 1
+        bne rep                         ; always
+literal:
+        sbc #$7F
+        sta cnt
+        lda (ptr),y
+        tax
+        iny
+        bne lit
+        inc ptr + 1
+        bne lit                         ; always
 .endmacro
 
-; One run per token, each byte loaded into X before its DRQ wait; a token is
-; read between runs (the next DRQ is a byte time after the last write, the write
-; due a byte time after that). The command goes out after the first token: the
-; datasheet ends it unless the first byte is written within three byte times.
+; Poll for DRQ (to put) while busy (else wtd), spending the timeout.
+.macro WPOLL put
+        .local poll
+poll:   WDTEST
+        lda WDSTAT
+        and #ST_BUSY | ST_DRQ
+        lsr
+        bcc wtd
+        bne put
+        bit CIA_ICR
+        bpl poll
+        dec tmo
+        bne poll
+        jmp tmout
+.endmacro
+
+; The command, then the first token decoded: the first status read (DRQ is
+; up from the command) comes STATUS_VALID or more cycles after the write, 2
+; + (5 WT_LOOPS - 1) + 3 + 35 at the least (the shortest decode to a read),
+; and the first byte follows it within three byte times, which the datasheet
+; asks for. The track register and precompensation are as for Write Sector.
+WT_LOOPS = (STATUS_VALID - 39 + 4) / 5
+.assert 2 + 5 * WT_LOOPS - 1 + 3 + 35 >= STATUS_VALID, error, "WT_LOOPS"
 writetrk:
         jsr setup
         jsr buffer
         lda #WD_WRITETRK
         jsr precomp
-        sta wcmd
-wtk:    lda (ptr),y
-        beq wend
-        iny
-        bne :+
-        inc ptr + 1
-:       cmp #$80
-        bcs wlit
-        sta run
-        lda (ptr),y
-        sta fill
-        iny
-        bne wcheck
-        inc ptr + 1
-wcheck: lda wcmd
-        beq wrep
-        jsr wgo
-wrep:   ldx fill
-        WPUT
-        dec run
-        bne wrep
-        beq wtk
-wend:   lda #0                          ; the last byte from now on
-        sta run
-        beq wcheck
+        WDTEST
+        sta WDCMD
+        ldx #WT_LOOPS
+:       dex
+        bne :-
+        beq tok                         ; always
 wtd:    jmp wait
-wlit:   sbc #$7F
-        sta run
-        lda wcmd
-        beq wl
-        jsr wgo
-wl:     lda (ptr),y
-        sta fill
+tok:    DECODE wpoll_r, wpoll_l, wend
+wend:   sta cnt                         ; A = 0: the last byte from now on
+        beq wpoll_r
+wput_r: WDTEST
+        stx WDDAT
+wloop_r:
+        dec cnt
+        beq tok
+wpoll_r:
+        WPOLL wput_r
+wput_l: WDTEST
+        stx WDDAT
+wloop_l:
+        dec cnt
+        beq tok
+        lda (ptr),y
         tax
-        WPUT
         iny
-        bne :+
+        bne wpoll_l
         inc ptr + 1
-:       dec run
-        bne wl
-        jmp wtk
+wpoll_l:
+        WPOLL wput_l
 
-; Issue the pending write track command.
-wgo:    lda wcmd
-        jsr wdcmd
-        lda #0
-        sta wcmd
-        rts
-
-incp:   iny
-        bne :+
-        inc ptr + 1
-:       rts
-
-run:    .res 1
-wcmd:   .res 1
