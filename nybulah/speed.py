@@ -1,29 +1,19 @@
 """Motor speed from a TB pass: rolling byte period and its excursions.
 
-Byte intervals come from the TB waits, without those across syncs; each window's
-mean is the trace. Excursions leave a bound set by the trace's own
-MAD, or the TB poll loop's quantisation of a window's two end reads if larger,
-at a Bonferroni level over its independent windows.
+Byte intervals come from the TB waits the merge placed on single latched bytes
+(:attr:`nybulah.passes.Syncs.intervals`); each window's mean is the trace.
+Excursions leave a bound set by the trace's own MAD, or the TB poll loop's
+quantisation of a window's two end reads if larger, at a Bonferroni level over
+its independent windows.
 """
 
 import numpy as np
 
 from .analysis.cycle import DEFAULT_ALPHA, _threshold
-from .passes import CPU_HZ, TB_LOOP, tb_arrivals, tb_intervals
+from .passes import CPU_HZ, TB_LOOP
 
 MAD_SIGMA = 1.4826
 WINDOW = 64
-
-
-def intervals(cap):
-    """``(byte, cycles)``: BITS index after each TB interval and its CPU cycles,
-    NaN where a sync may lie in it or no drive loop sample explains it."""
-    e, body = tb_intervals(cap.tb)
-    cycles = (e + body).astype(float)
-    after = max(cap.base, 0) + 1 + np.arange(len(cycles))
-    near = np.isin(after, cap.positions) | np.isin(after - 1, cap.positions)
-    cycles[near | ~tb_arrivals(cap.tb).valid[1:]] = np.nan
-    return after, cycles
 
 
 def trace(cycles, window=WINDOW):
@@ -122,9 +112,9 @@ def speed_trace(cap, window=WINDOW, alpha=DEFAULT_ALPHA):
     ``bytes``/``cycles`` sample the trace every ``window`` bytes; excursion
     starts and ends are BITS byte indices.
     """
-    if cap.tb is None or len(cap.tb) < window + 1:
+    if cap.tb is None or len(cap.tb) < window + 1 or cap.syncs.intervals is None:
         return None
-    after, cycles = intervals(cap)
+    after, cycles = cap.syncs.intervals
     period = trace(cycles, window)
     if period.size == 0:
         return None

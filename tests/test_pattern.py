@@ -4,6 +4,7 @@ RAM captures and on a simulated 1541 by RAM captures; alignment and slips."""
 import contextlib
 import functools
 import json
+import pathlib
 import types
 
 import numpy as np
@@ -12,10 +13,10 @@ from test_stream import RAM_PASS_US, rig
 
 from nybulah import cli, disk, passes, pattern, speed
 from nybulah.analysis import pattern as pt
-from nybulah.analysis.gcr import decode_bits, track_capacity
+from nybulah.analysis.gcr import bits_per_revolution, decode_bits, track_capacity
 from nybulah.analysis.sector import SectorError, decode_track
-from nybulah.nibbler import Nibbler, TrackError
-from nybulah.simdisk import Media, disk_drive
+from nybulah.nibbler import BITS, TB, TS, Capture, Nibbler, TrackError
+from nybulah.simdisk import Media, disk_drive, true_syncs
 from nybulah.simhost import SimCBM, SimMonitor
 
 HALFTRACK = 36
@@ -228,6 +229,12 @@ def tb_pass(byte_cycles, seed=0):
     return ((200 - np.rint(read).astype(np.int64)) % 256).astype(np.uint8)
 
 
+def merged(tb):
+    """A TB pass merged with BITS bytes that hold no sync."""
+    syncs = passes.merge_tb(np.full(len(tb), 0x55, np.uint8), 0, tb)
+    return types.SimpleNamespace(tb=tb, syncs=syncs)
+
+
 def test_speed_excursion_period_and_decay():
     n, byte = 7900, 30.0
     t = np.arange(n) * byte / 1000
@@ -238,15 +245,97 @@ def test_speed_excursion_period_and_decay():
         * np.exp(-(t[s:] - t[s]) / tau)
         * np.sin(2 * np.pi * (t[s:] - t[s]) / period)
     )
-    cap = types.SimpleNamespace(
-        tb=tb_pass(byte * (1 + dev)), base=0, positions=np.array([1000, 5000])
-    )
-    out = speed.speed_trace(cap)
+    out = speed.speed_trace(merged(tb_pass(byte * (1 + dev))))
     (x,) = out["excursions"]
     assert abs(x["start"] - s) < out["window"] and x["peak_pct"] > 0
     assert x["lobes"] >= 2 and abs(x["period_ms"] - period) < period / 4
     assert abs(x["decay_ms"] - tau) < tau / 2
-    steady = types.SimpleNamespace(tb=tb_pass(np.full(n, byte)), base=0, positions=[])
-    assert speed.speed_trace(steady)["excursions"] == []
+    assert speed.speed_trace(merged(tb_pass(np.full(n, byte))))["excursions"] == []
     assert speed.speed_trace(types.SimpleNamespace(tb=None)) is None
     assert speed.excursions(np.full(4, np.nan), byte) == ([], None)
+
+
+HW_PATTERN = pathlib.Path(__file__).parent / "data" / "hw" / "pattern"
+HW_RAM = sorted(HW_PATTERN.glob("*/*.npz"))
+LEADING = ("gcr_all", "sync10", "sync40", "sync80", "sync896")
+
+
+def stray_syncs(truth, cap):
+    """Pattern regions where restored syncs of a capture end, other than written
+    syncs and the weak region."""
+    bits, _, begins = pt.capture_bits(cap)
+    al = pt.align(bits, truth, period=truth.cells)
+    end = al.track_position(np.asarray(begins) - 1)
+    end = end[(end >= 0) & (end < len(truth.bits))]
+    kinds = np.array([r.kind for r in truth.regions])[truth.kinds()[end]]
+    return {
+        truth.regions[i].name
+        for i, k in zip(truth.kinds()[end], kinds)
+        if k not in (pt.SYNC, pt.UNSTABLE)
+    }
+
+
+@pytest.mark.parametrize("path", HW_RAM, ids=lambda p: f"{p.parent.name}-{p.stem}")
+def test_hw_unstable_region_read_unlike_the_timing_passes(path):
+    """1541 and 1571 RAM captures of the pattern whose weak region read into the
+    resync's sync in some passes and as bytes in others: the leading regions
+    read exactly, every restored sync ends on a written sync or the weak
+    region, and no speed excursion lies in the long syncs and weak region."""
+    truth = pt.Truth.from_json(json.loads((path.parent / pattern.TRUTH).read_text()))
+    cap = Capture.load(path)
+    report = pattern.compare(truth, [(path.name, cap)])
+    entry = report["captures"][0]
+    for name in LEADING:
+        g = entry["groups"][name]
+        assert g["errors"] == g["slips"] == 0, name
+    assert not stray_syncs(truth, cap)
+    resync = region(truth, "resync.sync0")
+    lead = (resync.offset + resync.length) / report["revolution_bits"]
+    for x in entry["speed"]["excursions"]:
+        assert x["angle"]["pattern"][0] > lead
+
+
+def unstable_capture(make_rig, monkeypatch, at, ones):
+    """A 1541 RAM capture of the pattern starting ``at`` a pattern bit, its weak
+    region and the zero after it reading as ones, into the resync's sync, in
+    the passes ``ones``."""
+    truth = pt.make_truth(HALFTRACK, seed=3)
+    pattern_cells = track_of(truth, int(round(bits_per_revolution(truth.density))))
+    pattern_cells = pattern_cells[: int(round(bits_per_revolution(truth.density)))]
+    weak = region(truth, "weak.0")
+    media = Media({(0, HALFTRACK): pattern_cells.copy()})
+    drive, nib = make_rig("1541", media)
+    cells = media.tracks[(0, HALFTRACK)]
+    run = nib._pass  # pylint: disable=protected-access
+
+    def unstable(kind, mode, anchor=b""):
+        if kind == BITS:
+            shift[0] = drive.mech._k - at  # pylint: disable=protected-access
+            cells[:] = np.roll(pattern_cells, shift[0])
+        weak_cells = shift[0] + weak.offset + np.arange(weak.length + 1)
+        cells[weak_cells % len(cells)] = kind in ones
+        return run(kind, mode, anchor)
+
+    shift = [0]
+    monkeypatch.setattr(nib, "_pass", unstable)
+    nib.seek(HALFTRACK, truth.density)
+    drive.mech.log = []
+    return nib.capture(HALFTRACK, truth.density), drive.mech.log
+
+
+@pytest.mark.parametrize("ones", [(), (BITS,), (TB,), (TS,), (BITS, TS)])
+@pytest.mark.parametrize("where", [0, 1, 3])
+def test_ram_capture_around_the_long_sync(make_rig, monkeypatch, where, ones):
+    """Starting inside the longest sync, in the tag after it or in the weak
+    region, and with the weak region read into the resync's sync by some
+    passes and as bytes by the rest, every sync of the BITS bytes is found
+    within its measured bounds."""
+    truth = pt.make_truth(HALFTRACK, seed=3)
+    longest = max(range(len(truth.regions)), key=lambda i: truth.regions[i].run)
+    start = truth.regions[longest + where]
+    at = start.offset + start.length // 2
+    cap, log = unstable_capture(make_rig, monkeypatch, at, ones)
+    pos, runs = true_syncs(log, cap.data)
+    lo, hi = cap.sync_bounds
+    assert np.array_equal(cap.positions, pos)
+    assert (lo <= runs).all() and ((hi < 0) | (runs <= hi)).all()
