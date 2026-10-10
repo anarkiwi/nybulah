@@ -38,7 +38,10 @@ disable = ["missing-module-docstring", "missing-function-docstring", "import-out
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: whole-disk simulations"]
+markers = [
+    "slow: whole-disk simulations",
+    "vice: drive code on VICE (x64sc, x128 on PATH: the test-vice image)",
+]
 
 [tool.coverage.run]
 core = "sysmon"

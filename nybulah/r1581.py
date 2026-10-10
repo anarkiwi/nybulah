@@ -113,10 +113,12 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
     was overwritten, so the session must invalidate DOS's cache (``invalidate``).
     """
 
-    def __init__(self, mon, sleep=None, settle_s=SETTLE_S, spinup_s=SPINUP_S):
+    def __init__(
+        self, mon, sleep=None, settle_s=SETTLE_S, spinup_s=SPINUP_S, loader=drivecode
+    ):
         if mon.model != "1581":
             raise ValueError(f"device {mon.dev} is a {mon.model}, not a 1581")
-        self.mon, self.sleep = mon, sleep or time.sleep
+        self.mon, self.sleep, self.loader = mon, sleep or time.sleep, loader
         self.settle_s, self.spinup_s = settle_s, spinup_s
         self.cylinder = self.entry = self.home_trace = None
         self.period_us = NOMINAL_US
@@ -133,7 +135,7 @@ class Mfm1581:  # pylint: disable=too-many-instance-attributes
 
     def _load(self, name):
         if self._overlay != name:
-            code = drivecode(name)
+            code = self.loader(name)
             self.mon.write(CODE_BASE, code[:SPLIT])
             self.mon.write(CODE2, code[SPLIT:])
             self._p = CODE_BASE + code.index(TAGS[name]) + len(TAGS[name])
