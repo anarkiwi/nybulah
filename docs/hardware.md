@@ -201,7 +201,7 @@ derived boot bound, what was seen, that a drive is holding the bus and needs a
 power cycle, and that nothing was sent. No drive entry is marked failed for
 it, and `hwcheck`'s recovery does not reset again.
 
-The xum1541 firmware (v13) answers both reset requests on its control
+The xum1541 firmware (v13 and later) answers both reset requests on its control
 endpoint. `cbm_reset` (`XUM1541_RESET`) releases ATN, CLK, DATA and SRQ at
 once and leaves the RESET pulse to the command loop. `cbm_adapter_reset`
 (`XUM1541_ADAPTER_RESET`) always releases those lines and aborts the transfer
@@ -293,7 +293,7 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybula
 ## S4 (1571 SRQ fast serial)
 
 S4 needs firmware v11 or later (below) and a plugin from the same tree; the
-image's default plugin is v13's.
+image's default plugin is v14's.
 
 Only a 1571 runs it (a 1541 is skipped with "s4 needs a 1571"); other drives
 stay powered. `--fast` adds a second bench of s3/s4 with the 1571 at 2 MHz:
@@ -325,6 +325,25 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python
 
 Expected: `first` between 33 and 39 for both phases; `per_byte_us` near
 42.8 (1 MHz) and 21.5 (2 MHz), `per_block_us` near 840.
+
+`tools/sdrgap.py` runs `drive/sdrgap.s` under s4 with the adapter in its stream
+receive: lone bytes through the shift register, each after a programmed idle,
+metadata and plain, with or without ICR reads around the write (the 1581 stream
+reads none). Per idle it prints what the adapter framed against what the drive's
+ICR says the shifter sent, and saves the drive's log of the CIA around every
+write. It measures the adapter's gap timeout on either drive and tells a byte the
+8520 or 6526 did not shift from one the adapter missed:
+
+```sh
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" -v "$PWD/artifacts:/data/artifacts" --entrypoint python3 nybulah /tools/sdrgap.py --dev 9 --gaps 0 1 3 6.5 15 --save /data/artifacts/sdrgap-1581.json
+docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" --entrypoint python3 nybulah /tools/sdrgap.py --dev 8 --gaps 3 6.5 15
+```
+
+Expected with firmware v14: every run `adapter done, drive done, 12/12 seen`
+(and `10/10 shifted` in the ICR mode). Firmware v12 and v13 time out on any idle
+of 3.5 ms or more (their 20 ms count overflowed the AVR's 16-bit int to 3.6 ms;
+`docs/vice.md`), which is why every 1581 stream ended after START: the stream's
+keepalive comes 6.4 ms after the last byte.
 
 ## Disk survey (read-only)
 
@@ -604,11 +623,12 @@ Measured on drive 8 (1571, 2 MHz), firmware v12:
 | `streamprobe --halftrack 2 --revolutions 3` | adapter and drive `done`; 4 index edges, 7522 bytes per revolution each; 164 syncs; 21/21 sectors |
 | `read --transport s4` (D64) | 683 sectors, 0 errors, one capture per track, 25.5 s; identical to the 1541-II's RAM-path read of the same disk |
 
-Streaming needs firmware v12 or later and the plugin from the same tree (branch
+Streaming needs firmware v12 or later (a 1581 stream v14: its keepalives fall
+in the gap v12 and v13 cut short) and the plugin from the same tree (branch
 `xum1541-stream`, the image's default).
 
-Flash `xum1541-ZOOMFLOPPY-v13.hex` as below (`info` must print
-`model 2 version 13`, `devinfo` firmware version 13). Then, in order, with
+Flash `xum1541-ZOOMFLOPPY-v14.hex` as below (`info` must print
+`model 2 version 14`, `devinfo` firmware version 14). Then, in order, with
 drive 8 the 1571 and a formatted disk inserted:
 
 1. Memory only, no head movement: the s4 benches and timing probes above
@@ -791,6 +811,13 @@ to lose only for step 5.
 
    Expect `adapter` and `drive` "done", `revolution_bytes` near 6250,
    `revolution_us` near 200000, 10 IDs a revolution with `c` 39, no ID CRC errors.
+   Measured with firmware v14 (`artifacts/stream-1581-39-v14.npz`): the track
+   stream `done`/`done`, 6254 and 6257 bytes, 200226 and 200232 us, Read Track
+   status `$84` (Lost Data) on both revolutions and two sector errors in the
+   decode; the ids stream ended `timeout` at its index wait (`op 0`): the type I
+   status never showed IP, as `homeprobe`'s `index` false on every run. Both are
+   open; the stamps of Read Track, which the WD starts at an index edge, place
+   the index without the wait.
 5. A whole disk, read (and, on a scratch disk, written and verified):
 
    ```sh
@@ -804,32 +831,34 @@ to lose only for step 5.
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin, branch
-`xum1541-stream` of the fork (v13; it also serves every older protocol).
+`xum1541-stream` of the fork (v14; it also serves every older protocol).
 v13 adds an adapter reset served from the control endpoint, which aborts any
 transfer and returns the adapter to its idle state without a USB reset
-(`cbmctrl adapterreset`, `-b` also resets the drives):
+(`cbmctrl adapterreset`, `-b` also resets the drives); v14 waits the full 20 ms
+for the next streamed byte (v12 and v13 waited 3.6 ms) and its build checks the
+compiled wait against `x_timing.h`:
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
 git checkout xum1541-stream
 docker build -f Dockerfile.nybulah --target firmware-hex -o fw .
-docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v13.hex
+docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v14.hex
 ```
 
 The build steps the compiled timing routines (`misc/x_timing.py`) and checks
 the SRQ schedule (`misc/srq_timing_test.c`); it fails rather than produce a
-hex that misses them. `info` must print `model 2 version 13` (it exits with
+hex that misses them. `info` must print `model 2 version 14` (it exits with
 status 1 regardless). Then, with the ZoomFloppy plugged in (drives may stay
 connected), flash it; the adapter re-enumerates as a DFU bootloader during the
 update, so the container gets the whole USB tree:
 
 ```sh
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v "$PWD/fw:/fw" \
-  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v13.hex
+  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v14.hex
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb --entrypoint xum1541cfg nybulah devinfo
 ```
 
-`devinfo` should report firmware version 13 (the image's plugin must be at
+`devinfo` should report firmware version 14 (the image's plugin must be at
 least as new as the firmware, or it refuses it). If `update` reports no devices
 found, the adapter may already have re-enumerated as its DFU bootloader before
 the tool looked for it; run `update` again. `update` refuses a hex with the

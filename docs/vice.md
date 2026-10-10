@@ -126,9 +126,17 @@ sheets:
   B flag left from before the call counts nothing.
 
 Every exit of the wait (`dfirst`, `wend`, `wwrap`, `wabort`) sends within a pass
-count or a record, and every one is reproduced on VICE. What remains of the
-hardware silence lies outside VICE's model: the fast serial bus at the bit level
-(SRQ and DATA timing between the 1581, the other drives and the adapter).
+count or a record, and every one is reproduced on VICE. The silence was the
+adapter's: firmware v12 and v13 computed their fall-wait poll count in the AVR's
+16-bit `unsigned int`, so the 20 ms gap timeout of `x_timing.h` was 3.6 ms, under
+the stream's keepalive interval (256 `w0` passes, 6.4 ms). `drive/sdrgap.s`
+(`tools/sdrgap.py`) showed it on the 1581 and on the 1571 alike: lone bytes after
+idles of 3 ms arrive, after 3.5 ms or more the adapter times out, and the drive's
+log holds END_ATN with ATN seen 3.76 ms after START. The v13 hex loads 9642 polls
+into the wait, not 53333. Firmware v14 computes the count in long arithmetic and
+its build checks the compiled immediate (`misc/x_timing.py`). Neither VICE nor
+`nybulah.sim` could show it: the simulated adapter (`simsrq.STREAM_TIMEOUT_US`)
+waits the intended 20 ms.
 
 ## Limits
 

@@ -467,7 +467,8 @@ asserted a metadata byte. Metadata is never `$00`:
 USB carries a data byte as itself, data `$00` as `ESC $00`, metadata m as
 `ESC m`, and ends with `ESC` and an adapter code: `$80` done (END seen), `$84`
 overrun (both IN banks full when a byte arrived), `$88` framing (a byte
-began before SRQ rose), `$8C` timeout (no SRQ fall within 20 ms), `$90`
+began before SRQ rose), `$8C` timeout (no SRQ fall within 20 ms; firmware v12
+and v13 waited 3.6 ms, their poll count overflowing the AVR's 16-bit int), `$90`
 truncated (requested length reached); a short packet or ZLP ends the
 transfer, with no status block. The requested length counts 64-byte units.
 On any code but done the adapter holds ATN at least 8622 us (256 bytes at
@@ -682,7 +683,10 @@ six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, every 256
 passes of a wait loop: before a command's first DRQ, for an index edge, and for
 busy to clear after a force interrupt; the passes are counted from a counter the stream clears at entry, not timed by timer
 B, and 256 of the longest pass fit in the adapter's 20 ms wait for the next byte) and the v12
-END family. `nybulah.mfmstream.MfmStream` parses it.
+END family. `nybulah.mfmstream.MfmStream` parses it. The keepalive interval
+needs firmware v14: v12 and v13 timed out 3.6 ms after a byte, so every 1581
+stream ended after START (`drive/sdrgap.s` measures an adapter's gap on either
+drive; see [vice.md](vice.md), "1581 stream: the early KEEP and the 8520").
 
 Cycle tables (t = 0 at an SDR write, from the code):
 
