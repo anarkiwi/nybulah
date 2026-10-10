@@ -175,7 +175,9 @@ def test_1571_prep_takes_type_i_status(tmp_path):
         mon.poke(0x2001, 0x11)
         mon.poke(0x2003, 0x22)
         mon.poke(0x2000, 0x80)
-        assert mon.read(0x2000, 1)[0] & 1
+        mon.write(SCRATCH + 1, bytes([0xAD, 0x00, 0x20, 0x60]))  # lda $2000; rts
+        mon.sleep(0.001)
+        assert mon.jsr(SCRATCH + 1)[0] & 1
         assert mon.jsr(PREP)[0] == 0
         wdst = mon.read(ZP + RESULT["wdst"], 1)[0]
         regs = mon.read(0x2000, 4)
