@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from nybulah import eventalign, passes
-from nybulah.analysis.gcr import bits_per_revolution, to_bits
+from nybulah.analysis.gcr import bits_per_revolution, encode, to_bits
 from nybulah.formats import D64, d64_to_g64
 from nybulah.nibbler import READ, Capture, cell_cycles
 from nybulah.simdisk import Media, log_bytes, sync_track, true_syncs
@@ -207,31 +207,60 @@ def test_window_min_matches_brute_force():
             assert arg.tolist() == want
 
 
-def test_align_slips_bounded_free_and_weighed():
-    """Any slip costs one, bounded per event by rise and fall; a free rise costs
-    nothing; changes land only on land columns; weight breaks ties."""
+def test_align_ranks_misses_unexplained_soft_and_changes():
+    """A hard miss outweighs an unexplained change, which outweighs soft misses,
+    which outweigh an explained change; weight breaks the remaining ties."""
     consistent = np.zeros((4, 41), bool)
     consistent[:2, 20] = consistent[2:, 30] = True
     assert passes.align(consistent)[0].tolist() == [0, 0, 10, 10]
-    offs, matched = passes.align(consistent, rise=[0, 0, 5, 5])
+    offs, matched = passes.align(consistent, rise=[0, 0, 5, 0])
     assert offs.tolist() == [0, 0, 0, 0] and matched.tolist() == [1, 1, 0, 0]
-    longer = np.zeros((5, 41), bool)
-    longer[:2, 20] = longer[2:, 30] = True
-    land = np.ones(longer.shape, bool)
-    land[1:3, 30] = False
-    assert passes.align(longer, land=land)[0].tolist() == [0, 0, 0, 10, 10]
-    consistent[2:, 18] = True
-    assert passes.align(consistent, fall=[0, 0, 1, 1])[0].tolist() == [0, 0, 10, 10]
-    assert passes.align(consistent, free=[0, 0, 10, 0])[0].tolist() == [0, 0, 10, 10]
+    soft = np.zeros(consistent.shape, bool)
+    soft[2:, 20] = True
+    assert passes.align(consistent, soft=soft)[0].tolist() == [0, 0, 0, 0]
+    absorb = np.zeros(consistent.shape, np.int64)
+    absorb[2, 30] = 10
+    assert passes.align(consistent, absorb, soft=soft)[0].tolist() == [0, 0, 10, 10]
+    assert passes.align(consistent, rise=[0] * 4, free=[0, 0, 10, 0])[0].tolist() == [
+        0,
+        0,
+        10,
+        10,
+    ]
+
+
+def test_align_falls_bounded_landing_and_explained():
+    consistent = np.zeros((4, 41), bool)
+    consistent[:2, 20] = consistent[2:, 18] = True
+    assert passes.align(consistent, fall=[0, 0, 1, 0])[0].tolist() == [0, 0, 0, 0]
+    land = np.ones(consistent.shape, bool)
+    land[1:3, 18] = False
+    assert passes.align(consistent, land=land)[0].tolist() == [0, 0, 0, -2]
+    assert passes.align(consistent)[0].tolist() == [0, 0, -2, -2]
+    consistent[2:, 30] = True
     weight = np.zeros(consistent.shape)
     weight[2:, 18] = 1.0
     assert passes.align(consistent, weight=weight)[0].tolist() == [0, 0, -2, -2]
-    last = np.zeros((3, 21), bool)
-    last[:2, 10] = last[2, 4] = True
-    assert passes.align(last)[0].tolist() == [0, 0, 0]
-    weight = np.zeros(last.shape)
-    weight[2, 4] = 1.0
-    assert passes.align(last, weight=weight)[0].tolist() == [0, 0, -6]
+    absorb = np.zeros(consistent.shape, np.int64)
+    absorb[2, 30] = 10
+    assert passes.align(consistent, absorb, weight=weight)[0].tolist() == [0, 0, 10, 10]
+    absorb[2, 18] = 1
+    assert passes.align(consistent, absorb, weight=weight)[0].tolist() == [0, 0, -2, -2]
+
+
+def test_range_min_matches_brute_force():
+    rng = np.random.default_rng(3)
+    a, b = rng.integers(0, 4, 37).astype(float), rng.integers(0, 3, 37).astype(float)
+    key = a * 3 + b
+    for fns in (
+        (eventalign.sparse_min, eventalign.range_min),
+        (eventalign.sparse_min.py_func, eventalign.range_min.py_func),
+    ):
+        table = fns[0](a, b)
+        for lo in range(0, 37, 5):
+            for hi in range(lo, 37, 7):
+                want = lo + int(np.argmin(key[lo : hi + 1]))
+                assert fns[1](table, a, b, lo, hi) == want
 
 
 def test_nearest_turn_maps_outside_positions_only():
@@ -245,19 +274,20 @@ def test_events_inside_the_bytes_do_not_alias_a_turn_away():
     ok = np.zeros(100, bool)
     ok[10] = True
     weight = np.ones(100)
+    still = (np.zeros(100, np.int64), np.zeros(100, bool))
     offs, matched = passes._events_offsets(  # pylint: disable=protected-access
-        np.array([69]), 0, (ok, weight), True, 60
+        np.array([69]), 0, (ok, weight, still), True, 60
     )
     assert not matched.any() and offs.tolist() == [0]
     ok[75] = True
     offs, matched = passes._events_offsets(  # pylint: disable=protected-access
-        np.array([69]), 0, (ok, weight), True, 60
+        np.array([69]), 0, (ok, weight, still), True, 60
     )
     assert matched.all() and offs.tolist() == [6]
     ok[80] = True
     known = (np.array([80]), np.ones((1, 1), bool))
     offs, matched = passes._events_offsets(  # pylint: disable=protected-access
-        np.array([69]), 0, (ok, weight), True, 60, known=known
+        np.array([69]), 0, (ok, weight, still), True, 60, known=known
     )
     assert matched.all() and offs.tolist() == [11]
 
@@ -307,11 +337,15 @@ def test_best_offset_and_byte_period():
 
 def test_anchor_choice():
     rng = np.random.default_rng(2)
-    rev = rng.integers(0, 0x80, 6000, dtype=np.uint8)
+    rev = encode(rng.integers(0, 256, 4800, dtype=np.uint8))
     data = np.concatenate((rev, rev[:1936]))
     cell = cell_cycles(2, passes.RPM_MAX)
     base, anchor = passes.choose_anchor(data, cell, 6000)
     assert (data[base - len(anchor) : base] == anchor).all() and base <= 4
+    noisy = data.copy()
+    noisy[:40] = rng.integers(0, 256, 40, dtype=np.uint8) & 0x11
+    base, _ = passes.choose_anchor(noisy, cell, 6000)
+    assert base > 40
     assert passes.choose_anchor(data, cell, None, steady=False) is None
     flat = np.full(7936, 0x55, np.uint8)
     assert passes.choose_anchor(flat, cell, None) is None
@@ -414,10 +448,11 @@ def test_follow_compiled_and_python_agree():
     rng = np.random.default_rng(2)
     n, width = 12, 30
     args = (
-        (rng.random((n, width)) < 0.7).astype(float),
+        np.where(rng.random((n, width)) < 0.7, 169.0**1.5, 0.0),
         rng.random((n, width)) < 0.8,
-        rng.random((n, width)) / (n + 1),
+        rng.random((n, width)),
         width // 2,
+        rng.integers(0, 4, (n, width)) * (rng.random((n, width)) < 0.3),
         rng.integers(0, 3, n),
         rng.integers(0, width, n),
         rng.integers(0, width, n),
