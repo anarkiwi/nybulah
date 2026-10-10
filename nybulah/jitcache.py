@@ -2,16 +2,19 @@
 
 Numba stamps a cached function with its own file, yet it compiles in callees and
 constants imported from sibling modules; package functions are stamped instead with
-every package module their file imports, directly or not.
+every package module their file imports, directly or not. Installing waits until
+numba loads its caching module, so importing the package does not import numba.
 """
 
 import ast
 import functools
 import hashlib
+import importlib
+import importlib.abc
+import importlib.machinery
 import os
 import pathlib
-
-from numba.core import caching
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 
@@ -78,37 +81,67 @@ def stamp(path):
     return h.digest()
 
 
-class _ClosureStamped(caching._CacheLocator):  # pylint: disable=protected-access
-    """Locator mixin: package functions stamped with their import closure."""
+CACHING = "numba.core.caching"
+LOCATORS = ()
+
+
+def _locators(caching):
+    """Closure-stamped subclasses of numba's user dir, in-tree and user-wide
+    locators, for package functions only."""
 
     def get_source_stamp(self):
-        """The import closure digest of the function's file."""
-        return stamp(self._py_file)
+        return stamp(self._py_file)  # pylint: disable=protected-access
 
-    @classmethod
     def from_function(cls, py_func, py_file):
-        """A locator for package functions only."""
         if not pathlib.Path(py_file).resolve().is_relative_to(ROOT):
             return None
-        return super().from_function(py_func, py_file)
+        return super(cls, cls).from_function(py_func, py_file)
 
-
-class UserDirLocator(_ClosureStamped, caching.UserProvidedCacheLocator):
-    """NUMBA_CACHE_DIR, closure stamped."""
-
-
-class InTreeLocator(_ClosureStamped, caching.InTreeCacheLocator):
-    """The package's __pycache__, closure stamped."""
-
-
-class UserWideLocator(_ClosureStamped, caching.UserWideCacheLocator):
-    """The user-wide cache directory, closure stamped."""
-
-
-LOCATORS = (UserDirLocator, InTreeLocator, UserWideLocator)
+    out = []
+    for base in (
+        caching.UserProvidedCacheLocator,
+        caching.InTreeCacheLocator,
+        caching.UserWideCacheLocator,
+    ):
+        cls = type(f"Closure{base.__name__}", (base,), {})
+        cls.get_source_stamp = get_source_stamp
+        cls.from_function = classmethod(from_function)
+        out.append(cls)
+    return tuple(out)
 
 
 def install():
-    """Put the closure-stamped locators ahead of numba's own."""
+    """Put the closure-stamped locators ahead of numba's own (numba imported)."""
+    global LOCATORS  # pylint: disable=global-statement
+    caching = sys.modules.get(CACHING) or importlib.import_module(CACHING)
+    if not LOCATORS:
+        LOCATORS = _locators(caching)
     classes = caching.CacheImpl._locator_classes  # pylint: disable=protected-access
     classes[:] = list(LOCATORS) + [c for c in classes if c not in LOCATORS]
+
+
+class _Hook(importlib.abc.MetaPathFinder):
+    """Runs install() once numba's caching module has executed."""
+
+    def find_spec(self, fullname, path, target=None):
+        """numba's caching module, its loader wrapped to install afterwards."""
+        if fullname != CACHING:
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is not None and spec.loader is not None:
+            run = spec.loader.exec_module
+
+            def exec_module(module):
+                run(module)
+                install()
+
+            spec.loader.exec_module = exec_module
+        return spec
+
+
+def hook():
+    """install() now if numba's caching module is loaded, else when it loads."""
+    if CACHING in sys.modules:
+        install()
+    elif not any(isinstance(f, _Hook) for f in sys.meta_path):
+        sys.meta_path.insert(0, _Hook())

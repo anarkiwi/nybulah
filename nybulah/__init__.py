@@ -2,4 +2,4 @@
 
 from . import jitcache
 
-jitcache.install()
+jitcache.hook()

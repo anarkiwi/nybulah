@@ -42,6 +42,7 @@ def write_pkg(root, k):
 
 def run(pkg):
     env = {k: v for k, v in os.environ.items() if k != "NUMBA_CACHE_DIR"}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, (str(jitcache.ROOT.parent), env.get("PYTHONPATH")))
     )
@@ -88,3 +89,17 @@ def test_installed_first_once():
     classes = caching.CacheImpl._locator_classes  # pylint: disable=protected-access
     assert tuple(classes[: len(jitcache.LOCATORS)]) == jitcache.LOCATORS
     assert len(set(classes)) == len(classes)
+
+
+def test_hook_installs_when_numba_caching_loads():
+    code = (
+        "import sys\nimport nybulah\n"
+        "assert 'numba' not in sys.modules\n"
+        "from numba.core import caching\n"
+        "from nybulah import jitcache\n"
+        "c = caching.CacheImpl._locator_classes\n"
+        "assert tuple(c[:3]) == jitcache.LOCATORS and len(jitcache.LOCATORS) == 3\n"
+        "jitcache.hook()\n"
+        "assert len(set(c)) == len(c)\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
