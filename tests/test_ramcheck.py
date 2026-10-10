@@ -131,3 +131,19 @@ def test_1571_locate_searches_out_to_the_sensor(make_rig):
         ramcheck.locate(nib, 40)
     assert ramcheck.locate(nib, 40, 6) == HOME_HALFTRACK == drive.mech.halftrack
     assert drive.mech.bumps == drive.mech.inner_stops == 0
+
+
+def test_1571_search_steps_count_towards_max_steps(make_rig, g64):
+    """A search found headers 4 steps out on halftrack 70: homing from there is 68
+    more outward steps, refused over max_steps with the head left where it searched."""
+    drive, nib = make_rig("1571", Media.from_g64(g64), halftrack=74)
+    drive.write(0x22, 0)
+    with pytest.raises(ValueError, match="search of 8 steps is over 7"):
+        ramcheck.locate(nib, 7, 8)
+    assert drive.mech.halftrack == 74
+    with pytest.raises(ValueError, match="72 outward steps, over 71"):
+        ramcheck.locate(nib, 71, 8)
+    assert drive.mech.halftrack == 70 and nib.halftrack is None
+    drive.write(0x22, 0)
+    assert ramcheck.locate(nib, 68, 8) == HOME_HALFTRACK == drive.mech.halftrack
+    assert drive.mech.bumps == drive.mech.inner_stops == 0
