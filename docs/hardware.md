@@ -419,7 +419,11 @@ insertions and deletions (sync length differences reported apart, per sync as
 written against found), the drift and the $55 byte framing, the revolution
 length read against `--cells`, and per unstable group (`weak`, or each
 `noflux`/`badgcr` run) its instability across repeats (`summary.<path>.unstable`,
-all paths in `summary.unstable_all`). Each capture is also digested against the
+all paths in `summary.unstable_all`). Verify takes no `--lead` and refuses
+one: alignment finds the pattern wherever the write's lead put it, and the
+index angles come from the index-started capture below, so the lead only
+changes where the pattern sits, not how it is found (`truth.lead` in a verify
+report is null). Each capture is also digested against the
 latched truth and, for RAM captures, the streams (`ramcheck`). RAM captures with
 a TB pass get a speed trace (byte period over `--window` bytes against byte
 index) with each excursion's start byte, peak percent, oscillation period and

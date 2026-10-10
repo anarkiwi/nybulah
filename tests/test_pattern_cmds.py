@@ -253,3 +253,12 @@ def test_search_steps_bound_a_lost_1541(monkeypatch):
         cli.main(argv + ["--transport", "s1", "--search-steps", "3"], SimCBM(drive))
     assert drive.mech.halftrack == 71
     assert drive.mech.bumps == drive.mech.inner_stops == 0
+
+
+def test_verify_refuses_lead(capsys):
+    """verify places the pattern by alignment, so a write's --lead is refused."""
+    argv = ["pattern", "verify", "--halftrack", "36", "--lead", "500"]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2
+    assert "--lead is write's only" in capsys.readouterr().err
