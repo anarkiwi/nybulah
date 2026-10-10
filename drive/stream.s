@@ -1,7 +1,9 @@
-;Streaming capture for a 1571 at 2 MHz under monitor_s4 (xum1541 firmware
+; Streaming capture for a 1571 at 2 MHz under monitor_s4 (xum1541 firmware
 ; v12), loaded at $0300 in place of the seek build of track.s (whose prep
-; placed the head) and called there through J; parameters in track.s's zero
-; page block. Each byte ready goes out through the CIA shift register with no
+; placed the head) and called there through J; its ZPCODE segment, the
+; parameters and the byte loop, goes to zero page at ZPBASE (the host saves
+; and restores $60-$FF around a session, and writes ticks and revs after
+; loading it). Each byte ready goes out through the CIA shift register with no
 ; host handshake; metadata goes out the same way with CLK asserted at its
 ; bit 7, where the adapter samples it. Values (never $00):
 ;
@@ -21,11 +23,18 @@
 ; prep (always run before) leaves; every WD access keeps the DOS's address
 ; rule (wdtest.inc).
 ;
+; The index poll, the metadata slot and their state run in zero page: pm,
+; pm2, ilev and ticks are operands of immediates the loop reads, stored with
+; zero page writes; timed branches never cross a page (BR).
+;
 ; Rules, t = 0 at an SDR write (protocol.md derives them):
 ; - a write follows the previous one by SR_PERIOD (40) or more cycles, or by
 ;   the shifter's ICR flag: the shifter is idle;
 ; - a waiting byte is read at the first V sample after a write and held in X
 ;   until its write; X and the VIA latch are the only buffers;
+; - every path from a write reaches a V sample soon enough that a byte is
+;   read, and V cleared, before the next one lands: one landing between a
+;   read and its clv is lost (protocol.md, Margins);
 ; - due metadata goes at the first write with no byte waiting, ahead of a
 ;   byte arriving after that write (held in X), so a run of back-to-back
 ;   bytes never holds it, nor the index poll that waits for it (pwo);
@@ -33,18 +42,20 @@
 ; - CLK changes 14 or more cycles after a write and 2 or more before the
 ;   next write: the adapter samples it 4 to 14 cycles after a write.
 ;
+; Cycles: instructions at their first cycle, writes at their write cycle.
 ;   nw   V at 0 and 6 of 15, SYNC at 5; entered 28+ after a write; writes 12
 ;        cycles after the bvs that sees V; ATN and T1 every 256 idle polls.
-;   pwo  after a write from nw: due metadata at 40, the index, every 256th
-;        byte ATN and T1; else nw at 29.
-;   pwb  after a timed write: V at 1 -> read, write at 42; due metadata at
-;        42; V at 28 -> write at 43; else nw at 33.
-;   pwm  due metadata: a byte seen by V at 12, 18 or 22 (14, 20, 24 from
-;        pwb) is read and held while the metadata goes at 44, 46 or 50 (+2),
-;        then written 42 after it (mh); else the metadata at 40 (42).
-;   mpw  after metadata (entered at 4): V at 4 -> read, CLK released at 18,
-;        write at 45; else CLK released at 22, V at 28 -> write at 43, else
-;        nw at 33.
+;   pwo  after a write from nw: due metadata at 41; else the index: no
+;        change or a falling edge -> nw at 28, a rising edge -> nw at 42;
+;        every 256th byte ATN and T1 -> nw at 38 (49 after a T1 period).
+;   pwb  after a timed write: V at 1 -> read, write at 40; due metadata at
+;        46; V at 27 -> write at 42; else nw at 32.
+;   pwm  due metadata: a byte seen by V at 11, 17 or 21 (+5 from pwb) is read
+;        and held while the metadata goes at 41, 41 or 45, then written 40
+;        after it (mh); else the metadata at 41.
+;   mpw  after metadata (entered at 6): V at 6 -> read, write at 45; else
+;        CLK released at 24, V at 28 -> write at 43, else nw at 33; entered
+;        at 4 (after ee, sx) all 2 earlier.
 
         .setcpu "6502"
 
@@ -95,25 +106,163 @@ PCR_SOE_MASK = $F1
 PCR_SOE_OFF  = $0C
 PCR_READ_SOE = $EE
 
-ZP      = $60
-ticks   = ZP + 5
-revs    = ZP + 6
-tmo     = ZP + 31
-ilev    = ZP + 18
-cnt     = ZP + 19
-pm      = ZP + 20                       ; due metadata, then a second
-pm2     = ZP + 21
-tse     = ZP + 22
-wst     = ZP + 23
+ZPBASE   = $60                  ; nibbler.STREAM_ZP
 
         .include "wdtest.inc"
+
+        .segment "ZPCODE": zeropage
+
+revs:   .res 1                  ; parameter, written by the host
+tmo:    .res 1
+cnt:    .res 1
+.assert revs = ZPBASE, error, "revs is the host's STREAM_ZP"
+
+; Z set when a VIA1 T1 period passed and tmo ran out.
+tick:   lda IFR1
+        and #IRQ_T1
+        eor #IRQ_T1
+        bne :+                          ; no period: Z clear
+        lda T1CL
+        dec tmo
+:       rts
+
+; Byte ready (or SYNC low); entered 28 or more cycles after a write. Every
+; 256 polls without either (no disk turning) ATN and T1 are checked.
+nw:     BR bvs, nv
+        lda VIA2PB
+        BR bvs, nv
+        BR bpl, nws
+        dex
+        BR bne, nw
+        jmp pws
+nws:    jmp ss
+nv:     ldx VIA2PA
+        clv
+        stx CIA_SDR                     ; t = 0
+pwo:    lda #0                          ; pm
+pm      = pwo + 1                       ; due metadata, then a second (pm2)
+        BR bne, pwm                     ; due metadata
+        WDOK
+        lda WD
+        eor #0                          ; ilev
+ilev    = * - 1
+        and #WD_INDEX
+        BR bne, pwe
+        dec cnt
+        BR beq, pws
+        BR bne, :+                      ; 3 cycles, V untouched
+:       BR bne, nw                      ; 28
+
+; Every 256 bytes from nw (nw at 38, 49 after a T1 period), or 256 idle
+; polls: ATN and the no-index timeout.
+pws:    lda IEC
+        BR bmi, pwa
+        lda IFR1
+        and #IRQ_T1
+        BR beq, nw
+        lda T1CL
+        dec tmo
+        BR bne, nw
+        jmp lost
+pwa:    jmp abort
+
+; Index level changed (A = WD_INDEX): toggle it; a rising edge makes INDEX
+; due (pm is clear here), restarts the no-index timeout and ends at the last
+; revolution.
+pwe:    eor ilev
+        sta ilev
+        BR beq, nwf                     ; falling edge
+        lda #M_INDEX
+        sta pm
+        lda #0                          ; ticks
+ticks   = * - 1
+        sta tmo
+        dec revs
+        BR bne, nw                      ; 42
+        jmp last
+nwf:    BR beq, nw                      ; 28
+
+; Due metadata at 41 (46 from pwb), CLK at 16; a byte seen by V at 11, 17 or
+; 21 is held (C set) while the metadata goes at 41, 41 or 45, then written 40
+; after it (mh). All +5 from pwb.
+pwm:    ldy pm
+        lda #CLK_OUT
+        BR bvs, ph                      ; t = 11
+        sta IEC                         ; t = 16
+        BR bvs, pv                      ; t = 17
+        nop
+        BR bvs, pv                      ; t = 21
+        clc
+        BR bcc, pvm
+ph:     sta IEC                         ; t = 17
+        nop
+pv:     ldx VIA2PA
+        clv
+        sec
+pvm:    lda #0                          ; pm2
+pm2     = pvm + 1
+        sta pm
+        lda #0
+        sta pm2
+        sty CIA_SDR                     ; t = 41
+        BR bcs, mh
+        jmp mpw
+mh:     BR bcs, :+                      ; the held byte: CLK released at 36,
+:       jmp ee2                         ; written at 40, mpw at 44
+
+.assert * <= $0100, error, "ZPCODE past zero page"
 
         .segment "CODE"
 
         jmp stream
-        .res 2                          ; WD accesses off addresses ending in 00
+ticksp: .res 1                          ; parameter, written by the host
+tse:    .res 1
+wst:    .res 1
 
-        .segment "ZPCODE"
+
+; The timed paths after a write (no self-modified operands).
+; Write of the byte in X, 42 or more cycles after the previous write.
+tv:     stx CIA_SDR                     ; t = 0
+pwb:    BR bvs, ee                      ; t = 1
+        lda pm
+        BR beq, :+
+        jmp pwm                         ; 11
+:       ldy #3
+:       dey
+        BR bne, :-
+        nop
+        BR bvs, bl                      ; t = 27
+        jmp nw                          ; 32
+bl:     ldx VIA2PA
+        clv
+        jmp tv                          ; 42 (43 from mpw)
+
+; After metadata (entered at 6, at 4 from ee and sx): the waiting byte, CLK
+; released, as pwb.
+mpw:    BR bvs, ee                      ; t = 6
+        lda #0
+        ldy #2
+:       dey
+        BR bne, :-
+        sta IEC                         ; t = 24
+        jmp *+3                         ; 3 cycles, V untouched
+        BR bvs, bl                      ; t = 28
+        jmp nw                          ; 33
+; A byte already waiting after a write (pwb at 1, mpw at 4 or 6): read it
+; now and write it 37 after the read (40 after a write from pwb), releasing CLK
+; 4 before; mpw then takes the next (no metadata until a write finds no byte
+; waiting). ee2: the byte held across metadata, written 40 after it.
+ee:     ldx VIA2PA
+        clv
+ee2:    lda #0
+        ldy #4
+:       dey
+        BR bne, :-
+        sta IEC
+        stx CIA_SDR                     ; t = 0
+        jmp mpw
+        .byte $EA                       ; WD accesses below off addresses ending in 00
+
 
 stream: lda VIA1PA_NH
         and #PA_2MHZ
@@ -131,7 +280,8 @@ stream: lda VIA1PA_NH
         lda PCR2
         ora #PCR_READ_SOE
         sta PCR2
-        lda ticks
+        lda ticksp
+        sta ticks
         sta tmo
 gw:     lda IEC                         ; host go: CLK
         and #CLK_IN
@@ -152,16 +302,6 @@ gw:     lda IEC                         ; host go: CLK
         clv
         jmp nw
 
-; Z set when a VIA1 T1 period passed and tmo ran out.
-tick:   lda IFR1
-        and #IRQ_T1
-        beq :+
-        lda T1CL
-        dec tmo
-        rts
-:       lda #1
-        rts
-
 ; Metadata byte A 45 or more cycles after any write, CLK released at 16.
 meta:   sta tse
         ldy #SR_PERIOD / 5 + 1
@@ -176,109 +316,6 @@ meta:   sta tse
         lda #0
         sta IEC                         ; t = 16
         rts
-
-        .segment "CODE"
-
-; Byte ready (or SYNC low); entered 28 or more cycles after a write. Every
-; 256 polls without either (no disk turning) ATN and T1 are checked.
-nw:     BR bvs, nv
-        lda VIA2PB
-        BR bvs, nv
-        BR bpl, nws
-        dex
-        BR bne, nw
-        jmp pws
-nws:    jmp ss
-nv:     ldx VIA2PA
-        clv
-        stx CIA_SDR                     ; t = 0
-pwo:    lda pm
-        BR bne, pwm                     ; due metadata
-        WDOK
-        lda WD
-        eor ilev
-        and #WD_INDEX
-        BR bne, pwe
-        dec cnt
-        BR beq, pws
-        nop
-        jmp nw                          ; 29
-
-; Due metadata at 40 (42 from pwb), CLK at 17; a byte arriving by 22 is held
-; (C set) while it goes at 44 (ph), 46 or 50 (pv), then written 42 after it.
-pwm:    ldy pm
-        lda #CLK_OUT
-        BR bvs, ph                      ; t = 12
-        sta IEC                         ; t = 17
-        BR bvs, pv                      ; t = 18
-        nop
-        BR bvs, pv                      ; t = 22
-        clc
-pvm:    lda pm2
-        sta pm
-        lda #0
-        sta pm2
-        sty CIA_SDR                     ; t = 40
-        BR bcc, mpw
-mh:     nop                             ; the held byte: CLK released at 15,
-        nop                             ; written at 42, mpw at 46
-        jmp ee2
-ph:     sta IEC                         ; t = 18
-pv:     ldx VIA2PA
-        clv
-        sec
-        jmp pvm
-
-pwe:    jsr edge
-        jmp nw
-
-; Every 256 bytes from nw, or 256 idle polls: ATN and the no-index timeout.
-pws:    lda IEC
-        bpl :+
-        jmp abort
-:       jsr tick
-        bne nw
-        jmp lost
-
-; Write of the byte in X, 43 cycles after the previous write.
-tv:     stx CIA_SDR                     ; t = 0
-pwb:    BR bvs, ee                      ; t = 1
-        lda pm
-        BR bne, pwm
-        ldy #3
-:       dey
-        BR bne, :-
-        jmp *+3                         ; 3 cycles, V untouched
-        BR bvs, bl                      ; t = 28
-        jmp nw                          ; 33
-bl:     ldx VIA2PA
-        clv
-        jmp tv                          ; 43
-
-; After metadata (entered at 4): the waiting byte, CLK released, as pwb.
-mpw:    BR bvs, ee                      ; t = 4
-        lda #0
-        ldy #2
-:       dey
-        BR bne, :-
-        sta IEC                         ; t = 22
-        nop
-        jmp *+3                         ; 3 cycles, V untouched
-        BR bvs, bl                      ; t = 28
-        jmp nw                          ; 33
-; A byte already waiting after a write (pwb at 1, mpw at 4): read it now,
-; release CLK 11 cycles after the bvs and write it 39 after the read; mpw then
-; takes the next (no metadata until a write finds no byte waiting).
-ee:     ldx VIA2PA
-        clv
-ee2:    lda #0
-        sta IEC
-        ldy #4
-:       dey
-        BR bne, :-
-        nop
-        stx CIA_SDR                     ; t = 0
-        jmp mpw
 
 ; SYNC low, from nw (no byte waiting, shifter idle): SYNC_START; SYNC polled
 ; every 11 cycles until high, with T1, the index and SYNC_CONT whenever the
@@ -366,25 +403,21 @@ sx:     lda tse
         jmp mpw
 sxh:    ldx VIA2PA
         clv
-sxd:    ldy #0
-        sty IEC
-        stx CIA_SDR                     ; t = 0: the byte, then SYNC_END due
-        ldy pm
+sxd:    ldy pm                          ; the byte, then SYNC_END due
         bne :+
         sta pm
-        jmp pwb
+        BR beq, sxb
 :       sta pm2
-        jmp pwb
-sxm:    stx CIA_SDR                     ; t = 0: the oldest due metadata
-        ldx pm2
-        stx pm
-        ldy #0
-        sty pm2
-        cpx #0
-        bne :+
-        sta pm                          ; SYNC_END behind it
-        jmp mpw
-:       sta pm2
+sxb:    ldy #0
+        sty IEC
+        jmp tv
+sxm:    ldy pm2                         ; the oldest due metadata, SYNC_END
+        bne :+                          ; behind it
+        sta pm
+        BR beq, sxw
+:       sty pm
+        sta pm2
+sxw:    stx CIA_SDR                     ; t = 0
         jmp mpw
 
 ; Index level changed (A = the change): toggle it; on a rising edge make INDEX

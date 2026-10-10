@@ -18,7 +18,7 @@ from nybulah.formats.image import Capture as ImageCapture
 from nybulah.formats.image import revolution
 from nybulah.link import BASE
 from nybulah.monitor import Monitor, drivecode
-from nybulah.nibbler import CODE_BASE, CODE_SIZE, SENSE_STREAM, STREAM_ZP
+from nybulah.nibbler import CODE_BASE, CODE_SIZE, SENSE_STREAM, STREAM_TICKS, STREAM_ZP
 from nybulah.nibbler import Capture, Nibbler, TrackError, index_sense
 from nybulah.simdisk import DOS_TRACK, Media, Mechanism, log_bytes, sync_track
 from nybulah.simsrq import SR_PERIOD, UsbIn
@@ -101,13 +101,15 @@ def test_streams_every_byte_and_sync(g64, zone, rpm):
     assert (dec.errors == SectorError.OK).all()
 
 
+@pytest.mark.parametrize("written", [FASTEST, 300.0])
 @pytest.mark.parametrize("seed", range(4))
-def test_stress_syncs_at_the_fastest_zone(seed):
-    """Short, long and back-to-back syncs between 1 and 30 bytes, zone 3, fast disk."""
+def test_stress_syncs_at_the_fastest_zone(seed, written):
+    """Short, long and back-to-back syncs between 1 and 30 bytes, zone 3, fast
+    disk; a track written at 300 rpm has the shortest byte period."""
     rpm = FASTEST
     rng = np.random.default_rng(seed)
     runs = rng.choice([10, 11, 12, 14, 20, 40, 80, 300, 1500], 30).tolist()
-    cells = int(round(bits_per_revolution(3, rpm)))
+    cells = int(round(bits_per_revolution(3, written)))
     media = Media({(0, 2): sync_track(runs, cells, seed=seed, gaps=(1, 30))}, rpm=rpm)
     cbm, mech, nib = rig(media, halftrack=4)
     writes = sdr_writes(cbm)
@@ -206,6 +208,24 @@ def test_index_lands_at_its_edge_in_a_run_without_syncs(seed):
     assert np.abs(cap.index - want).max() <= INDEX_SLACK
 
 
+@pytest.mark.parametrize("seed", range(1, 5))
+def test_index_edges_drop_no_byte_at_the_shortest_byte_period(seed):
+    """Zone 3 written at 300 rpm and read at 310: bytes 50.3 cycles apart, the
+    index edge at any phase of a run without syncs, three edges: the index poll
+    and INDEX send never delay a byte read past the next byte's arrival."""
+    cells = int(round(bits_per_revolution(3, 300.0)))
+    track = sync_track([40], cells, seed=seed, gaps=(4, 5))
+    media = Media({(0, 2): np.roll(track, seed * 997)}, rpm=FASTEST)
+    _, mech, nib = rig(media, halftrack=4)
+    nib.seek(2)
+    mech.log = []
+    cap = nib.stream(2, revolutions=3)
+    assert cap.stream_status == {"adapter": "done", "drive": "done"}
+    assert len(cap.index) == 4
+    data, _ = log_bytes(mech.log)
+    assert bytes(cap.data) in data
+
+
 @pytest.mark.parametrize("stray", [0x80, 0xC0, 0xE0])
 def test_index_after_a_stray_wd_command(g64, stray):
     """A WD1770 left running a type II/III command shows no index; prep's force
@@ -236,7 +256,8 @@ def stream_direct(cbm, mon, ticks=2, revs=3):
     code = drivecode("stream_1571")
     mon.write(CODE_BASE, code[:CODE_SIZE])
     mon.write(STREAM_ZP, code[CODE_SIZE:])
-    mon.write(0x60 + 5, bytes([ticks, revs]))
+    mon.write(STREAM_TICKS, bytes([ticks]))
+    mon.write(STREAM_ZP, bytes([revs]))
     mon.transact(b"J" + struct.pack("<H", CODE_BASE))
     raw = cbm.srq2_stream(1 << 16)
     return raw, mon.link.response(3)
@@ -393,6 +414,17 @@ def test_sync_end_closes_the_oldest_open_sync():
     p, est, lo, hi = fmt.sync_bounds(pos, val)
     assert p.tolist() == [5, 9] and est[1] - est[0] == 8 - 4
     assert (lo <= est).all() and (est <= hi).all()
+
+
+def test_index_syncs_follow_the_stream_order():
+    """A sync belongs before an index edge when its SYNC_START precedes INDEX in
+    the stream, also at the same data position, and after it otherwise."""
+    d = (0x55, False)
+    items = [d, (0x81, True), (0x7F, True), d, (0x08, True), (0x41, True), d]
+    items += [(0x3F, True), d, (0x21, True), (0x08, True), (0x1F, True), d]
+    s = fmt.Stream.parse(adapter_output(items))
+    assert s.index.tolist() == [2, 4]
+    assert s.index_syncs.tolist() == [1, 3]
 
 
 def test_sync_continuations_unwrap_long_syncs():

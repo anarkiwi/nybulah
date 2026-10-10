@@ -890,12 +890,13 @@ there.
 
 A `Nibbler` session is different: from `open` to `close` its parameters and
 code occupy zero page `$60-$FF`, including DOS's listen and talk addresses
-(`$77`/`$78`, compared with every ATN command byte). A drive that returns to
-DOS then (idle window passed, or a routine that never answers) ignores its
-own device number, so no upload can restart the monitor. While a session
-holds the monitor (`Monitor.holding`), a pause past the idle window or a
-failed command resets the bus instead and raises `DriveLost`, naming the
-command and, for a `J`, the routine (`prep`, `read`, `write`, `sense`,
-`stream`); the session then has nothing left to restore. Host work that may
-outlast the idle window (alignment, comparison) runs after `close`, as
-`pattern` does.
+(`$77`/`$78`, compared with every ATN command byte). The 1541 and 1571
+monitors keep DOS's values of both on the stack under `savesp` and put them
+back on every exit (`Q`, the watchdogs), so DOS answers its device number
+after leaving mid-session; the rest of `$60-$FF` stays the session's until
+`close` or a reset. While a session holds the monitor (`Monitor.holding`), a
+pause past the idle window or a failed command resets the bus and raises
+`DriveLost`, naming the command and, for a `J`, the routine (`prep`, `read`,
+`write`, `sense`, `stream`); the session then has nothing left to restore.
+Host work that may outlast the idle window (alignment, comparison) runs after
+`close`, as `pattern` does.

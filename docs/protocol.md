@@ -486,41 +486,84 @@ shows within 39 (see s4 above), so:
   flag;
 - a waiting byte is read at the first V sample after a write and held in X;
   X and the VIA latch are the only buffers;
+- a byte is read, and V cleared, before the next one lands. Byte ready sets V
+  through SO on every byte and the next byte overwrites the VIA latch, so a
+  byte landing between a read and its `clv` is lost with no trace: every
+  path from a write must reach a V sample within the byte period of the
+  oldest unread byte (Margins);
 - due metadata goes at the first write that finds no byte waiting (V clear
-  at t = 1 after a timed write, or a write from `nw`): a byte arriving by
-  t = 22 (24 after a timed write) is read and held in X while the metadata
-  goes at 44 to 50, then written 42 after it; SYNC_START and SYNC_CONT go at
-  once, as no byte can be waiting behind them. Metadata therefore never waits
-  for a run of back-to-back bytes to end, and neither does the index poll in
-  `pwo`, which runs only with no metadata due;
+  at t = 1 after a timed write, or a write from `nw`): a byte seen by V at
+  11 to 21 (16 to 26 after a timed write) is read and held in X while the
+  metadata goes at 41 to 45 (46 to 50), then written 40 after it;
+  SYNC_START and SYNC_CONT go at once, as no byte can be waiting behind
+  them. Metadata therefore never waits for a run of back-to-back bytes to
+  end, and neither does the index poll in `pwo`, which runs only with no
+  metadata due;
 - CLK changes 14 or more cycles after a write and 2 or more before the next:
   the adapter samples it 4 to 14 cycles after a write;
 - inside a sync only SYNC_CONT is sent; metadata due then waits for the
   bytes after the sync, so timestamps unwrap and SYNC_ENDs keep their order.
 
+The index poll and the metadata slot (`nw` to `mh`) and their state run in
+zero page (`ZPCODE` at `$60-$FF`, which the host saves and restores around a
+session): pm, pm2, ilev and ticks are operands of the immediates the loop
+reads, written with zero page stores, and no timed branch crosses a page
+(`BR`). The timed write paths (`tv` to `ee2`) follow in `$0300`. The host
+writes revs at `STREAM_ZP` and ticks at `STREAM_TICKS` after loading.
+
 ### Drive schedule (cycles after the write)
+
+Instructions at their first cycle, writes at their write cycle.
 
 | path | entered | V samples | write of the next byte | otherwise |
 |---|---|---|---|---|
 | `nw` idle poll | 28+ | 0 and 6 of 15, SYNC at 5 | 12 after the `bvs` | ATN, T1 every 256 polls |
-| `pwo` after a write from `nw` | 0 | | (due metadata at 40) | index poll, `nw` at 29 |
-| `pwm` metadata slot | 12 | 12, 18, 22 | held: metadata at 44 / 46 / 50, the byte 42 after it (`mh`) | metadata at 40 |
-| `pwb` after a timed write | 1 | 1, 28 | 42 / 43 | `nw` at 33 |
-| `mpw` after metadata | 4 | 4, 28 | 45 / 43 | `nw` at 33 |
-| `ee` byte already waiting | 1-4 | | 39 after the read, then `mpw` | |
+| `pwo` after a write from `nw` | 0 | | (due metadata at 41) | index poll, `nw` at 28 |
+| `pwe` index edge | 16 | | | rising: INDEX due, `nw` at 42; falling: `nw` at 28 |
+| `pws` every 256th byte | 23 | | | ATN, T1: `nw` at 38 (49 after a T1 period) |
+| `pwm` metadata slot | 6 (11 from `pwb`) | 11, 17, 21 (+5) | held: metadata at 41 / 41 / 45 (+5), the byte 40 after it (`mh`) | metadata at 41 (46) |
+| `pwb` after a timed write | 1 | 1, 27 | 40 (`ee`) / 42 (`bl`) | `nw` at 32 |
+| `mpw` after metadata | 6 (4 after `ee`, `sx`) | 6, 28 (4, 26) | 45 / 43 (43 / 41) | `nw` at 33 (31) |
+| `ee` byte already waiting | 1-6 | | 37 after the read, then `mpw` | |
 | sync loop `sp` | | SYNC every 11 | | ATN, T1, index, SYNC_CONT |
-| `se` sync end | 7-8 after the read | each poll until ICR | at the ICR flag | |
+| `se` sync end | 7-8 after the read | each poll until ICR | at the ICR flag (`tv`, `sxw`) | |
+
+Before (9d07059) the rising edge ran `edge` and `due` through `jsr` and
+reached `nw` at 76, the held byte went 42 after its metadata, `pwm` came 2
+cycles later, and `sx` wrote its byte or metadata before its bookkeeping, so
+`pwb` and `mpw` started 10 to 16 cycles late.
 
 ### Margins
 
-The shortest byte period is zone 3 at 310 rpm, 52 x 300 / 310 = 50.3 cycles.
+Byte periods at 310 rpm on a track written at 300 rpm (52, 56, 60, 64 x 300 /
+310), the shortest a drive reads. Margin is the shortest time from a read to
+the next byte's landing over every path (`tools/stream_margin.py`, the timed
+1571 with every index phase of a sync-free track and of random syncs); 0 or
+less loses a byte.
+
+| zone | period | 9d07059 worst site | margin | lost | now worst site | margin | lost |
+|---|---|---|---|---|---|---|---|
+| 3 | 50.3 | `nv` after a rising edge | 0.3 | 1-2 per edge | `ee` after a held byte | 8.7 | 0 |
+| 2 | 54.2 | `nv` after a rising edge | 7.5 | 0 | `ee` after a held byte | 16.4 | 0 |
+| 1 | 58.1 | `nv` after a rising edge | 18.1 | 0 | `ee` after a held byte | 24.1 | 0 |
+| 0 | 61.9 | `nv` after a rising edge | 25.9 | 0 | `ee` after a held byte | 32.0 | 0 |
+
+The rising edge: the byte B after the one written from `nw` (t = 0) lands
+from 50.3 - 21 = 29.3 (a byte is written up to 21 cycles after it lands), and
+the next, C, from 79.6. Before, `nw` at 77 read B at 83 and cleared V at 86:
+C landing before 83 overwrote B, landing up to 86 lost its V and was
+overwritten later. The late read also left the byte after it to land just
+after the next write, inside the held window, and the one after that landed
+before `mpw` read it: the two bytes the hardware lost after INDEX. Now `nw`
+at 42 reads B by 48. The held byte: from `pwb` a byte landing just after V
+at 1 is held, its metadata goes at 46, the byte at 86, and `mpw` reads the
+next at 96, before the one after it lands from 1 + 2 x 50.3 = 101.6; that is
+the worst case above.
 
 | quantity | worst case | budget | margin |
 |---|---|---|---|
-| write spacing | 40 (`pwm`), 43 (`tv`) | ICR flag at 39 or less | 1 cycle |
-| byte ready to read | 21 (V at 23, read at `mpw` 4) | 50.3 | 29 cycles |
-| back-to-back writes | 42 (`ee`), 43 (`tv`) | 50.3 | backlog drains 7.3 cycles per byte |
-| held byte (`pwm` from `pwb`) | the next byte read at 98 | the one after it lands at 2 + 2 x 50.3 = 102.6 | 4.6 cycles |
+| write spacing | 40 (`ee`, `mh`) | ICR flag at 39 or less | 1 cycle |
+| back-to-back writes | 40 (`ee`), 42 (`tv`) | 50.3 | backlog drains 8.3 cycles per byte |
 | adapter frame | 264-296 clocks | SRQ_FRAME 256 | 8 clocks |
 | adapter next poll | 303 clocks | SRQ_WAIT 306 | 3 clocks |
 
@@ -528,10 +571,9 @@ A metadata byte goes out at the first write with no byte waiting, so it
 delays at most the one byte that lands after that write (held in X, the next
 one waits in the VIA latch), and that delay drains before the backlog lets
 another metadata slot open. INDEX lands within 4 bytes of the edge, also in a
-revolution-long run without syncs (`test_index_lands_at_its_edge_in_a_run_without_syncs`);
-when a run of back-to-back bytes held due metadata until the next sync, the
-index went unpolled for that long and a hole passing meanwhile was missed. `misc/x_timing.py` steps the compiled `srq_stream8` (6-clock
-fall wait) against these bounds and `misc/srq_timing_test.c` checks them.
+revolution-long run without syncs (`test_index_lands_at_its_edge_in_a_run_without_syncs`).
+`misc/x_timing.py` steps the compiled `srq_stream8` (6-clock fall wait)
+against these bounds and `misc/srq_timing_test.c` checks them.
 
 ### Host decoding
 
@@ -549,7 +591,12 @@ and the disk map use as for RAM captures.
 `tests/test_stream.py` streams every zone at 300 and 310 rpm on the timed
 1571 with the adapter model: every latched byte arrives in order, every sync
 lies inside its bounds, writes are 40 or more cycles apart, and no stream read
-hits either stop (`Mechanism.bumps`, `inner_stops`). A throttled host drain
+hits either stop (`Mechanism.bumps`, `inner_stops`). Tracks written at 300
+rpm and read at 310 give the shortest byte period: index edges at several
+phases of a sync-free run, and random syncs, lose no byte
+(`test_index_edges_drop_no_byte_at_the_shortest_byte_period`). A sync whose
+SYNC_START follows INDEX in the stream belongs to the next revolution
+(`Stream.index_syncs`), also at the same data position. A throttled host drain
 gives overrun, a silent drive a timeout with ATN, and multi-revolution streams
 merge on their index edges.
 
