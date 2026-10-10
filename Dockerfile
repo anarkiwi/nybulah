@@ -68,7 +68,7 @@ RUN ./configure --prefix=/opt/vice --enable-headlessui --disable-html-docs \
         --without-flac --without-mpg123 --without-vorbis --without-lame \
         --without-portaudio --disable-ethernet --disable-realdevice --disable-midi \
         --disable-rs232 --disable-openmp --without-libcurl \
-    && make -j"$(nproc)" -C src x64sc x128 c1541 \
+    && make -j"$(nproc)" \
     && mkdir -p /opt/vice/bin /opt/vice/share/vice \
     && cp src/x64sc src/x128 src/c1541 /opt/vice/bin/ \
     && cp -r data/C64 data/C128 data/DRIVES /opt/vice/share/vice/
