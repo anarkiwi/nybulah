@@ -8,6 +8,7 @@ import struct
 import time
 
 import numpy as np
+from tqdm import tqdm
 
 from . import passes
 from . import stream as fmt
@@ -240,7 +241,7 @@ class Capture:  # pylint: disable=too-many-instance-attributes
 
     @property
     def sync_bounds(self):
-        """``(lo, hi)`` run lengths each sync's measurement allows (hi -1: unbounded)."""
+        """``(lo, hi)`` run lengths each sync allows; a negative ``hi`` is unbounded."""
         return self.syncs.lo, self.syncs.hi
 
     @property
@@ -672,13 +673,32 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
         track = (self._headers_here(dos) if headers else None) or dos
         return None if track is None else self._phase_halftrack(track)
 
-    def locate(self):
+    def _search(self, steps):
+        """Step outwards one halftrack at a time, at most ``steps``, until headers
+        place the head (returned halftrack) or a 1571's track 00 sensor turns on
+        (None); TrackError when neither does."""
+        for _ in tqdm(range(steps), desc="search outwards", unit="step", leave=False):
+            self._step(-1)
+            if self.model == "1571" and self.sense()[0]:
+                return None
+            track = self._headers_here(None)
+            if track:
+                return self._phase_halftrack(track)
+        raise TrackError(f"nothing placed the head within {steps} outward steps")
+
+    def locate(self, search=0):
         """Find the head position without touching the stop.
 
-        A 1571 is homed (``home``) from the estimate. A 1541 takes the
-        estimate; with none it raises TrackError, unless ``allow_bump``.
+        With no estimate (and on a 1571 the sensor clear), the head first
+        searches up to ``search`` halftracks outwards (``_search``): the caller's
+        promise that it is at least ``search + 2`` halftracks from the stop. A
+        1571 is then homed (``home``). A 1541 with no position raises TrackError,
+        unless ``allow_bump``.
         """
         estimate = self.estimate()
+        if estimate is None and search:
+            if self.model != "1571" or not self.sense()[0]:
+                estimate = self._search(search)
         if self.model == "1571":
             return self.home(estimate)
         if estimate is not None:

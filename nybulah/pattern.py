@@ -27,8 +27,19 @@ from .speed import WINDOW, speed_trace
 TRUTH = "truth.json"
 
 
-def _pattern_options(ap):
+def _drive_options(ap):
     drive_options(ap)
+    ap.add_argument(
+        "--search-steps",
+        type=_count,
+        default=0,
+        help="halftracks to search outwards when nothing places the head;"
+        " the head must be at least this plus 2 from the stop",
+    )
+
+
+def _pattern_options(ap):
+    _drive_options(ap)
     ap.add_argument("--halftrack", type=int, required=True)
     ap.add_argument("--density", type=int, choices=range(4), help="default: zone")
     ap.add_argument("--seed", type=int, default=pt.SEED)
@@ -42,7 +53,7 @@ def _capture_options(ap):
     ap.add_argument("--window", type=int, default=WINDOW, help="speed trace bytes")
 
 
-def _lead(text):
+def _count(text):
     value = int(text)
     if value < 0:
         raise ValueError(text)
@@ -54,7 +65,7 @@ def add_arguments(ap):
     sub = ap.add_subparsers(dest="action", required=True)
     write_ = sub.add_parser("write", help="write the pattern (1571)")
     _pattern_options(write_)
-    write_.add_argument("--lead", type=_lead, help="$55 bytes before the pattern")
+    write_.add_argument("--lead", type=_count, help="$55 bytes before the pattern")
     verify = sub.add_parser("verify", help="capture and compare with the pattern")
     _pattern_options(verify)
     _capture_options(verify)
@@ -66,13 +77,13 @@ def add_arguments(ap):
     probe = sub.add_parser(
         "cells", help="cells per revolution per density (writes --halftrack)"
     )
-    drive_options(probe)
+    _drive_options(probe)
     probe.add_argument("--halftrack", type=int, required=True)
     probe.add_argument(
         "--densities", type=int, nargs="+", choices=range(4), default=list(range(4))
     )
     near = sub.add_parser("halftracks", help="read halftracks against a truth")
-    drive_options(near)
+    _drive_options(near)
     near.add_argument("--truth", type=pathlib.Path, required=True)
     near.add_argument("--halftracks", type=int, nargs="+", required=True)
     _capture_options(near)
@@ -383,8 +394,8 @@ def _drive(args, cbm, truth):
         Monitor(cbm, args.dev, args.transport) as mon,
         Nibbler(mon, model, settle_ms=args.settle_ms) as nib,
     ):
-        report = {"model": model, "located": locate(nib, args.max_steps)}
-        report["streaming"] = nib.streaming
+        located = locate(nib, args.max_steps, args.search_steps)
+        report = {"model": model, "located": located, "streaming": nib.streaming}
         if args.action == "write":
             report |= write(nib, truth, Archive(args.save), args.lead)
             report["truth"] = {"bits": len(truth.bits), "regions": layout(truth)}

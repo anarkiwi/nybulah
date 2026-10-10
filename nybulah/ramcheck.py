@@ -122,11 +122,16 @@ def digest(cap, track, refs=()):
     }
 
 
-def locate(nib, max_steps):
-    """1571: home within max_steps outward steps (never bumping); 1541: locate."""
+def locate(nib, max_steps, search=0):
+    """1571: home within max_steps outward steps (never bumping); 1541: locate.
+
+    ``search`` bounds the outward search (``Nibbler.locate``) when nothing
+    places the head."""
     if nib.model != "1571":
-        return nib.locate()
+        return nib.locate(search)
     plan = homeprobe.dry(nib, headers=True)
+    if plan["estimate"] is None and not plan["sensed"]:
+        return nib.locate(search)
     if plan["outward_steps"] > max_steps:
         raise ValueError(
             f"homing needs {plan['outward_steps']} outward steps, over {max_steps}"
