@@ -21,6 +21,7 @@ pytestmark = [
 SCRATCH = 0x0600
 TIMER_B = vice.CIA1581 + 6
 CYL = 39
+INDEX_REPEATS = 24
 
 
 @pytest.fixture(name="image", scope="module")
@@ -58,6 +59,15 @@ def test_drive_memspace_calls_and_cycles(image):
         mon.run_cycles(100_000)
         assert v.clock(vb.SPACE) - c0 >= 100_000
         assert mon.read(TIMER_B, 2) != timer_b
+
+
+def test_1581_index_periods(image):
+    """Every index period is one revolution: the wraps come from timer B itself, so
+    none is lost to an ICR read racing its underflow, whatever the phase."""
+    with vb.Bench(image) as b:
+        b.drive.motor(True)
+        periods = np.array([b.drive.index_period() for _ in range(INDEX_REPEATS)])
+    assert np.all(np.abs(periods - r1581.NOMINAL_US) < r1581.NOMINAL_US // 100)
 
 
 def test_1581_reads_match_d81(image):
