@@ -241,3 +241,15 @@ def test_negative_lead_refused():
     argv = ["pattern", "write", "--halftrack", "36", "--lead", "-1"]
     with pytest.raises(SystemExit):
         cli.main(argv)
+
+
+def test_search_steps_bound_a_lost_1541(monkeypatch):
+    """--search-steps steps a 1541 DOS has lost no further outwards than it says."""
+    drive = disk_drive("1541", Media({}), 10, halftrack=74)
+    drive.write(0x22, 0)
+    patch(monkeypatch, "1541", SimMonitor(drive))
+    argv = ["pattern", "cells", "--dev", "10", "--halftrack", "72", *BASE]
+    with pytest.raises(TrackError, match="within 3 outward"):
+        cli.main(argv + ["--transport", "s1", "--search-steps", "3"], SimCBM(drive))
+    assert drive.mech.halftrack == 71
+    assert drive.mech.bumps == drive.mech.inner_stops == 0
