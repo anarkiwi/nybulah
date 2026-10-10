@@ -127,7 +127,9 @@ Capabilities of the tools above that nybulah does not have:
   with `0x55`; gap lengths and fill are a known protection check.
   ([Fast Hack'em C128 v6 manual](https://commodoremania.bytemaniacos.com/Libros/Application/Fast_Hack'em_C128_V6.0.pdf),
   [protection methods](https://www.commodoregames.net/copyprotection/protection-methods.asp))
-- **Index-hole sensor on a 1541.** Index use needs a 1571.
+- **Index-hole sensor mod on a 1541.** A stock 1541 has no index sensor;
+  nibtools supports an added sensor on a spare port pin. Without it, a 1541
+  aligns writes from data on the disk (see track alignment above).
   ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt))
 - **Unformatting or erasing tracks.**
   ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt))

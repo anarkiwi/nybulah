@@ -266,7 +266,7 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybula
 ## S4 (1571 SRQ fast serial)
 
 S4 needs firmware v11 or later (below) and a plugin from the same tree; the
-image's default plugin is v12's.
+image's default plugin is v13's.
 
 Only a 1571 runs it (a 1541 is skipped with "s4 needs a 1571"); other drives
 stay powered. `--fast` adds a second bench of s3/s4 with the 1571 at 2 MHz:
@@ -491,11 +491,11 @@ Measured on drive 8 (1571, 2 MHz), firmware v12:
 | `streamprobe --halftrack 2 --revolutions 3` | adapter and drive `done`; 4 index edges, 7522 bytes per revolution each; 164 syncs; 21/21 sectors |
 | `read --transport s4` (D64) | 683 sectors, 0 errors, one capture per track, 25.5 s; identical to the 1541-II's RAM-path read of the same disk |
 
-Streaming needs firmware v12 and the plugin from the same tree (branch
+Streaming needs firmware v12 or later and the plugin from the same tree (branch
 `xum1541-stream`, the image's default).
 
-Flash `xum1541-ZOOMFLOPPY-v12.hex` as below (`info` must print
-`model 2 version 12`, `devinfo` firmware version 12). Then, in order, with
+Flash `xum1541-ZOOMFLOPPY-v13.hex` as below (`info` must print
+`model 2 version 13`, `devinfo` firmware version 13). Then, in order, with
 drive 8 the 1571 and a formatted disk inserted:
 
 1. Memory only, no head movement: the s4 benches and timing probes above
@@ -691,29 +691,32 @@ to lose only for step 5.
 ## Flashing the ZoomFloppy firmware
 
 The firmware hex is built from the same OpenCBM tree as the plugin, branch
-`xum1541-stream` of the fork (v12; it also serves every older protocol):
+`xum1541-stream` of the fork (v13; it also serves every older protocol).
+v13 adds an adapter reset served from the control endpoint, which aborts any
+transfer and returns the adapter to its idle state without a USB reset
+(`cbmctrl adapterreset`, `-b` also resets the drives):
 
 ```sh
 git clone https://github.com/anarkiwi/OpenCBM && cd OpenCBM
 git checkout xum1541-stream
 docker build -f Dockerfile.nybulah --target firmware-hex -o fw .
-docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v12.hex
+docker run --rm -v "$PWD/fw:/fw" --entrypoint xum1541cfg nybulah info /fw/xum1541-ZOOMFLOPPY-v13.hex
 ```
 
 The build steps the compiled timing routines (`misc/x_timing.py`) and checks
 the SRQ schedule (`misc/srq_timing_test.c`); it fails rather than produce a
-hex that misses them. `info` must print `model 2 version 12` (it exits with
+hex that misses them. `info` must print `model 2 version 13` (it exits with
 status 1 regardless). Then, with the ZoomFloppy plugged in (drives may stay
 connected), flash it; the adapter re-enumerates as a DFU bootloader during the
 update, so the container gets the whole USB tree:
 
 ```sh
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v "$PWD/fw:/fw" \
-  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v12.hex
+  --entrypoint xum1541cfg nybulah update /fw/xum1541-ZOOMFLOPPY-v13.hex
 docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb --entrypoint xum1541cfg nybulah devinfo
 ```
 
-`devinfo` should report firmware version 12 (the image's plugin must be at
+`devinfo` should report firmware version 13 (the image's plugin must be at
 least as new as the firmware, or it refuses it). If `update` reports no devices
 found, the adapter may already have re-enumerated as its DFU bootloader before
 the tool looked for it; run `update` again. `update` refuses a hex with the
