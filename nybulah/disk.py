@@ -131,17 +131,17 @@ def read_d71(nib, **kw):
     return D71(*read_jobs(nib, d71_jobs(), **kw))
 
 
-def revolution_cells(nib, halftrack, archive=None):
-    """Bit cells per revolution this drive writes at density 0 (destroys the track).
+def revolution_cells(nib, halftrack, archive=None, density=0):
+    """Bit cells per revolution this drive writes at ``density`` (destroys the track).
 
     Writes filler ending in a single sync over more than one revolution, then
     measures the distance from that sync to its next pass.
     """
     archive = archive if isinstance(archive, Archive) else Archive(archive)
     stream = bytes([GAP_BYTE]) * (NPAGES * 256 - PROBE_SYNC) + b"\xff" * PROBE_SYNC
-    nib.write_track(halftrack, stream, density=0)
+    nib.write_track(halftrack, stream, density=density)
     job = TrackJob(0, halftrack // 2, halftrack // 2)
-    cap = archive("probe", job, nib.capture(halftrack, density=0, start="sync"))
+    cap = archive("probe", job, nib.capture(halftrack, density=density, start="sync"))
     if not cap.positions.size:
         raise TrackError("probe sync not found")
     return 8 * int(cap.positions[0]) + int(cap.hidden[0])
@@ -152,19 +152,29 @@ def cells_at(cells0, density):
     return cells0 * bit_rate(density) / bit_rate(0)
 
 
-def revolution_stream(payload, cells):
-    """Bytes to write so ``payload`` lands last on a revolution of ``cells``.
+def revolution_stream(payload, cells, lead=None):
+    """Bytes to write so ``payload`` covers its place on a revolution of ``cells``.
 
-    Filler goes first so the stream covers a fast revolution in whole pages.
+    ``lead`` $55 bytes precede the payload (default: all the filler, so the
+    payload lands last); filler after it fills the stream to whole pages
+    covering a fast revolution, ending before a slow one brings the payload
+    back.
     """
     capacity = int(cells * (1 - MEASURED_TOLERANCE) // 8)
     if len(payload) > capacity:
         raise TrackError(f"{len(payload)} bytes exceed a {capacity} byte revolution")
     cover = int(np.ceil(cells * (1 + MEASURED_TOLERANCE) / 8))
-    total = -(-max(cover, len(payload)) // 256) * 256
+    total = -(-max(cover, len(payload) + (lead or 0)) // 256) * 256
     if total > NPAGES * 256:
         raise TrackError(f"{total} bytes exceed the drive RAM")
-    return bytes([GAP_BYTE]) * (total - len(payload)) + bytes(payload)
+    lead = total - len(payload) if lead is None else lead
+    if total > lead + capacity:
+        raise TrackError(
+            f"a {lead} byte lead lets the {total} byte write reach the payload again;"
+            f" leads of {total - capacity}..{total - len(payload)} fit"
+        )
+    tail = total - lead - len(payload)
+    return bytes([GAP_BYTE]) * lead + bytes(payload) + bytes([GAP_BYTE]) * tail
 
 
 def track_stream(job, data, errors, disk_id, cells0):

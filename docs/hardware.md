@@ -410,7 +410,8 @@ its other subcommands (`nybulah <command> --help`), e.g.
 
 `nybulah pattern` writes a known track and checks every capture path against
 it (`nybulah/analysis/pattern.py`). The pattern is one revolution, regenerated
-from `--halftrack`, `--density` (default: the track's zone) and `--seed`:
+from `--halftrack`, `--density` (default: the track's zone; any density on any
+halftrack), `--seed` and `--region`:
 
 | group | contents | expected |
 |---|---|---|
@@ -422,22 +423,46 @@ from `--halftrack`, `--density` (default: the track's zone) and `--seed`:
 | `gap55` | 64+ $55 bytes ending on a byte boundary | exact, framing |
 | `dos` | 4 DOS sectors (header track `H/2`, ID `NY`) | exact |
 
-It is sized for the shortest revolution within the unmeasured speed tolerance;
-the write measures the drive's cells per revolution, puts $55 filler first and
-the pattern last, so the rest of the revolution is filler starting at the
-write splice. `truth.json` (under `--save`) holds each region's bit offset,
-length and expected bits.
+`--region weak` replaces `weak` by runs of k, 4k, 16k and 64k bytes, k the
+bytes spanning the TB pass's T2 low byte at the density (8, 32, 128, 512 at
+density 0): per length a `noflux<n>` run of $00 and a `badgcr<n>` run of $44
+(zero runs of three, which GCR never writes), each after its own tagged
+40-one sync (`tag<i>`) so it can be found. A run ends with the zero before
+the next sync, since the byte a sync interrupts is never latched.
+
+It is sized for the shortest revolution within the unmeasured speed tolerance.
+The write first measures the drive's cells per revolution at the pattern's
+density (a probe sync, `cells` below), then writes `--lead` $55 bytes (default:
+all the filler, so the pattern comes last), the pattern, and $55 to whole pages
+covering a fast revolution. The lead varies the time from the write's start to
+the pattern's; a lead too short lets the write's end reach the pattern again
+and is refused with the range that fits. `truth.json` (under `--save`) holds
+each region's bit offset, length and expected bits, the density, the measured
+`cells`, the `lead` and the variant.
 
 `verify` aligns each capture to the pattern: FFT cross-correlation places each
 revolution's copy, a banded edit distance then counts per group bit errors,
 insertions and deletions (sync length differences reported apart, per sync as
 written against found), the drift and the $55 byte framing, the revolution
-length read against `--cells`, and the weak region's reads across repeats. Each
-capture is also digested against the latched truth and, for RAM captures, the
-streams (`ramcheck`). RAM captures with a TB pass get a speed trace (byte period
-over `--window` bytes against byte index) with each excursion's start byte,
-peak percent, oscillation period and decay in ms, and its angle from the
-pattern start and, with streams, from the index.
+length read against `--cells`, and per unstable group (`weak`, or each
+`noflux`/`badgcr` run) its instability across repeats (`summary.<path>.unstable`,
+all paths in `summary.unstable_all`). Each capture is also digested against the
+latched truth and, for RAM captures, the streams (`ramcheck`). RAM captures with
+a TB pass get a speed trace (byte period over `--window` bytes against byte
+index) with each excursion's start byte, peak percent, oscillation period and
+decay in ms.
+
+On a 1571, verify takes one more RAM capture whose BITS pass starts at an index
+edge (`ram-index-H.npz`); its aligned start places the index on the pattern.
+Every capture start (`start_angle.index`) and speed excursion (`angle.index`)
+then gets its angle after the index, and `index.pattern_angle` is the pattern
+start's. Stream INDEX metadata is reported per stream (`index`: edges, their
+track positions, how the stream ended) and against that reference
+(`index.stream_edge_offsets`) but not used for it: `drive/stream.s` checks the
+index only while no metadata is due, so behind a SYNC_END waiting out
+continuous data an INDEX can trail its edge by hundreds of bytes. A stream
+whose drive saw no index edge ends `noindex` (END_NOINDEX after its
+two-revolution timeout) with no INDEX; `index.drive_end` lists the ends.
 
 BITS, TB and TS each read their own revolution, so the no-flux `weak` region can
 read as bytes in one pass and as ones run into the `resync` sync in another,
@@ -449,22 +474,57 @@ on its BITS boundary, and where TB slipped unseen TS measures the syncs. The
 speed trace takes only TB intervals the merge placed on single latched bytes.
 Bytes read from no flux are not 8 written cells and can still move it.
 
-1. Write on #8 (homes within `--max-steps` outward steps, never bumps; seeks to
-   H; writes a probe then the pattern on halftrack H side 0 only). Note `cells`.
+`cells` writes a probe sync on `--halftrack` (destroying that halftrack only,
+once per density) and measures the cells per revolution at each of
+`--densities`, with the implied rpm; on a 1571 it also takes a RAM capture
+started at the index, whose two index edges give the index period (µs) and the
+cells it implies at that density. Captures run at 1 MHz (the track code is
+cycle-timed for it), so there is no clock option.
+
+`halftracks` only reads: per halftrack, `--repeats` streams (1571 with s4) and
+RAM captures, each aligned to `--truth` with its copies found, covered exact
+bits, bit errors, slips and `match` (the fraction of covered exact bits read as
+written), which measures cross-talk from the pattern's halftrack. Halftracks
+outside 2..`max_halftrack` (84, `nibbler.MAX_HALFTRACK`, reached without
+touching either stop) are skipped and listed.
+
+Commands, with H the pattern's halftrack, N the homing bound, C the written
+`cells` and T a `truth.json`; drive 8 is the 1571 (s4), drive 10 the 1541:
+
+1. Measure cells per revolution on a scratch halftrack (destroys halftrack S
+   only):
+
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern cells --dev 8 --transport s4 --halftrack S --densities 0 1 2 3 --max-steps N --save /data/artifacts/pattern/cells8
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern cells --dev 10 --transport s3 --halftrack S --densities 0 1 2 3 --save /data/artifacts/pattern/cells10
+   ```
+
+2. Write on #8 (homes within `--max-steps` outward steps, never bumps; seeks to
+   H; writes a probe then the pattern on halftrack H side 0 only). Note `cells`
+   and `lead`. Add `--density D` for a non-zone density, `--lead L` to move the
+   pattern within the write, `--region weak` for the weak variant.
 
    ```sh
    docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern write --dev 8 --transport s4 --halftrack H --max-steps N --save /data/artifacts/pattern/write
    ```
 
-2. Verify on #8 (same homing; reads H only: `--repeats` streams and RAM captures).
+3. Verify on #8 (same homing; reads H only: `--repeats` streams and RAM
+   captures, and one RAM capture from the index), with the same `--density`
+   and `--region` as the write:
 
    ```sh
    docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern verify --dev 8 --transport s4 --halftrack H --max-steps N --repeats 3 --cells C --save /data/artifacts/pattern/dev8
    ```
 
-3. The user moves the disk to #10.
+4. Read neighbouring halftracks against the truth (reads only):
 
-4. Verify on #10 (locates from DOS's track and the headers under the head,
+   ```sh
+   docker run --rm --device=/dev/bus/usb -v "$PWD/artifacts:/data/artifacts" nybulah pattern halftracks --dev 8 --transport s4 --truth /data/artifacts/pattern/write/truth.json --halftracks H-1 H+1 --max-steps N --save /data/artifacts/pattern/near8
+   ```
+
+5. The user moves the disk to #10.
+
+6. Verify on #10 (locates from DOS's track and the headers under the head,
    never bumps, refuses if neither places it; reads H only by RAM captures).
 
    ```sh

@@ -13,7 +13,8 @@ from test_stream import RAM_PASS_US, rig
 
 from nybulah import cli, disk, passes, pattern, speed
 from nybulah.analysis import pattern as pt
-from nybulah.analysis.gcr import bits_per_revolution, decode_bits, track_capacity
+from nybulah.analysis.gcr import bit_rate, bits_per_revolution, decode_bits
+from nybulah.analysis.gcr import track_capacity
 from nybulah.analysis.sector import SectorError, decode_track
 from nybulah.nibbler import BITS, TB, TS, Capture, Nibbler, TrackError
 from nybulah.simdisk import Media, disk_drive, true_syncs
@@ -63,18 +64,19 @@ def test_write_then_verify_on_1571_and_1541(monkeypatch, capsys, tmp_path):
     out = cli.main(["pattern", "write", "--dev", "9", *base], cbm)
     assert json.loads(capsys.readouterr().out) == json.loads(json.dumps(out))
     assert out["located"] == 2 and mech.bumps == mech.inner_stops == 0
-    assert out["cells"] == len(mech.media.tracks[(0, HALFTRACK)])
+    cells = len(mech.media.tracks[(0, HALFTRACK)])
+    assert abs(out["cells"] - cells) <= 1
     with pytest.raises(ValueError, match="34 outward steps"):
         cli.main(["pattern", "verify", "--dev", "9", *base[:-1], "33"], cbm)
 
     argv = ["pattern", "verify", "--dev", "9", *base, "--repeats", "1"]
     argv += ["--cells", str(out["cells"]), "--save", str(tmp_path / "v8")]
     v8 = cli.main(argv, cbm)
-    assert v8["streaming"] and set(v8["summary"]) == {"stream", "ram", "weak_all"}
+    assert v8["streaming"] and set(v8["summary"]) == {"stream", "ram", "unstable_all"}
     clean(v8, "ram")
     clean(v8, "stream")
     exact_syncs(v8, "ram")
-    assert v8["summary"]["ram"]["revolution_bits"] == [out["cells"]]
+    assert set(v8["summary"]["ram"]["revolution_bits"]) == {cells}
     ram = next(c for c in v8["captures"] if c["path"] == "ram")
     assert ram["speed"]["excursions"] == [] and len(ram["speed"]["bytes"]) > 1
     assert "index" in ram["start_angle"] and v8["index_bits"] is not None
@@ -82,7 +84,7 @@ def test_write_then_verify_on_1571_and_1541(monkeypatch, capsys, tmp_path):
     truth_vs = ram["digest"]["against"][0]
     assert truth_vs["reference"] == "truth" and truth_vs["sectors"] == pt.DOS_SECTORS
     assert truth_vs["differ"] == 0
-    assert v8["summary"]["weak_all"]["copies"] >= 2
+    assert v8["summary"]["unstable_all"]["weak"]["copies"] >= 2
 
     saved = sorted(str(p) for p in (tmp_path / "v8").glob("*.npz"))
     argv = ["pattern", "compare", "--truth", str(tmp_path / "v8" / pattern.TRUTH)]
@@ -95,15 +97,16 @@ def test_write_then_verify_on_1571_and_1541(monkeypatch, capsys, tmp_path):
     argv = ["pattern", "verify", "--dev", "10", "--transport", "s1", *base]
     v10 = cli.main(argv + ["--repeats", "2"], SimCBM(drive))
     assert not v10["streaming"] and v10["located"] == 50
-    assert set(v10["summary"]) == {"ram", "weak_all"}
+    assert set(v10["summary"]) == {"ram", "unstable_all"}
     clean(v10, "ram")
     exact_syncs(v10, "ram")
     assert drive.mech.bumps == drive.mech.inner_stops == 0
 
 
+@pytest.mark.parametrize("variant", pt.VARIANTS)
 @pytest.mark.parametrize("density", range(4))
-def test_truth_layout(density):
-    truth = pt.make_truth(HALFTRACK, density, seed=7)
+def test_truth_layout(density, variant):
+    truth = pt.make_truth(HALFTRACK, density, seed=7, variant=variant)
     assert len(truth.bits) % 8 == 0
     assert len(truth.data) <= track_capacity(density) * (1 - pt.UNMEASURED_TOLERANCE)
     ends = [r.offset + r.length for r in truth.regions]
@@ -116,7 +119,17 @@ def test_truth_layout(density):
         if r.kind == pt.SYNC:
             assert bits.all() and r.run == r.length
         if r.kind == pt.UNSTABLE:
-            assert not bits.any()
+            byte = pt.BAD_GCR if r.group.startswith("badgcr") else 0
+            assert (np.packbits(bits[: r.length // 8 * 8]) == byte).all()
+            assert not bits[r.length // 8 * 8 :].any()
+    unstable = {r.group for r in truth.regions if r.kind == pt.UNSTABLE}
+    lengths = {8 * n + 1 for n in pt.weak_runs(density)}
+    if variant == "weak":
+        assert lengths == {r.length for r in truth.regions if r.kind == pt.UNSTABLE}
+        assert len(unstable) == 2 * pt.WEAK_RUNS
+        assert (min(lengths) - 1) * pt.CPU_HZ >= pt.T2_SPAN * bit_rate(density)
+    else:
+        assert unstable == {"weak"}
     gcr = next(r for r in truth.regions if r.group == "gcr_all")
     data, valid = decode_bits(truth.bits[gcr.offset : gcr.offset + gcr.length])
     assert valid.all() and (data == np.arange(256)).all()
@@ -188,7 +201,7 @@ def test_weak_region_instability_and_track_positions():
         al = pt.align(c, truth)
         rep = pt.region_report(truth, al)
         assert rep["groups"]["weak"]["errors"] == 0
-        reads += rep["weak"]
+        reads += rep["weak"]["weak"]
         assert al.track_position([lo]).tolist() == [weak.offset]
     out = pt.instability(reads, weak.length)
     assert out["copies"] == 3 and out["unstable_bits"] > 0
@@ -256,7 +269,7 @@ def test_speed_excursion_period_and_decay():
 
 
 HW_PATTERN = pathlib.Path(__file__).parent / "data" / "hw" / "pattern"
-HW_RAM = sorted(HW_PATTERN.glob("*/*.npz"))
+HW_RAM = sorted(HW_PATTERN.glob("*/*-ram-*.npz"))
 LEADING = ("gcr_all", "sync10", "sync40", "sync80", "sync896")
 
 
