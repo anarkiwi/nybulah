@@ -782,7 +782,7 @@ the 1571's 6526 shows (34).
 The WD177x at `$6000-$6003` runs from 8 MHz, exactly four of its clocks per CPU
 cycle (both divided from Y1 by U10). DRQ and INTRQ are not wired to the CPU; the code
 polls the status register (bit 0 BUSY; bit 1 DRQ, or in the type I status after a
-force interrupt, the live index pulse; bit 2 TR00 in type I status). Index and TR00
+type I command, the live index pulse; bit 2 TR00 in type I status). Index and TR00
 reach the CPU only through that status. Every instruction that touches the WD sits
 at an address whose low two bits are not 00, as the DOS places its own
 (`mfmmacro.src` WDTEST); the assembler checks it. After a command write the code
@@ -806,13 +806,14 @@ cylinder 80).
 ### Stream engine
 
 `mfmstream_1581` runs a list of up to seven entries (`op trk sec rep`): Read
-Address, Read Sector or Read Track, or an index edge wait, each up to 127 times
+Address, Read Sector or Read Track, or an index edge wait (force interrupt, then
+a Seek to the track register's own value so IP is live), each up to 127 times
 (Read Sector optionally advancing the sector). Every byte the WD delivers goes
 straight to the shift register; metadata (CLK asserted) carries a record per command
 (`$0C`: two stamps, the WD status, a timeout flag and the byte count, packed into
 six-bit chunks `%dddddd01`), index stamps (`$1C`), keepalives (`$14`, every 256
 passes of a wait loop: before a command's first DRQ, for an index edge, and for
-busy to clear after a force interrupt; the passes are counted from a counter the stream clears at entry, not timed by timer
+busy to clear after a force interrupt or Seek; the passes are counted from a counter the stream clears at entry, not timed by timer
 B, and 256 of the longest pass fit in the adapter's 20 ms wait for the next byte) and the v12
 END family. `nybulah.mfmstream.MfmStream` parses it. The keepalive interval
 needs firmware v14: v12 and v13 timed out 3.6 ms after a byte, so every 1581
@@ -931,7 +932,7 @@ during a transfer with no gap (`core/ciacore.c:914-929,1736-1790`); it never dro
 a written byte. Where VICE differs the model keeps the datasheet or 1581 hardware
 evidence: VICE accepts any command while busy (`wd1770.c:821-871`; the datasheet
 accepts only Force Interrupt), clears MO and shows live type I bits after an idle
-$D0 (`wd1770.c:799-813,210-214`; the 1581 reads $80 there with T0 clear), drops MO
+$D0 (`wd1770.c:799-813,210-214`; the 1581 reads $80 there with T0 and IP clear), drops MO
 after 10 idle index pulses (`wd1770.c:222`; the datasheet says 9) and delivers the
 1581's fast serial a byte at a time with no SRQ/DATA timing
 (`drive/iec/cia1581d.c:233-239`). As there, an ICR read returns and clears every

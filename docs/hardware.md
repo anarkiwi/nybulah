@@ -887,10 +887,11 @@ to lose only for step 5.
    Measured with firmware v14 (`artifacts/stream-1581-39-v14.npz`): the track
    stream `done`/`done`, 6254 and 6257 bytes, 200226 and 200232 us, Read Track
    status `$84` (Lost Data) on both revolutions and two sector errors in the
-   decode (Read Track's re-framing and the stream's wrap pass: `tools/rtslips.py`, issue #56); the ids stream ended `timeout` at its index wait (`op 0`): the type I
-   status never showed IP: the index op polls after `$D0` only, which leaves IP
-   clear on this WD (`tools/ipprobe.py`, issue #57). The stamps of Read Track, which the WD starts at an index edge, place
-   the index without the wait.
+   decode (Read Track's re-framing and the stream's wrap pass: `tools/rtslips.py`, issue #56).
+   The ids stream's index wait (`op 0`) seeks to the track register's own value
+   after its `$D0`, since an idle `$D0` freezes IP on this WD (`tools/ipprobe.py`,
+   issue #57); it ends `done`/`done` with 24 IDs, no ID CRC errors and three index
+   stamps (`artifacts/issue57/stream-1581-39.npz`).
 5. A whole disk, read (and, on a scratch disk, written and verified):
 
    ```sh

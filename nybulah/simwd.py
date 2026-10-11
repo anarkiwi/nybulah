@@ -33,7 +33,7 @@ WBUMPS, WINNER, WOUTER, WISTOP, WT0MODE, WWP, WDISK, WCHG, WPULSES = range(
 WPER, WIDX, WSPIN, WWLEN, WNT, WCAP, WCHIP, WVIOL, WEARLY, WRNG, WFI = range(
     W0 + 34, W0 + 45
 )
-WCW, WOLD, WFIB, WFBUSY, WT0LIVE, WLEAD, WSLACK = range(W0 + 45, W0 + 52)
+WCW, WOLD, WFIB, WFBUSY, WLIVE, WLEAD, WSLACK = range(W0 + 45, W0 + 52)
 WID = W0 + 52
 WLW = WID + 6
 WEND = WLW + 4
@@ -231,7 +231,7 @@ def start(w, m, c):
     cmd = w[WCMD]
     mo_idle(w, c)
     w[WTYPE] = 1 if cmd < 0x80 else (2 if cmd < 0xC0 else 3)
-    w[WT0LIVE] = w[WTYPE] == 1
+    w[WLIVE] = w[WTYPE] == 1
     w[WSTAT] = BUSY
     w[WN] = w[WIP] = w[WSYN] = w[WCRCN] = 0
     spin = not cmd & H_FLAG and not w[WMO]
@@ -596,7 +596,8 @@ def status(w, c):
     if w[WTYPE] != 1:
         return w[WSTAT] & ~MO | mo
     v = w[WSTAT] & (BUSY | CRCE | RNF) | mo | (SU if w[WSU] else 0)
-    v |= (T0 if w[WT0LIVE] and tr00(w) else 0) | (IP if index_pulse(w, c) else 0)
+    if w[WLIVE]:
+        v |= (T0 if tr00(w) else 0) | (IP if index_pulse(w, c) else 0)
     return v | (WPROT if w[WWP] else 0)
 
 
@@ -631,8 +632,8 @@ def wd_read(w, m, reg, c, pc):
 @kernel
 def force(w, c):
     """Force Interrupt: end a command (status kept) or show type I status without T0
-    until a type I command runs (ds status note 4: T0 is polled after a type I command;
-    1581 hardware reads $80 idle on cylinder 0), which a $D0
+    and IP until a type I command runs (ds status note 4: T0 is polled after a type I
+    command; 1581 hardware reads $80 idle on cylinder 0 and no IP edge, ipprobe), which a $D0
     written while idle holds back for WFBUSY cycles: busy with the type I bits clear
     (1581 hardware; the datasheet gives no duration, the DOS waits for busy to clear,
     msub.src wdabort)."""
@@ -641,7 +642,7 @@ def force(w, c):
         done(w, c)
     else:
         w[WTYPE], w[WSTAT], w[WSU], w[WFIB] = 1, 0, 0, c + w[WFBUSY]
-        w[WT0LIVE] = 0
+        w[WLIVE] = 0
 
 
 @kernel
