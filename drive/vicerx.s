@@ -15,8 +15,10 @@
 ; cycles given up ($D030): a poll is 11 cycles, a byte taken 23.
 ;
 ; n is X plus 256 times the pages done; the page counters sit in the store
-; instructions, whose data page address the word at $1303 gives. Stores stop
-; when DATA reaches LINES (the loop then spins on full).
+; instructions, whose data page address the word at $1303 gives. Stepping the
+; page reads port A between its stores, so no two port reads are further
+; apart than a byte taken: the next byte's CLK window is never skipped. Stores
+; stop when DATA reaches LINES (the loop then spins on full).
 
         .setcpu "6502"
 
@@ -76,9 +78,13 @@ sline:  sta LINES,x                     ; 5
 sdata:  sta DATA,x                      ; 5
         inx                             ; 2
         bne next                        ; 3
-        inc sline + 2
-        inc sdata + 2
-        lda sdata + 2
-        cmp #>LINES
-        bne next
+        lda #$FF                        ; 2
+        and CIA2_PRA                    ; 4
+        inc sline + 2                   ; 6
+        and CIA2_PRA                    ; 4
+        inc sdata + 2                   ; 6
+        and CIA2_PRA                    ; 4
+        ldy sdata + 2                   ; 4
+        cpy #>LINES                     ; 2
+        bne loop                        ; 3
 full:   jmp full
