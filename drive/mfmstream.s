@@ -338,6 +338,14 @@ keepcnt:
         sta count + 1
         rts
 
+; Force interrupt (fwait) or command A (cwait), then busy clear with
+; housekeeping; C set on the timeout.
+fwait:  lda #WD_FORCE
+cwait:  jsr wdcmd
+        lda #0
+        ldx #ST_BUSY
+        jmp bwait
+
 ; State at the end of the first block (nybulah.r1581.STATE_AT), cleared when
 ; the stream starts and readable after it ends, also over DOS M-R once the
 ; monitor has left: first is set by a command's first data byte; stat holds
@@ -497,14 +505,17 @@ bab:    pla
         pla
         jmp abort
 
-; Force interrupt, then busy clear with housekeeping; C set on the timeout.
-fwait:  lda #WD_FORCE
-        jsr wdcmd
-        lda #0
-        ldx #ST_BUSY
-        jmp bwait
-
+; An idle force interrupt freezes IP in the type I status until a type I
+; command runs, so the wait first seeks to the track register's own value
+; (no step pulse; mfm.s status1).
 index:  jsr fwait
+        bcs itmo
+        WDTEST
+        lda WDTRK
+        WDTEST
+        sta WDDAT
+        lda #WD_SEEK
+        jsr cwait
         bcs itmo
         lda #0
         ldx #ST_IP

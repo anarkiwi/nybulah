@@ -477,14 +477,30 @@ def test_force_interrupt(media):
     kept = wd.read(0, REV // 2 + 2 + simwd.STATUS_VALID)
     assert not kept & BUSY and kept & ~MO == st & ~(MO | BUSY)
     wd.write(0, FORCE, REV)
-    assert wd.read(0, REV + 100) & (T0 | IP | BUSY) == IP
-    assert not wd.read(0, REV + 9000) & IP
+    assert not wd.read(0, REV + 100) & (T0 | IP | BUSY)
     wd.write(0, FORCE, REV + 9010)
     wd.write(0, READ_SECTOR, REV + 9020)
     assert wd.early == 1 and wd.busy
     wd.write(0, FORCE, REV + 9100)
     wd.write(1, 9, REV + 9200)
     assert wd.read(1, REV + 9210) == 9 and wd.early == 2
+
+
+def test_idle_force_interrupt_freezes_ip_until_a_type_i_command(media):
+    """1581 hardware (ipprobe): no IP edge after an idle $D0, even straight after a
+    Seek; a zero-step Seek makes IP live again, MO up or down."""
+    wd = drive(media)
+    c = REV + 100
+    wd.write(0, FORCE, c)
+    assert not any(wd.read(0, c + k * 500) & IP for k in range(1, 2 * REV // 500))
+    c += 2 * REV
+    wd.write(3, wd.track, c)
+    _, _, c, st = command(wd, SEEK, c + simwd.FORCE_GAP)
+    assert not st & BUSY
+    seen = [bool(wd.read(0, c + k * 500) & IP) for k in range(2 * REV // 500)]
+    assert seen.count(True) > 0 and seen.count(False) > 0
+    wd.write(0, FORCE, c + 2 * REV)
+    assert not any(wd.read(0, c + 2 * REV + k * 500) & IP for k in range(1, REV // 500))
 
 
 def test_spin_up_sequence_and_motor_timeout(media):
