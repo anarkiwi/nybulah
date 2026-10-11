@@ -12,6 +12,7 @@ M1581_PROTO_s4 := 5
 MFM := $(if $(wildcard mfm.s),mfm) $(if $(wildcard mfmstream.s),mfmstream)
 BINS := $(PROTOS:%=$(OUT)/monitor_s%.bin) $(TRACK_MODELS:%=$(OUT)/track_%.bin) \
 	$(OUT)/sense_1571.bin $(OUT)/seek_1571.bin $(OUT)/stream_1571.bin \
+	$(OUT)/tss_1571.bin \
 	$(if $(wildcard proto_xb.inc),$(OUT)/monitor_xb.bin) \
 	$(if $(wildcard proto_srq.inc),$(OUT)/monitor_s4.bin $(OUT)/ciaprobe.bin) \
 	$(M1581:%=$(OUT)/monitor_%_1581.bin) $(OUT)/ciaprobe_1581.bin \
@@ -101,12 +102,17 @@ $(OUT)/stream_1571.bin: stream.s stream.cfg wdtest.inc
 	ld65 -C stream.cfg -S '$$$(TRACK_BASE)' -o $@ $(OUT)/stream_1571.o
 	rm -f $(OUT)/stream_1571.o
 
+$(OUT)/tss_1571.bin: tss.s tss.cfg wdtest.inc
+	ca65 -t none -o $(OUT)/tss_1571.o $<
+	ld65 -C tss.cfg -S '$$$(TRACK_BASE)' -o $@ $(OUT)/tss_1571.o
+	rm -f $(OUT)/tss_1571.o
+
 $(OUT)/sense_1571.bin: sense.s sense.cfg
 	ca65 -t none -o $(OUT)/sense_1571.o $<
 	ld65 -C sense.cfg -S '$$6000' -o $@ $(OUT)/sense_1571.o
 	rm -f $(OUT)/sense_1571.o
 
 clean:
-	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/sdrgap*.bin $(OUT)/ipprobe_*.bin $(OUT)/rtpoll_*.bin $(OUT)/mfm*.bin $(OUT)/ramtest_*.bin $(OUT)/vicerx_*.bin
+	rm -f $(OUT)/monitor_*.bin $(OUT)/track_*.bin $(OUT)/sense_*.bin $(OUT)/tss_*.bin $(OUT)/stream_*.bin $(OUT)/seek_*.bin $(OUT)/ciaprobe*.bin $(OUT)/sdrgap*.bin $(OUT)/ipprobe_*.bin $(OUT)/rtpoll_*.bin $(OUT)/mfm*.bin $(OUT)/ramtest_*.bin $(OUT)/vicerx_*.bin
 
 .PHONY: all clean

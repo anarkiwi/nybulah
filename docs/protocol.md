@@ -601,6 +601,64 @@ SYNC_START follows INDEX in the stream belongs to the next revolution
 gives overrun, a silent drive a timeout with ATN, and multi-revolution streams
 merge on their index edges.
 
+## 1571 sync sensor pass (drive/tss.s)
+
+A stream reads SYNC only between bytes, so a pulse of one or two cells can
+fall between its reads (issue #59). The sensor pass reads nothing but SYNC
+and byte ready: `Nibbler.sense_syncs` loads `tss_1571.bin` at `$0300` over the
+seek code, switches the drive to 2 MHz (s4) and calls it; the drive records
+every SYNC pulse with VIA1 T2 stamps and the byte-ready count since the
+previous record, and every rising index edge, as 8-byte records in expansion
+RAM `$6000-$7FFF` (1024 records). The pass ends at the `revolutions + 1`th
+rising edge, when the records are full (`full`), when a SYNC pulse or an
+idle stretch outlasts the wait budget (`killer`, `timeout`), or at once when
+the drive is not at 2 MHz (`slow`). `tss.Sensed.attach` puts the pass on a
+stream capture of the track: `Capture.records` holds it, and the capture's
+syncs come from both, the narrower bounds deciding. `syncprobe` streams and
+senses one track (`--sense N` revolutions, `--table` per sync, `--save`).
+
+Record: kind, stamp a (lo, hi), stamp b (lo, hi), count (lo, hi), 0.
+Kinds 1-4 are short pulses, SYNC high again at the seen sequence's poll of
+that number; 5 a long pulse with a = start and b = end; 6 an index edge
+with a = the stamp after the WD1770 read that saw it.
+
+Cycles at 2 MHz, R = the read that saw SYNC low. The idle loop reads SYNC
+every 6 or 8 cycles (11 at its turn of 8 reads) with byte ready every 26;
+the byte path reads it 13 apart. The seen sequence polls at R+7, R+17,
+R+26 and R+36, reading the start stamp lo at R+13 and hi at R+32, and the
+release loop polls every 6 (11 per 4) from R+50; the end stamp lo is read 7
+after the poll that saw SYNC high, hi 4 after lo. A short kind reads its
+stamp lo 14 (kind 1) or 13 cycles after R and hi 12, 19, 28 or 19 after lo
+(`tss.STAMP_LO`, `STAMP_HI`). A record store reads no SYNC for about 140
+cycles (`TAIL_BLIND`) and the index level change path for 29, so a pulse of
+two cells (12.6 cycles at zone 3, 310 rpm) is seen unless it starts within
+two bytes of the previous record or at an index level change, and a one-cell
+pulse when a read falls inside it (in simulation about half at the fastest
+cell, four fifths at zone 2). Byte ready is sampled at most 32 cycles apart
+in the idle loop and 45 from a record's count store on, and nothing between
+two samples touches V (no `adc`, `sbc`, `bit` or `plp`), so the counts are
+exact at a byte period of 50 cycles or more. The index is polled every
+eighth byte, so an index record is up to 8 bytes late.
+
+Host decoding (`nybulah/tss.py`): `Records.pulses(cell)` gives each sync's
+bytes since the pass start and its SYNC low cycles with inclusive bounds:
+a short kind k lies in `(PREV[k], EXIT[k] + 13]`, a long one in
+`P - R - (11 or 14), P - R + 13]` with P the release read; a sync whose
+count leaves it inside the previous record's blind tail gets the tail added
+to its upper bound, and a sync already low at the pass's first read is
+unbounded. `tss.place` lands the syncs on a stream's bytes like TS syncs
+(`passes._events_offsets`, anchored at the first index records of both),
+with a placement falling by at most 8 bytes between syncs since the counts
+are exact; a sync at the stream's last byte has no position and counts as
+unmatched.
+
+`tests/test_tss.py` senses DOS tracks at every zone at 300 and 310 rpm and
+random tracks of 10 to 40 ones at zone 3 on the timed 1571: every pulse of
+two cells or more is recorded with the true width inside its bounds, the
+byte counts and stamps follow the mechanism log exactly, index records are a
+revolution apart, the sensed syncs land on the stream's true positions, and
+the full, killer, timeout and 1 MHz ends return their status.
+
 ## 1581 (monitor_*_1581, firmware v10-v12 unchanged)
 
 The 1581 speaks the same transports at 2 MHz with the adapter's 2 MHz timings (`x2`

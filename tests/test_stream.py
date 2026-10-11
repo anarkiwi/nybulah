@@ -459,9 +459,9 @@ def test_start_lag_follows_latched_ones():
     assert prompt == fmt.NW_POLL / 2
 
 
-def probe_rig(monkeypatch, g64, halftrack):
+def probe_rig(monkeypatch, media, halftrack, **kw):
     """streamprobe against the timed 1571; returns (cbm, mechanism)."""
-    cbm, mech, nib = rig(Media.from_g64(g64), halftrack=halftrack)
+    cbm, mech, nib = rig(media, halftrack=halftrack, **kw)
     monkeypatch.setattr(streamprobe, "identify_model", lambda cbm, dev: "1571")
     monkeypatch.setattr(
         streamprobe, "Monitor", lambda cbm, dev, proto: contextlib.nullcontext(nib.mon)
@@ -477,7 +477,7 @@ def probe_rig(monkeypatch, g64, halftrack):
 
 
 def test_streamprobe_homes_then_streams(monkeypatch, capsys, g64, tmp_path):
-    cbm, mech = probe_rig(monkeypatch, g64, 9)
+    cbm, mech = probe_rig(monkeypatch, Media.from_g64(g64), 9)
     path = tmp_path / "p.npz"
     out = cli.main(
         ["streamprobe", "--dev", "9", "--halftrack", "4", "--save", str(path)], cbm
@@ -491,7 +491,7 @@ def test_streamprobe_homes_then_streams(monkeypatch, capsys, g64, tmp_path):
 
 
 def test_streamprobe_refusals(monkeypatch, g64):
-    cbm, mech = probe_rig(monkeypatch, g64, 36)
+    cbm, mech = probe_rig(monkeypatch, Media.from_g64(g64), 36)
     with pytest.raises(ValueError, match="34 outward steps"):
         cli.main(["streamprobe", "--dev", "9", "--max-steps", "33"], cbm)
     assert mech.halftrack == 36 and mech.bumps == 0
