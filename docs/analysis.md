@@ -396,7 +396,12 @@ edit v1.3), and the 1581 DOS 318045-01 sources `mrout.src` (`fmtrk`),
 **Media and Read Track.** A track is `(data, mark)` bytes from the index;
 `mark` flags A1*/C2* bytes written without a clock. Read Track output carries
 no `mark`. The WD resynchronises on every A1*/C2*, so the first sync byte may
-come out misframed. `find_marks` therefore accepts two A1 bytes before an ID
+come out misframed. `read_track_view` gives the bytes and end cells Read Track
+delivers for a revolution of media (`simwd` follows it): a byte per 16 cells,
+the count restarting at every $4489/$5224 sync word at any cell phase; a sync
+`SYNC_BYTE_CELLS` (7) or more cells after the last restart delivers the data
+bits at the old phase, so in phase the C2 pattern across $00 A1* reads $14
+and the three A1* read as two A1. `find_marks` therefore accepts two A1 bytes before an ID
 mark ($FC–$FF) or a data mark ($F8–$FB), and two C2 bytes before $FC (index
 mark). `decode_track` accepts fields in order, as the WD does: a mark inside an
 accepted field is data. A data mark less than 43 bytes after an ID's CRC

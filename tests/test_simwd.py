@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from nybulah import simcia, simwd
-from nybulah.analysis.crc import crc16
+from nybulah.analysis import mfm
+from nybulah.analysis.crc import SYNC3, crc16
 from nybulah.simwd import BUSY, CRCE, DRQ, IP, LD, MO, RNF, RT, SU, T0, WPROT
 from nybulah.simwd import MfmMedia, Wd, fmtrk_stream, stream_track
 
@@ -328,23 +329,50 @@ def test_read_track_is_one_revolution_from_an_index_leading_edge(media, phase):
     wd = drive(media)
     c0 = REV + int(phase)
     data, seen, _, st = command(wd, READ_TRACK, c0, poll=8)
-    track, _, _ = wd.media.track(0, 1)
-    edge = index_edges(c0, 1)[0]
-    assert data == track.tobytes() and not st & LD
-    assert edge + 64 <= seen[0] < edge + 64 + 8
-    assert seen[-1] < edge + REV + 8
+    track, mark, _ = wd.media.track(0, 1)
+    view, ends = mfm.read_track_view(track, mark)
+    due = index_edges(c0, 1)[0] - (-ends * REV // (16 * len(track)))
+    assert data == view.tobytes() and not st & LD and (np.diff(ends) < 16).any()
+    assert np.all((due <= seen) & (seen < due + 8))
 
 
 def test_weak_bytes_read_random(media):
     wd = drive(media)
     data, mark, weak = wd.media.track(1, 1)
-    weak[1000:1100] = True
+    data[1000:1100], weak[1000:1100] = 0, True
     wd.media.set_track(1, 1, data, mark, weak)
+    view, ends = mfm.read_track_view(data, mark)
     c = seek(wd, 1)
     first, _, c, _ = command(wd, READ_TRACK, c, poll=8)
     second, _, _, _ = command(wd, READ_TRACK, c, poll=8)
-    assert first[:1000] == second[:1000] and first[1000:1100] != second[1000:1100]
-    assert first[1100:] == second[1100:]
+    a, b = np.frombuffer(first, np.uint8), np.frombuffer(second, np.uint8)
+    clear = (ends <= 16 * 1000) | (ends > 16 * 1101)
+    assert len(a) == len(b) == len(view) and (a != b).any()
+    assert np.array_equal(a[clear], view[clear]) and np.array_equal(
+        b[clear], view[clear]
+    )
+
+
+def test_read_track_reframe_gives_a_short_drq_interval(media):
+    """The hardware ID FE 27 01 01 02 9B 3C holds an off-phase C2 sync ending 7 cells
+    after the 02: the sync byte $14 follows it by 28 cycles, losing it if unread."""
+    wd = drive(media)
+    data, mark, _ = wd.media.track(0, 1)
+    idam = mfm.find_marks(data, mark)[0][0]
+    data[idam : idam + 7] = [0xFE, 0x27, 0x01, 0x01, 0x02, 0x9B, 0x3C]
+    wd.media.set_track(0, 1, data, mark)
+    view, ends = mfm.read_track_view(data, mark)
+    i = int(np.searchsorted(ends, 16 * (idam + 5)))
+    assert view[i : i + 4].tobytes() == bytes([0x02, 0x14, 0x04, 0x19])
+    assert ends[i + 1] - ends[i] == 7 and crc16(data[idam : idam + 7], SYNC3) == 0
+    t = REV - (-ends[i] * REV // (16 * len(data)))
+    wd.write(0, READ_TRACK, 100)
+    for c in range(100 + simwd.STATUS_VALID, t, 8):
+        if wd.read(0, c) & DRQ:
+            wd.read(3, c)
+    assert wd.read(0, t - 1) & (DRQ | LD) == 0 and wd.read(0, t) & (DRQ | LD) == DRQ
+    assert wd.read(0, t + 27) & (DRQ | LD) == DRQ
+    assert wd.read(0, t + 28) & (DRQ | LD) == DRQ | LD and wd.read(3, t + 28) == 0x14
 
 
 def test_write_track_formats_as_the_encoder_does():
@@ -586,5 +614,8 @@ def test_media_tracks_and_capacity():
     wd = Wd(media, cylinder=1)
     wd.control(0, MOTOR_ON | HEAD0)
     data, seen, _, _ = command(wd, READ_TRACK, 0, poll=4)
-    assert data == track[0].tobytes()
-    assert abs((seen[-1] - seen[0]) / (len(seen) - 1) - media.period / 7000) < 0.01
+    view, ends = mfm.read_track_view(*track)
+    assert data == view.tobytes()
+    assert (
+        abs((seen[-1] - seen[0]) / (ends[-1] - ends[0]) - media.period / 112000) < 0.01
+    )

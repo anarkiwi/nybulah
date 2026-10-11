@@ -394,6 +394,17 @@ both sides ending `$84` throughout: side 0's only bad field is sector 1's data
 re-framing at its false sync (40/40), side 1's sector 1's ID (24/40)
 (`artifacts/issue56/rtslips-fix-1581-39-s{0,1}.json`).
 
+`mfm.read_track_view` against those captures (fixture `tests/data/rt1581`):
+both fields re-frame in every revolution, and the following bytes equal the
+model. The byte at the sync is the old phase's data bits (`$14` for both
+false C2 syncs, the clock bits of `$5224`). Side 0 sector 1's data: 20/40
+exact, 19/40 lost the byte 9 cells (36 cycles) before the sync byte, 1/40
+had no sync byte. Side 1 sector 1's ID: 10/40 exact, 24/40 lost the byte 7
+cells (28 cycles) before, 6/40 had no sync byte. Before every A1*-run the
+C2 pattern across $00 A1* re-frames: in phase it reads `$14` (85%) or
+nothing; a restart 4 or 5 cells after a byte or sync never delivered one.
+The model delivers the sync byte from 7 cells on, always.
+
 ```sh
 python tools/drqwait.py --rpm 297 300 303
 ```

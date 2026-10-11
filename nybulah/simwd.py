@@ -11,6 +11,7 @@ import numpy as np
 from numba import njit
 
 from .analysis.crc import SYNC3, TABLE
+from .analysis.mfm import SYNC_BYTE_CELLS, data_bits, is_sync, mfm_word
 
 CPU_HZ = 2_000_000  # sm schematic sheet 2: 16 MHz Y1 / 74LS93 U10 = PHI0 2 MHz
 MFM_BPS = 250_000  # ds general description: double density data rate
@@ -36,8 +37,8 @@ WPER, WIDX, WSPIN, WWLEN, WNT, WCAP, WCHIP, WVIOL, WEARLY, WRNG, WFI = range(
 WCW, WOLD, WFIB, WFBUSY, WLIVE, WLEAD, WSLACK = range(W0 + 45, W0 + 52)
 WID = W0 + 52
 WLW = WID + 6
-WDRQT, WWIN, WWAIT = WLW + 4, WLW + 5, WLW + 6
-WEND = WLW + 7
+WDRQT, WWIN, WWAIT, WFRAME = WLW + 4, WLW + 5, WLW + 6, WLW + 7
+WEND = WLW + 8
 
 IDLE, STEP, DELAY, SPIN, RTWAIT, WTWAIT = range(6)
 IDSRCH, IDFLD, DAMSRCH, RDATA, RTDATA, WGAP, WDATA, WTFIRST, WTDATA = range(6, 15)
@@ -126,16 +127,41 @@ def rnd(w):
 
 
 @kernel
-def get(w, m, j):
-    """(value, mark) of byte j under the head; weak bytes and no media read random."""
+def raw(w, m, j):
+    """(value, flags) of byte j under the head as stored; no media is weak."""
     t = tkey(w)
     if t < 0:
-        return rnd(w), 0
+        return 0, WEAK
     i = 2 * w[WNT] + t * w[WCAP] + j
-    f = np.int64(m[i + w[WNT] * w[WCAP]])
-    if f & WEAK:
-        return rnd(w), 0
-    return np.int64(m[i]), f & MARK
+    return np.int64(m[i]), np.int64(m[i + w[WNT] * w[WCAP]])
+
+
+@kernel
+def get(w, m, j):
+    """(value, mark) of byte j under the head; weak bytes and no media read random."""
+    v, f = raw(w, m, j)
+    return (rnd(w), 0) if f & WEAK else (v, f & MARK)
+
+
+@kernel
+def cells3(w, m, n, j):
+    """Cells of bytes j..j+2 (mod n) under the head, and a mask of the weak ones."""
+    p, _ = raw(w, m, (j - 1) % n)
+    x = weak = 0
+    for k in range(3):
+        v, f = raw(w, m, (j + k) % n)
+        x, p = x << 16 | mfm_word(v, p & 1, f & MARK), v
+        weak |= (1 if f & WEAK else 0) << k
+    return x, weak
+
+
+@kernel
+def word(x, weak, j, e):
+    """The 16 cells of cells3(.., j) ending at cell e, -1 over a weak byte."""
+    s = e - 16 - 16 * j
+    if weak >> s // 16 & 1 or weak >> (s + 15) // 16 & 1:
+        return -1
+    return x >> 32 - s & 0xFFFF
 
 
 @kernel
@@ -374,13 +400,36 @@ def index_event(w, m, b, n, t):
             w[WSU], w[WN] = 1, 0
             go(w, m, t)
     elif ph == RTWAIT:
-        w[WPH], w[WN] = RTDATA, 0
+        w[WFRAME] = 16 * b
+        rt_event(w, m, 16 * b, n, t)
     else:
         key, size = tkey(w), w[WWLEN]
         if key >= 0:
             m[2 * key], m[2 * key + 1] = size & 0xFF, size >> 8
         w[WPH], w[WN], w[WB] = WTDATA, 0, b // n * size + 1
         track_slot(w, m, 0, t)
+
+
+@kernel
+def rt_event(w, m, e, n, t):
+    """Read Track at cell e: a byte per 16 cells, the count restarting at a sync word at
+    any phase (a sync SYNC_BYTE_CELLS on delivers the data bits at the old phase); weak
+    cells read random; the index ends it (mfm.read_track_view)."""
+    j = (e - 17) // 16
+    x, weak = cells3(w, m, n, j)
+    b, v = e - w[WFRAME], word(x, weak, j, e)
+    if b == 16 or b >= SYNC_BYTE_CELLS and is_sync(v):
+        v = word(x, weak, j, e - (b & 1))
+        deliver(w, rnd(w) if v < 0 else data_bits(v), t)
+    if w[WPH] == RTWAIT:
+        w[WPH] = RTDATA
+    elif e % (16 * n) == 0:
+        done(w, t)
+        return
+    k = 1
+    while k < 16 and not is_sync(word(x, weak, j, e + k)):
+        k += 1
+    w[WFRAME], w[WB] = e, min(e + k, (e // (16 * n) + 1) * 16 * n)
 
 
 @kernel
@@ -465,11 +514,6 @@ def read_event(w, m, b, n, t):
     """Byte (b - 1) % n assembled at boundary b while reading."""
     v, mk = get(w, m, (b - 1) % n)
     ph = w[WPH]
-    if ph == RTDATA:
-        deliver(w, v, t)
-        if b % n == 0:
-            done(w, t)
-        return
     if ph == RDATA:
         data_byte(w, v, t)
         return
@@ -560,7 +604,8 @@ def due(w, m):
         return NEVER
     if ph <= DELAY or ph == WTFIRST:
         return w[WT]
-    return at(w, w[WB], tlen(w, m, tkey(w)))
+    n = tlen(w, m, tkey(w))
+    return at(w, w[WB], 16 * n) if ph == RTDATA else at(w, w[WB], n)
 
 
 @kernel
@@ -576,9 +621,11 @@ def event(w, m, t):
     else:
         b, n = w[WB], tlen(w, m, tkey(w))
         w[WB] = b + 1
-        if ph <= WTWAIT:
+        if ph == RTDATA:
+            rt_event(w, m, b, n, t)
+        elif ph <= WTWAIT:
             index_event(w, m, b, n, t)
-        elif ph <= RTDATA:
+        elif ph < RTDATA:
             read_event(w, m, b, n, t)
         else:
             write_event(w, m, b, n, t)

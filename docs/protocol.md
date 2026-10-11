@@ -931,7 +931,9 @@ VICE (GPL, read for behaviour only) agrees with the model on Read Track: the
 command is matched on its top four bits, so `$E8` is Read Track with h set
 (`drive/iec/wd1770.c:119,137`); BUSY rises 24 us after the write and MO with it
 (`wd1770.c:230-250`); bytes start at the first index edge after the command and stop
-at the next (`wd1770.c:638-672`). Its 8520 loads a written SDR byte two cycles
+at the next (`wd1770.c:638-672`). VICE delivers the media bytes on the byte grid;
+`simwd` delivers `mfm.read_track_view`: a byte per 16 cells, the count restarting at
+every A1/C2 sync word at any cell phase, at cell-accurate times. Its 8520 loads a written SDR byte two cycles
 later, flags it two cycles after the eighth CNT fall and chains a byte written
 during a transfer with no gap (`core/ciacore.c:914-929,1736-1790`); it never drops
 a written byte. Where VICE differs the model keeps the datasheet or 1581 hardware
