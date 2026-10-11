@@ -120,8 +120,8 @@ force:  lda #WD_FORCE
         rts
 
 
-; Send one queued byte, the WD idle: CLK from 4 before the write to 16
-; after; returns 40 after it.
+; Send one queued byte, the WD idle: CLK from 4 before the write to 26
+; after (inside the shifter's 39); returns 40 after it.
 plain:  ldy qhead
         ldx q,y
         iny
@@ -131,14 +131,15 @@ plain:  ldy qhead
         lda #PB_CLK | PB_FSDIR
         sta CIA_PB                      ; t = -4
         stx CIA_SDR                     ; t = 0
-        ldy #2
+        ldy #4
 :       dey
         bne :-
         lda #PB_FSDIR
-        sta CIA_PB                      ; t = 16
-        ldy #3
+        sta CIA_PB                      ; t = 26
+        ldy #1
 :       dey
         bne :-
+        nop
         rts                             ; t = 40
 
 ; Before the command's first DRQ: ATN, wraps, one queued byte or a

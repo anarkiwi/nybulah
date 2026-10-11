@@ -842,7 +842,7 @@ throughout at 56; `simwd` drops it after `DRQ_WINDOW` = 41):
 | first byte, from `w0` | 40 (31 + 9, `w0b` after a pass that counts a wrap; 36 around a KEEP) | 41 | 1 |
 | second byte (a byte time after the first) | 31 after `dfirst`, 37 after `s4`, 27 after `s28` | 41 | 4 |
 | backlog | writes 40 or 41 apart against bytes 64 apart | | drains 23 cycles a byte |
-| CLK for metadata | asserted at -4, released at 16 to 24 | adapter samples 4-14 | 2 cycles |
+| CLK for metadata | asserted at -4, released at 19 to 24 (`send`), 26 (`plain`, which the VICE receiver, polling every 11 cycles and 23 per byte taken, needs) | adapter samples 4-14 | 5 cycles |
 | ATN seen | every pass of `dl` and `w0` | adapter holds ATN 8622 us | |
 
 Wraps are counted from timer B itself, as in `mfm_1581` (see "Without

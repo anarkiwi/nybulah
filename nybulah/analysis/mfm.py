@@ -159,7 +159,7 @@ def mfm_word(v, prev, mark):
     for i in range(7, -1, -1):
         d = v >> i & 1
         x, prev = x << 2 | (1 - (prev | d)) << 1 | d, d
-    if mark and (v == A1 or v == C2):
+    if mark and v in (A1, C2):
         x &= ~(1 << 15 - MISSING_CLOCK[1 if v == C2 else 0])
     return x
 
