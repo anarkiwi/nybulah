@@ -324,7 +324,11 @@ Sources: drive side `drive/proto_srq.inc` (`monitor_s4.bin`, command loop
   DOS clears only on UNLISTEN/UNTALK; an idle 1581 does the same (`irq.src`,
   `sieee.src`) and while the flag is set answers a TALK over its shift register.
   `Monitor.stop` therefore sends UNLISTEN after every s4 session; drives under s4
-  clear their own ICR before returning to DOS.
+  clear their own ICR before returning to DOS. The same SRQ traffic switches an
+  idle 1571's DOS to 2 MHz (VIA1 PA5), as a 1581 s4 session on the bench leaves
+  it (#58). Every link times its first byte to the drive's clock, so
+  `Monitor.start` reads PA5 through DOS (`M-R $180F`) and runs the session at
+  that clock, and `Monitor.stop` returns the drive to DOS at it.
 
 ### Session and commands
 

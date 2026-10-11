@@ -1,11 +1,20 @@
 import struct
 
 import pytest
-from xsim import FIRMWARE, SPARE, assert_returned, rand, session, steady_cycles, trace
+from xsim import (
+    FIRMWARE,
+    SPARE,
+    ZP,
+    assert_returned,
+    rand,
+    session,
+    steady_cycles,
+    trace,
+)
 
 from nybulah import simx
-from nybulah.fastx import CHUNK, ChecksumError, XBLink, xsum
-from nybulah.monitor import CLOCK_HZ, WATCHDOG_S, Monitor
+from nybulah.fastx import CHUNK, PA_2MHZ, ChecksumError, XBLink, xsum
+from nybulah.monitor import CLOCK_HZ, VIA1_ORA, WATCHDOG_S, Monitor
 from nybulah.opencbm import IEC_CLOCK, IEC_DATA, OpenCBMError
 from nybulah.sim import HostGone
 
@@ -279,6 +288,24 @@ def test_1571_switches_to_2mhz_and_back(fw):
     mon.stop()
     cbm.settle()
     assert cbm.drive.cyc == 1.0
+    assert_returned(cbm)
+
+
+def test_1571_session_keeps_dos_at_2mhz():
+    cbm = simx.make("1571", 1.0, dev=9)
+    cbm.drive.load(0x30, ZP)
+    cbm.drive.write(VIA1_ORA, cbm.drive.read(VIA1_ORA) | PA_2MHZ)
+    mon = Monitor(cbm, 9, "s3")
+    idle = mon.idle_s
+    mon.start()
+    assert mon.link.fast and mon.idle_s == idle / 2
+    data = rand(0x100, 3)
+    mon.write(0x6000, data)
+    assert mon.read(0x6000, len(data)) == data
+    mon.set_fast(False)
+    mon.stop()
+    cbm.settle()
+    assert cbm.drive.cyc == 0.5 and mon.link.rejects == 0
     assert_returned(cbm)
 
 
