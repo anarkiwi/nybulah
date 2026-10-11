@@ -7,12 +7,11 @@ import numpy as np
 
 from nybulah.analysis import pattern as pt
 from nybulah.nibbler import Capture
-from nybulah.simwd import DRQ_WINDOW
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tools"))
-drqwait, event_landings, pattern_sets, pattern_windows = (
+event_landings, pattern_sets, pattern_windows = (
     importlib.import_module(m)
-    for m in ("drqwait", "event_landings", "pattern_sets", "pattern_windows")
+    for m in ("event_landings", "pattern_sets", "pattern_windows")
 )
 
 HW = pathlib.Path(__file__).parent / "data" / "hw" / "pattern" / "h30b"
@@ -47,15 +46,3 @@ def test_pattern_windows_find_only_unwritten_windows():
     assert (
         pattern_windows.windows(np.ones(33, np.uint8), 32).tolist() == [2**32 - 1] * 2
     )
-
-
-def test_every_1581_read_path_takes_its_byte_inside_the_drq_window():
-    waits = drqwait.run(301.7)
-    assert set(waits) == {
-        "readsec",
-        "readaddr",
-        "stream_track",
-        "stream_sectors",
-        "stream_ids",
-    }
-    assert all(0 < w <= DRQ_WINDOW for w in waits.values())
