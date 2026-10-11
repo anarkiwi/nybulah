@@ -377,12 +377,26 @@ docker run --rm --device=/dev/bus/usb -v "$PWD/tools:/tools" -v "$PWD/artifacts:
 
 Measured on the 1581 (cylinder 39, firmware v14): every Read Track ends with
 Lost Data, `rtpoll` at a 23-cycle pass included, with no byte missing, so
-Read Track's `$84` does not mark a lost byte. Waits up to 41 cycles lose
-nothing; 46 and 51 lose the misframed byte before an A1 sync (harmless to the
-decode); 56 and over lose bytes throughout. Every byte the stream lost inside
-a data field had a timer B wrap in its span (the `dl` wrap pass, 58 cycles).
-Random sector data carries a false sync in practically every field, so Read
-Track recovers only sparse sectors; Read Sector reads them all.
+Read Track's `$84` does not mark a lost byte: the byte count against the
+stamps and the decode do. Waits up to 41 cycles lose nothing; 46 and 51 lose
+the misframed byte before an A1 sync (harmless to the decode); 56 and over lose
+bytes throughout. Every byte the stream lost inside a data field had a timer B
+wrap in its span (the `dl` wrap pass then made a byte wait 58 cycles). Random
+sector data carries a false sync in practically every field, so Read Track
+recovers only sparse sectors; data comes from Read Sector, and Read Track gives
+the layout, gaps and IDs.
+
+Every read path now takes a byte within 41 cycles of its DRQ (`docs/protocol.md`,
+stream engine bounds). `tools/drqwait.py` reports each path's longest wait on
+`simwd` across spindle speeds (the stream paths 40, `readsec` 38; the paths
+before the fix 57 and 46). After the fix, 40 captures per side lost no byte,
+both sides ending `$84` throughout: side 0's only bad field is sector 1's data
+re-framing at its false sync (40/40), side 1's sector 1's ID (24/40)
+(`artifacts/issue56/rtslips-fix-1581-39-s{0,1}.json`).
+
+```sh
+python tools/drqwait.py --rpm 297 300 303
+```
 
 ## Disk survey (read-only)
 
@@ -887,7 +901,9 @@ to lose only for step 5.
    Measured with firmware v14 (`artifacts/stream-1581-39-v14.npz`): the track
    stream `done`/`done`, 6254 and 6257 bytes, 200226 and 200232 us, Read Track
    status `$84` (Lost Data) on both revolutions and two sector errors in the
-   decode (Read Track's re-framing and the stream's wrap pass: `tools/rtslips.py`, issue #56).
+   decode (Read Track's re-framing and the stream's former wrap pass:
+   `tools/rtslips.py`, issue #56). Sector 1 still fails under Read Track: its
+   data holds a false sync; Read Sector reads it.
    The ids stream's index wait (`op 0`) seeks to the track register's own value
    after its `$D0`, since an idle `$D0` freezes IP on this WD (`tools/ipprobe.py`,
    issue #57); it ends `done`/`done` with 24 IDs, no ID CRC errors and three index

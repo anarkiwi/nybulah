@@ -272,6 +272,20 @@ def test_read_sector_returns_the_data(media):
             assert np.all(np.diff(seen) <= 64)
 
 
+@pytest.mark.parametrize(
+    "window, poll, lost",
+    [(simwd.DRQ_WINDOW, 40, False), (simwd.DRQ_WINDOW, 50, True), (0, 50, False)],
+)
+def test_a_read_byte_waiting_past_the_drq_window_is_lost(media, window, poll, lost):
+    wd = drive(media, drq_window=window)
+    c = seek(wd, 3)
+    data, _, _, st = read_sector(wd, c, 1, poll=poll)
+    want = sector_payload(3, 0)[0].tobytes()
+    assert (data != want, bool(st & LD)) == (lost, lost)
+    assert len(data) < len(want) if lost else wd.drq_wait <= poll
+    assert (wd.drq_wait > simwd.DRQ_WINDOW) == (not window)
+
+
 def test_read_sector_errors(media):
     wd = drive(media)
     data, mark, _ = wd.media.track(0, 1)

@@ -15,7 +15,8 @@ from nybulah.link import BASE, WATCHDOG_IDLE_S
 from nybulah.monitor import Monitor, drivecode
 from nybulah.sim import Drive1581
 from nybulah.r1581 import ST_BUSY, ST_T0
-from nybulah.simwd import CPU_HZ, NEVER, STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
+from nybulah.simwd import CPU_HZ, DRQ_WINDOW, NEVER, STATUS_VALID, T0_NEVER, WTRK
+from nybulah.simwd import MfmMedia, Wd
 from nybulah.simwd import stream_track
 
 DEV = 9
@@ -255,6 +256,7 @@ def test_write_track_and_sectors_ram():
         got, status = drive.read_sector(3, r)
         assert np.array_equal(got, data[r - 1])
         assert bool(status & mfm.ST_DELETED) == (r == 6)
+    assert 0 < sim.wd.drq_wait <= DRQ_WINDOW
     drive.close()
     no_stops(sim)
 
@@ -285,6 +287,7 @@ def test_stream_read_track_revolutions(media):
     assert (np.diff(writes) >= 40).all()
     span = cap.rev_end_us - cap.rev_start_us
     assert np.all(np.abs(span - len(want) * mfm.BYTE_US) < 2 * mfm.BYTE_US)
+    assert 0 < sim.wd.drq_wait <= DRQ_WINDOW
     no_stops(sim)
 
 
@@ -308,6 +311,7 @@ def test_stream_sectors_and_ids(media):
     ] == pytest.approx(1, abs=1e-3)
     angle = (ids.id_us - ids.index_us[0]) % drive.period_us / drive.period_us
     assert np.all(np.diff(angle[ids.ids[:, 2] > 1][:9]) > 0)
+    assert 0 < sim.wd.drq_wait <= DRQ_WINDOW
     no_stops(sim)
 
 

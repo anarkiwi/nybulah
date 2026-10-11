@@ -36,7 +36,8 @@ WPER, WIDX, WSPIN, WWLEN, WNT, WCAP, WCHIP, WVIOL, WEARLY, WRNG, WFI = range(
 WCW, WOLD, WFIB, WFBUSY, WLIVE, WLEAD, WSLACK = range(W0 + 45, W0 + 52)
 WID = W0 + 52
 WLW = WID + 6
-WEND = WLW + 4
+WDRQT, WWIN, WWAIT = WLW + 4, WLW + 5, WLW + 6
+WEND = WLW + 7
 
 IDLE, STEP, DELAY, SPIN, RTWAIT, WTWAIT = range(6)
 IDSRCH, IDFLD, DAMSRCH, RDATA, RTDATA, WGAP, WDATA, WTFIRST, WTDATA = range(6, 15)
@@ -54,6 +55,9 @@ SPINUP_IP = 6  # ds: h = 0 with MO low waits 6 index pulses
 MO_IDLE_IP = 9  # ds: MO drops after 9 idle revolutions
 DAM_WINDOW = 43  # ds read sector: DAM within 43 bytes of the ID CRC (MFM)
 WSEC_DRQ, WSEC_GAP = 2, 22  # ds write sector flowchart and text (MFM)
+# a read byte left in the data register longer than this is lost (1581 hardware: clean
+# at 41 cycles, lost at 56; drive/rtpoll.s, docs/hardware.md); 0: until the next byte
+DRQ_WINDOW = 41
 # first byte loaded within 9 byte times of its DRQ, else lost data ends the command
 # (VICE src/drive/iec/wd1770.c:538-544; the ds lets it wait to WSEC_GAP)
 WSEC_LD = WSEC_DRQ + 9
@@ -187,11 +191,20 @@ def done(w, c):
 
 
 @kernel
-def deliver(w, v):
-    """A byte into the data register: DRQ, lost data if the last was never read."""
+def expire(w, t):
+    """A read byte waiting more than WWIN cycles by t is lost: DRQ drops, lost data
+    (a write command's DRQ never expires: WDRQT is NEVER from its start)."""
+    if w[WWIN] and w[WSTAT] & DRQ and t - w[WDRQT] > w[WWIN]:
+        w[WSTAT] = w[WSTAT] & ~DRQ | LD
+
+
+@kernel
+def deliver(w, v, t):
+    """A byte into the data register at t: DRQ, lost data if the last was never read."""
+    expire(w, t)
     if w[WSTAT] & DRQ:
         w[WSTAT] |= LD
-    w[WDAT] = v
+    w[WDAT], w[WDRQT] = v, t
     w[WSTAT] |= DRQ
 
 
@@ -234,6 +247,7 @@ def start(w, m, c):
     w[WLIVE] = w[WTYPE] == 1
     w[WSTAT] = BUSY
     w[WN] = w[WIP] = w[WSYN] = w[WCRCN] = 0
+    w[WDRQT] = NEVER
     spin = not cmd & H_FLAG and not w[WMO]
     w[WMO] = 1
     if not spin:
@@ -388,7 +402,7 @@ def id_byte(w, v, t):
     cmd = w[WCMD]
     ra = (cmd & 0xF0) == 0xC0
     if ra:
-        deliver(w, v)
+        deliver(w, v, t)
     if w[WN] < 6:
         return
     ok = w[WCRC] == 0
@@ -432,7 +446,7 @@ def data_byte(w, v, t):
     """Read Sector data and CRC bytes; m continues with the next sector."""
     w[WCRC] = crc(w[WCRC], v)
     if w[WN] < w[WLEN]:
-        deliver(w, v)
+        deliver(w, v, t)
     w[WN] += 1
     if w[WN] < w[WLEN] + 2:
         return
@@ -452,7 +466,7 @@ def read_event(w, m, b, n, t):
     v, mk = get(w, m, (b - 1) % n)
     ph = w[WPH]
     if ph == RTDATA:
-        deliver(w, v)
+        deliver(w, v, t)
         if b % n == 0:
             done(w, t)
         return
@@ -620,11 +634,14 @@ def wd_read(w, m, reg, c, pc):
     """Register read at cycle c by the instruction at pc."""
     wd_run(w, m, c)
     access(w, pc)
+    expire(w, c)
     if reg == 0:
         return visible(w, c, 1)
     if c - w[WLW + reg] < EARLY:
         w[WEARLY] += 1
     if reg == 3:
+        if w[WSTAT] & DRQ:
+            w[WWAIT] = max(w[WWAIT], c - w[WDRQT])
         w[WSTAT] &= ~DRQ
     return w[WTRK - 1 + reg]
 
@@ -797,9 +814,10 @@ class Wd:  # pylint: disable=too-many-public-methods
 
     Steps past ``stops`` (outer, inner cylinder) count in bumps / inner_stops; ``tr00`` is
     T0_OK or a failed sensor (T0_NEVER, T0_ALWAYS); ``spinup`` is in cycles, as is
-    ``force_busy``, how long a $D0 written while idle keeps busy set, and ``drq_lead``,
+    ``force_busy``, how long a $D0 written while idle keeps busy set, ``drq_lead``,
     how long before a byte slot a write must load the data register (0: the slot's
-    start, the datasheet's byte boundary).
+    start, the datasheet's byte boundary), and ``drq_window``, how long a read byte
+    waits in the data register before it is lost (0: until the next byte).
     """
 
     def __init__(self, media=None, cylinder=0, write_protect=False, **kw):
@@ -808,6 +826,7 @@ class Wd:  # pylint: disable=too-many-public-methods
         w[WSPIN] = kw.pop("spinup", 0)
         w[WFBUSY] = kw.pop("force_busy", 0)
         w[WLEAD] = kw.pop("drq_lead", 0)
+        w[WWIN] = kw.pop("drq_window", DRQ_WINDOW)
         w[WT0MODE] = kw.pop("tr00", T0_OK)
         w[WOUTER], w[WISTOP] = kw.pop("stops", (OUTER_STOP, INNER_STOP))
         w[WRNG] = kw.pop("seed", 0) & 0x7FFFFFFF
@@ -816,6 +835,7 @@ class Wd:  # pylint: disable=too-many-public-methods
             raise TypeError(f"unexpected {sorted(kw)}")
         w[WCYL], w[WWP], w[WDIR], w[WTYPE], w[WHEAD] = cylinder, write_protect, 1, 1, 1
         w[WLW : WLW + 4] = w[WFI] = w[WCW] = -NEVER
+        w[WDRQT] = NEVER
         w[WSLACK] = NEVER
         self.media, self.flat = None, np.zeros(1, np.uint8)
         self.insert(media, 0, changed)
@@ -903,6 +923,15 @@ class Wd:  # pylint: disable=too-many-public-methods
     @drq_slack.setter
     def drq_slack(self, value):
         self.w[WSLACK] = value
+
+    @property
+    def drq_wait(self):
+        """Most cycles a read byte waited in the data register for its read."""
+        return self._get(WWAIT)
+
+    @drq_wait.setter
+    def drq_wait(self, value):
+        self.w[WWAIT] = value
 
     @property
     def busy(self):
