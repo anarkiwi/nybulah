@@ -331,13 +331,23 @@ def _likeliest_shift(events, ok, weight):
 
 
 def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
-    events, base, evidence, anchored, rev=None, rise=None, known=None, free=None
+    # pylint: disable=too-many-positional-arguments
+    events,
+    base,
+    evidence,
+    anchored,
+    rev=None,
+    rise=None,
+    known=None,
+    free=None,
+    fall_max=None,
 ):
     """Per-event BITS offsets for pass events landing on capable positions.
 
     ``evidence`` is ``(capable, weight, (absorb, noisy))`` of the BITS bytes
     (:func:`nybulah.unstable.absorbable`), ``rise`` the bytes each event's own
     measured run could hide; ``known`` as in docs/hardware.md (Test pattern).
+    With ``fall_max`` an offset falls by at most that many bytes per event.
     """
     events = base + np.asarray(events, np.int64)
     if events.size == 0:
@@ -373,6 +383,8 @@ def _events_offsets(  # pylint: disable=too-many-arguments,too-many-locals
             seen[i, col[i, j]] = True
         weight += (seen & hit) * (1.0 + np.max(weight, axis=1, initial=0.0).sum())
     fall = np.diff(events, prepend=events[0]) - 1
+    if fall_max is not None:
+        fall = np.minimum(fall, fall_max)
     rise = np.full(len(events), len(offsets)) if rise is None else np.array(rise)
     fall[0] = rise[0] = len(offsets)
     start = int(np.searchsorted(offsets, shift))
@@ -822,6 +834,13 @@ def _ts_place(  # pylint: disable=too-many-arguments,too-many-locals
     trusted = np.inf
     if len(slip):
         trusted = base + count[slip[0] - 1] + offs[slip[0] - 1] if slip[0] else -np.inf
+    pos, sel = _placed(data, base, count, offs, matched, revolution)
+    return pos, sel, int((~matched).sum()), trusted
+
+
+def _placed(data, base, count, offs, matched, revolution):
+    """``(positions, events)`` of the matched events inside the BITS bytes, each
+    also a turn away where the bytes recur over a known ``revolution``."""
     sel = np.flatnonzero(matched)
     pos = base + count[sel] + offs[sel]
     if revolution:
@@ -831,7 +850,7 @@ def _ts_place(  # pylint: disable=too-many-arguments,too-many-locals
         use = (both == pos) | again[np.minimum(turn, len(data))]
         pos, sel = both[use], np.tile(sel, (2, 1))[use]
     inside = (pos > 0) & (pos < len(data))
-    return pos[inside], sel[inside], int((~matched).sum()), trusted
+    return pos[inside], sel[inside]
 
 
 def _ts_rows(pos, sel, iters, cell):
@@ -949,10 +968,15 @@ def merge_ts(  # pylint: disable=too-many-arguments
     return _syncs(rows, latched, (0, len(data)), None, unmatched)
 
 
+def stream_rows(data, syncs, cell):
+    """``(position, run, lo, hi)`` rows of a stream's syncs, ``syncs`` =
+    (positions, estimate, lo, hi) in SYNC low cycles
+    (:meth:`nybulah.stream.Stream.syncs`)."""
+    return _low_rows(*syncs, cell, len(data))
+
+
 def stream_syncs(data, syncs, cell):
-    """Syncs of a stream: exact positions, ``syncs`` = (positions, estimate, lo, hi)
-    in SYNC low cycles (:meth:`nybulah.stream.Stream.syncs`)."""
+    """Syncs of a stream: exact positions from its metadata."""
     data = np.asarray(data, np.uint8)
     _, latched = capable(data)
-    rows = _low_rows(*syncs, cell, len(data))
-    return _syncs(rows, latched, (0, len(data)), None, 0)
+    return _syncs(stream_rows(data, syncs, cell), latched, (0, len(data)), None, 0)

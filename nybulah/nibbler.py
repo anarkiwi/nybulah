@@ -10,7 +10,7 @@ import time
 import numpy as np
 from tqdm import tqdm
 
-from . import passes
+from . import passes, tss
 from . import stream as fmt
 from .analysis.capture import _hidden, capture_bits, trailing_ones
 from .analysis.gcr import SYNC_MIN_BITS, bit_rate, bits_per_revolution, speed_zone
@@ -43,7 +43,7 @@ WD_INDEX = 0x02
 VIA1PA, T2CL, ACR1 = 0x1801, 0x1808, 0x180B
 DOS_TRACK = 0x22
 SENSE_CODE, SN_TRK00 = "sense_1571", 0x04
-SEEK_CODE, STREAM_CODE = "seek_1571", "stream_1571"
+SEEK_CODE, STREAM_CODE, TSS_CODE = "seek_1571", "stream_1571", "tss_1571"
 STREAM_ZP, ZP_STREAM_SIZE = 0x60, 0x100 - ZP  # stream.s ZPCODE (revs first); ZP saved
 STREAM_TICKS = CODE_BASE + 3  # stream.s ticksp
 SENSE_STREAM = CODE_BASE + 0x100  # inside the seek code's padding (no expansion RAM)
@@ -116,7 +116,8 @@ class Capture:  # pylint: disable=too-many-instance-attributes
 
     Records hold raw drive output, so save/load is lossless and everything else is
     derived. ``base``: BITS index of TB/TS byte 0 (-1: by search); ``table``: a version
-    1 sync table; ``stream``: a version 3 record's adapter output (``data`` decoded).
+    1 sync table; ``stream``: a version 3 record's adapter output (``data`` decoded);
+    ``sensed``: a sync sensor pass's records (:meth:`nybulah.tss.Sensed.attach`).
     """
 
     data: np.ndarray
@@ -135,15 +136,18 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     base: int = -1
     version: int = CAPTURE_VERSION
     stream: np.ndarray | None = None
+    sensed: np.ndarray | None = None
+    sensed_status: int = 0
 
     ARRAYS = ("data", "table", "result", "tb", "tb_result", "ts", "ts_result")
-    ARRAYS += ("stream",)
+    ARRAYS += ("stream", "sensed")
 
     def __post_init__(self):
         for name in self.ARRAYS:
             setattr(self, name, _u8(getattr(self, name)))
         self._syncs = None
         self.parsed = None if self.stream is None else fmt.Stream.parse(self.stream)
+        self.records = None if self.sensed is None else tss.Records.parse(self.sensed)
 
     @property
     def index(self):
@@ -160,6 +164,18 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         before = np.minimum(self.parsed.index_syncs, len(pos))
         cum = np.concatenate(([0], np.cumsum(extra)))
         return 8 * self.index + cum[before]
+
+    def _sensed(self, cell):
+        rec = self.records
+        if rec is None or not rec.is_sync.any():
+            return None
+        cell = rec.cell(cell)
+        count, est, lo, hi = rec.pulses(cell)
+        hi = np.where(np.isinf(hi), -1.0, hi)
+        idx, rev = self.parsed.index, self.revolution_bytes()
+        anchored = len(idx) > 0 and len(rec.index) > 0
+        base = int(idx[0] - rec.index[0]) if anchored else 0
+        return base, count, (est, lo, hi), cell, anchored, rev
 
     @property
     def stream_status(self):
@@ -207,7 +223,12 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     def _derive(self):
         if self.parsed is not None:
             cell = STREAM_HZ / CPU_HZ * self.cell_cycles
-            return passes.stream_syncs(self.data, self.parsed.syncs(cell), cell)
+            syncs = self.parsed.syncs(cell)
+            sensed = self._sensed(cell)
+            if sensed is None:
+                return passes.stream_syncs(self.data, syncs, cell)
+            rows = passes.stream_rows(self.data, syncs, cell)
+            return tss.place(self.data, *sensed, rows=rows)
         if self.version < 2:
             return v1_syncs(self)
         anchored, base = self.base >= 0, max(self.base, 0)
@@ -416,6 +437,7 @@ def _v1_byte_cycles(cap, sync_cycles):
 
 
 STREAM_REVS = 1
+TSS_REVS, TSS_BUDGET = 1, 100  # drive/tss.s: whole revolutions; wait units
 
 
 def stream_size(revolutions):
@@ -538,6 +560,8 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
         names = {PREP: "prep", READ: "read", self.buffer + NPAGES * 256: "write"}
         if self._overlay == STREAM_CODE:
             names = {CODE_BASE: "stream"}
+        elif self._overlay == TSS_CODE:
+            names = {CODE_BASE: "sense_syncs"}
         names[SENSE_STREAM if self.streaming else self.buffer] = "sense"
         return names
 
@@ -580,8 +604,8 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
         return self.mon.jsr(entry)[0]
 
     def _prep(self, pbset, side, steps):
-        if self._overlay == STREAM_CODE:
-            self._load(SEEK_CODE)
+        if self._overlay not in (SEEK_CODE, self._track_code):
+            self._load(SEEK_CODE if self.streaming else self._track_code)
         while True:
             chunk = max(-127, min(127, steps))
             self._params(pbset=pbset, side=side, steps=chunk)
@@ -831,6 +855,36 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
             version=STREAM_VERSION,
             stream=raw,
         )
+
+    def sense_syncs(  # pylint: disable=too-many-arguments
+        self, halftrack, revolutions=TSS_REVS, side=0, density=None, budget=TSS_BUDGET
+    ):
+        """Sync sensor pass (drive/tss.s, 1571 at 2 MHz under s4): every SYNC pulse
+        timed with the bytes between, from now until ``revolutions`` whole
+        index-to-index revolutions have passed; ``budget`` bounds the waits.
+
+        Returns a :class:`nybulah.tss.Sensed`; its ``attach`` places the syncs on a
+        stream of the track.
+        """
+        if self.model != "1571":
+            raise TrackError("the sync sensor needs a 1571")
+        density = self.seek(halftrack, density, side)
+        self._load(TSS_CODE)
+        self._sensing = False
+        mon = self.mon
+        mon.write(tss.ZP, bytes([revolutions + 1, budget & 0xFF, tss.REC_END_PAGE]))
+        mon.set_fast(True)
+        try:
+            status = self._call(CODE_BASE)
+        finally:
+            if mon.holding is self:
+                mon.set_fast(False)
+        if status & tss.ST_SLOW:
+            raise TrackError("the sync sensor needs the drive at 2 MHz")
+        ri, rpg = mon.read(tss.ZP + tss.PARAMS["ri"], 2)
+        size = (rpg - tss.REC_PAGE) * 256 + ri
+        raw = mon.read(tss.REC_PAGE << 8, size) if size else b""
+        return tss.Sensed(np.frombuffer(bytes(raw), np.uint8), status, density)
 
     def _pass(self, kind, mode, anchor=b""):
         self._load(self._track_code)

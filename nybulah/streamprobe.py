@@ -4,6 +4,7 @@ Homes through Nibbler.home within --max-steps outward steps (homeprobe's plan),
 streams one track and prints how it ended, its bytes, index edges and syncs.
 """
 
+import contextlib
 import json
 import pathlib
 
@@ -13,11 +14,12 @@ from . import disk1581, homeprobe, r1581
 from .formats.mfmcap import save_captures
 from .monitor import Monitor
 from .nibbler import MAX_HALFTRACK, STREAM_REVS, Nibbler
+from .ramcheck import locate
 from .ramprobe import identify_model
 
 
-def add_arguments(ap):
-    """Command line options."""
+def track_arguments(ap):
+    """Options of a one-track probe that homes first."""
     ap.add_argument("--dev", type=int, default=8)
     ap.add_argument("--halftrack", type=int, default=36)
     ap.add_argument("--revolutions", type=int, default=STREAM_REVS)
@@ -30,8 +32,44 @@ def add_arguments(ap):
         help="refuse when homing needs more outward steps",
     )
     ap.add_argument("--save", type=pathlib.Path, help="write the capture (.npz)")
+    ap.add_argument(
+        "--search-steps",
+        type=int,
+        default=0,
+        help="halftracks to search outwards when nothing places the head;"
+        " the head must be at least this plus 2 from the stop",
+    )
+
+
+def add_arguments(ap):
+    """Command line options."""
+    track_arguments(ap)
     ap.add_argument("--cylinder", type=int, default=40, help="1581 cylinder")
     ap.add_argument("--ids", type=int, default=24, help="1581 Read Address commands")
+
+
+@contextlib.contextmanager
+def homed(args, cbm, what="streaming"):
+    """``(nibbler, report)`` of the 1571 at --dev homed within --max-steps."""
+    model = identify_model(cbm, args.dev)
+    if model != "1571":
+        raise ValueError(f"device {args.dev} is a {model}: {what} needs a 1571")
+    with (
+        Monitor(cbm, args.dev, "s4") as mon,
+        Nibbler(mon, model, stream=True) as nib,
+    ):
+        report = {"home": homeprobe.dry(nib, args.headers)}
+        if report["home"]["estimate"] is None and args.search_steps:
+            locate(nib, args.max_steps, args.search_steps)
+            report["home"]["search_steps"] = args.search_steps
+        else:
+            outward = report["home"]["outward_steps"]
+            if outward > args.max_steps:
+                raise ValueError(
+                    f"homing needs {outward} outward steps, over {args.max_steps}"
+                )
+            nib.home(report["home"]["estimate"])
+        yield nib, report
 
 
 def summary(cap):
@@ -101,26 +139,18 @@ def execute_1581(args, cbm):
 
 def execute(args, cbm):
     """Home, stream and print the report as JSON."""
-    model = identify_model(cbm, args.dev)
-    if model == "1581":
+    if identify_model(cbm, args.dev) == "1581":
         return execute_1581(args, cbm)
-    if model != "1571":
-        raise ValueError(f"device {args.dev} is a {model}: streaming needs a 1571")
-    with (
-        Monitor(cbm, args.dev, "s4") as mon,
-        Nibbler(mon, model, stream=True) as nib,
-    ):
-        report = {"home": homeprobe.dry(nib, args.headers)}
-        outward = report["home"]["outward_steps"]
-        if outward > args.max_steps:
-            raise ValueError(
-                f"homing needs {outward} outward steps, over {args.max_steps}"
-            )
-        nib.home(report["home"]["estimate"])
+    with homed(args, cbm) as (nib, report):
         cap = nib.stream(args.halftrack, args.revolutions, args.side)
         report |= summary(cap)
-        if args.save:
-            cap.save(args.save)
-            report["saved"] = str(args.save)
+    return printed(report, cap, args.save)
+
+
+def printed(report, cap, save):
+    """The report, printed as JSON, after saving the capture to ``save`` if given."""
+    if save:
+        cap.save(save)
+        report["saved"] = str(save)
     print(json.dumps(report))
     return report
