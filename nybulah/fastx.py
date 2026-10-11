@@ -86,15 +86,13 @@ class XLink(S1Link):
             raise ValueError("no room for the clock switch after the monitor")
         self.write(addr, code)
         self.send(b"J" + struct.pack("<H", addr))
-        self._use(fast)
+        self.use_clock(fast)
         self.response(3)
         self.mon.touch()
 
-    def _use(self, fast):
+    def use_clock(self, fast):
         """Transfer at the drive's clock; its watchdog windows scale with it."""
-        if fast != self.fast:
-            self.mon.idle_s *= 0.5 if fast else 2.0
-        self.fast = fast
+        super().use_clock(fast)
         speed = self.speeds[fast]
         self.rx = getattr(self.cbm, f"{speed}_read")
         self.tx = getattr(self.cbm, f"{speed}_write")
@@ -102,7 +100,7 @@ class XLink(S1Link):
     def drive_reset(self):
         """After a drive reset: a 1571 runs at 1 MHz again."""
         if getattr(self.mon, "model", None) != "1581":
-            self._use(False)
+            self.use_clock(False)
 
     @property
     def xread(self):

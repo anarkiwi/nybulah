@@ -10,7 +10,7 @@ import warnings
 from importlib import resources
 
 from .bus import DriveUnresponsive, answers, recover
-from .fastx import SrqLink, XBLink, XLink
+from .fastx import PA_2MHZ, SrqLink, XBLink, XLink
 from .link import (
     BASE,
     CLOCK_HZ,
@@ -23,6 +23,8 @@ from .link import (
 )
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, OpenCBMError
 from .ramprobe import identify_model
+
+VIA1_ORA = 0x180F
 
 __all__ = [
     "BASE",
@@ -135,7 +137,7 @@ def resolve(cbm, protocol):
     return protocol
 
 
-class Monitor:
+class Monitor:  # pylint: disable=too-many-instance-attributes
     """Upload, start and talk to the monitor on one drive.
 
     S1 and S3 (X, xum1541 firmware v9+) use only CLK/DATA and tolerate other
@@ -145,6 +147,9 @@ class Monitor:
     between commands; a command after idle_s idle restarts the monitor first
     (a 1571 at 2 MHz halves the drive's windows, so halve idle_s there). The
     identified model picks the drive code; a 1581's runs at 2 MHz throughout.
+    A 1571's DOS switches itself to 2 MHz once it has seen fast serial bytes on
+    SRQ, even another drive's: the monitor starts at DOS's clock and stop gives
+    it back.
     """
 
     def __init__(
@@ -169,6 +174,7 @@ class Monitor:
         self.link = cls(self)
         self.running = False
         self.holding = None
+        self.dos_fast = False
         self.timeout, self.idle_s, self.clock = timeout, idle_s, clock
         self._last = clock()
 
@@ -182,8 +188,18 @@ class Monitor:
             if time.monotonic() > deadline:
                 raise HandshakeTimeout(f"{step}: bus=0x{lines:02x}")
 
+    def dos_clock(self):
+        """Whether the drive's DOS runs a 1571 at 2 MHz (VIA1 PA5)."""
+        if self.model != "1571" or not hasattr(self.cbm, "download"):
+            return False
+        return bool(self.cbm.download(self.dev, VIA1_ORA, 1)[0] & PA_2MHZ)
+
     def start(self):
-        """Upload the monitor, execute it and complete the startup handshake."""
+        """Upload the monitor, execute it at DOS's clock and complete the startup
+        handshake."""
+        self.dos_fast = self.dos_clock()
+        if self.model != "1581":
+            self.link.use_clock(self.dos_fast)
         self.cbm.upload(self.dev, BASE, self.code)
         self.cbm.command(self.dev, b"M-E" + struct.pack("<H", BASE))
         self.cbm.iec_release(IEC_CLOCK | IEC_DATA | IEC_ATN)
@@ -295,12 +311,12 @@ class Monitor:
         self.link.set_fast(fast)
 
     def stop(self):
-        """Return the drive to DOS; after s4, UNLISTEN clears the fast host flag SRQ
-        traffic leaves in idle 1571s and 1581s (docs/protocol.md)."""
+        """Return the drive to DOS at DOS's clock; after s4, UNLISTEN clears the fast
+        host flag SRQ traffic leaves in idle 1571s and 1581s (docs/protocol.md)."""
         if not self.running:
             return
-        if getattr(self.link, "fast", False) and self.model != "1581":
-            self.set_fast(False)
+        if self.model != "1581" and self.link.fast != self.dos_fast:
+            self.set_fast(self.dos_fast)
         self.running = False
         if not self.alive():
             self.cbm.iec_release(IEC_ATN | IEC_CLOCK | IEC_DATA)

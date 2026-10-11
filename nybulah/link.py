@@ -22,6 +22,7 @@ class S1Link:
     """S1 handshakes: when idle the host holds CLK and the drive DATA."""
 
     idle_line = IEC_DATA
+    fast = False
 
     def __init__(self, mon):
         self.mon, self.cbm = mon, mon.cbm
@@ -35,6 +36,12 @@ class S1Link:
         self.cbm.iec_set(IEC_CLOCK)
         self.cbm.iec_release(IEC_DATA)
         self.mon.wait(IEC_DATA, 1, "drive idle")
+
+    def use_clock(self, fast):
+        """Follow the drive's clock: its watchdog windows halve at 2 MHz."""
+        if fast != self.fast:
+            self.mon.idle_s *= 0.5 if fast else 2.0
+        self.fast = fast
 
     def close(self):
         """Exit handshake after 'Q'."""
