@@ -14,6 +14,7 @@ from . import disk1581, homeprobe, r1581
 from .formats.mfmcap import save_captures
 from .monitor import Monitor
 from .nibbler import MAX_HALFTRACK, STREAM_REVS, Nibbler
+from .ramcheck import locate
 from .ramprobe import identify_model
 
 
@@ -31,6 +32,13 @@ def track_arguments(ap):
         help="refuse when homing needs more outward steps",
     )
     ap.add_argument("--save", type=pathlib.Path, help="write the capture (.npz)")
+    ap.add_argument(
+        "--search-steps",
+        type=int,
+        default=0,
+        help="halftracks to search outwards when nothing places the head;"
+        " the head must be at least this plus 2 from the stop",
+    )
 
 
 def add_arguments(ap):
@@ -51,12 +59,16 @@ def homed(args, cbm, what="streaming"):
         Nibbler(mon, model, stream=True) as nib,
     ):
         report = {"home": homeprobe.dry(nib, args.headers)}
-        outward = report["home"]["outward_steps"]
-        if outward > args.max_steps:
-            raise ValueError(
-                f"homing needs {outward} outward steps, over {args.max_steps}"
-            )
-        nib.home(report["home"]["estimate"])
+        if report["home"]["estimate"] is None and args.search_steps:
+            locate(nib, args.max_steps, args.search_steps)
+            report["home"]["search_steps"] = args.search_steps
+        else:
+            outward = report["home"]["outward_steps"]
+            if outward > args.max_steps:
+                raise ValueError(
+                    f"homing needs {outward} outward steps, over {args.max_steps}"
+                )
+            nib.home(report["home"]["estimate"])
         yield nib, report
 
 

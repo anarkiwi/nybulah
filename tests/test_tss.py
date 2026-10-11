@@ -228,7 +228,7 @@ def test_syncprobe_streams_then_senses(monkeypatch, capsys, g64, tmp_path):
     assert json.loads(capsys.readouterr().out) == out
     assert out["adapter"] == out["drive"] == "done" and out["status"] == []
     assert out["sensed"] > 0 and out["index_records"] == 2
-    assert out["syncs"] >= out["stream_syncs"] and out["unmatched"] == 0
+    assert out["syncs"] >= out["stream_syncs"] and out["unmatched"] <= 1
     assert all(row["cells"] > 0 for row in out["table"])
     back = Capture.load(path)
     assert back.records is not None and len(back.positions) == out["syncs"]

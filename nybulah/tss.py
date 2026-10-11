@@ -139,13 +139,29 @@ def place(  # pylint: disable=too-many-arguments
     evidence = (ok, sync_weights(ok, latched), absorbable(data, latched))
     count = np.asarray(count, np.int64)
     est, plo, phi = (np.asarray(v, float) for v in pulse)
+    keep = ~at_edge(base + count, len(data), revolution) if anchored else slice(None)
+    count, est, plo, phi = count[keep], est[keep], plo[keep], phi[keep]
     rise = np.floor(phi / (CELLS * cell * (1 - DRIFT))).astype(np.int64)
     offs, matched = _events_offsets(
         count, base, evidence, anchored, revolution, rise, fall_max=FALL
     )
     pos, sel = _placed(data, base, count, offs, matched, revolution)
     rows = list(rows) + _low_rows(pos, est[sel], plo[sel], phi[sel], cell, np.inf)
-    return _syncs(rows, latched, (0, len(data)), None, int((~matched).sum()))
+    lost = int((~matched).sum()) + int(np.size(keep) - np.count_nonzero(keep))
+    return _syncs(rows, latched, (0, len(data)), None, lost)
+
+
+def at_edge(nominal, n, revolution=None):
+    """Which anchored events, placed up to INDEX_POLL_BYTES after their nominal
+    position, would straddle an end of ``n`` bytes (or a copy a ``revolution``
+    away): the sync there has no byte after it inside the data."""
+    nominal = np.asarray(nominal, np.int64)
+    hit = np.zeros(len(nominal), bool)
+    for end in (n, 0):
+        d = end - nominal
+        d = d % revolution if revolution else d
+        hit |= (d >= 0) & (d <= INDEX_POLL_BYTES)
+    return hit
 
 
 def status_names(status):
