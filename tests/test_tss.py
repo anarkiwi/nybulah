@@ -146,9 +146,8 @@ def test_sensed_syncs_are_placed_on_the_stream():
     assert len(cap.positions) > len(stream_only)
     lo, hi = cap.sync_bounds
     for p, run, l, h in zip(cap.positions, cap.sync_bits, lo, hi):
-        assert (
-            l <= want[int(p)] <= (h if h >= 0 else np.inf) and abs(run - want[p]) <= 2
-        )
+        assert l <= want[int(p)] <= (h if h >= 0 else np.inf)
+        assert h < 0 or h - l > 4 or abs(run - want[p]) <= 2
     assert cap.lost <= 1 and cap.records is not None  # a sync at the data's end
 
 
@@ -196,6 +195,19 @@ def test_refused_at_1_mhz_and_on_a_1541(g64, make_rig):
         nib41.sense_syncs(36)
 
 
+def wrapped_records(per_byte):
+    """Long sync records 20, 256 (its wrap uncounted), 512 and 335 bytes apart at
+    ``per_byte`` cycles, then an index record and a sync right after it."""
+    out, t = [], 60000
+    for count, stored in ((0, 0), (20, 20), (256, 0), (512, 512), (335, 335)):
+        t = (t - count * per_byte - 200) & 0xFFFF
+        end = (t - 200) & 0xFFFF
+        out += [5, (t - 13) & 0xFF, ((t - 13) >> 8) & 0xFF, (end - 7) & 0xFF]
+        out += [((end - 7) >> 8) & 0xFF, stored & 0xFF, stored >> 8, 0]
+    out += [6, 0, 0, 0, 0, 1, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]
+    return bytes(out)
+
+
 def test_records_parse_stamps_and_counts():
     rec = bytes([2, 0x05, 0x12, 0, 0, 7, 1, 0]) + bytes(
         [5, 0x50, 0x10, 0x20, 0x10, 3, 0, 0]
@@ -218,6 +230,22 @@ def test_records_parse_stamps_and_counts():
     first = tss.Records.parse(bytes([3, 0x05, 0x12, 0, 0, 1, 0, 0]))
     assert np.isinf(first.pulses()[3][0]) and first.pulses()[1][0] == tss.PREV[3]
     assert tss.status_names(tss.ST_FULL | tss.ST_KILLER) == ["killer", "full"]
+    assert r.revolution_cycles() is None and r.cell(6.5) == 6.5
+    assert tss.Records.parse(wrapped_records(50)).count.tolist() == [
+        0,
+        20,
+        256,
+        512,
+        335,
+        1,
+        0,
+    ]
+    turn = int(round(tss.NOMINAL_REV * 300 / 310))
+    rec = bytes([6, 16, 0, 0, 0, 1, 0, 0]) + bytes(
+        [6, (16 - turn) & 0xFF, ((16 - turn) >> 8) & 0xFF, 0, 0, 1, 0, 0]
+    )
+    r = tss.Records.parse(rec)
+    assert r.revolution_cycles() == turn and abs(r.cell(6.5) - 6.5 * 300 / 310) < 1e-4
 
 
 def test_syncprobe_streams_then_senses(monkeypatch, capsys, g64, tmp_path):

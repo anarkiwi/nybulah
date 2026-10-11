@@ -23,7 +23,7 @@ def table(cap):
     """Per sensed sync: bytes since the previous record, its kind and the pulse
     width in cells with its bounds."""
     rec = cap.records
-    cell = STREAM_HZ / 1e6 * cap.cell_cycles
+    cell = rec.cell(STREAM_HZ / 1e6 * cap.cell_cycles)
     count, est, lo, hi = rec.pulses(cell)
     rows = []
     for c, k, e, l, h in zip(count, rec.kind[rec.is_sync], est, lo, hi):
@@ -42,7 +42,7 @@ def table(cap):
 def summary(cap):
     """JSON-ready digest of a stream with its sensor pass."""
     rec = cap.records
-    cell = STREAM_HZ / 1e6 * cap.cell_cycles
+    cell = rec.cell(STREAM_HZ / 1e6 * cap.cell_cycles)
     cells = rec.cells(cell)
     hist = np.bincount(np.round(cells).astype(int) + 9) if len(cells) else []
     return stream_summary(cap) | {
@@ -50,6 +50,11 @@ def summary(cap):
         "sensed": int(rec.is_sync.sum()),
         "index_records": len(rec.index),
         "sensed_revolution_bytes": np.diff(rec.index).tolist(),
+        "sensed_rpm": (
+            None
+            if rec.revolution_cycles() is None
+            else round(60.0 * tss.CPU_HZ / rec.revolution_cycles(), 2)
+        ),
         "stream_syncs": len(cap.parsed.syncs()[0]),
         "syncs": len(cap.positions),
         "unmatched": int(cap.lost),

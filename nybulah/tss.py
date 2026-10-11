@@ -21,6 +21,7 @@ REC_PAGE, REC_END_PAGE = 0x60, 0x80
 ZP, ZP_SIZE = 0x60, 13
 PARAMS = {"revs": 0, "tmo": 1, "rend": 2, "status": 3, "ri": 4, "rpg": 5, "wdst": 6}
 CPU_HZ = 2_000_000
+NOMINAL_REV = 60.0 * CPU_HZ / 300.0
 
 SEEN_GAP = 13  # SYNC reads at most this far apart outside a seen sequence
 EXIT = np.array([0, 7, 17, 26, 36])  # short kind k: SYNC high at R + EXIT[k]
@@ -31,7 +32,7 @@ RELEASE_FIRST = 50  # R -> the release loop's first read
 RELEASE_GAP = 11  # release loop reads at most this far apart
 END_LO, END_HI = 7, 4  # release read -> end lo read -> hi read
 INDEX_POLL_BYTES = 8  # the index is polled every this many bytes
-TAIL_BLIND = 140  # cycles after a release read before SYNC is read again
+TAIL_BLIND = 210  # cycles after a record's release read before SYNC is read again
 FALL = 8  # bytes a placement may fall between syncs (the counts are exact)
 
 
@@ -39,6 +40,29 @@ def t2_value(lo, hi, delay):
     """T2 at the lo read, from a lo/hi pair read ``delay`` cycles apart."""
     lo, hi = np.asarray(lo, np.int64), np.asarray(hi, np.int64)
     return ((hi + (lo < delay)) & 0xFF) << 8 | lo
+
+
+def _unwrapped(kind, seen, end, count):
+    """Counts with a wrap the drive left uncounted restored: where a sync record
+    after a sync record has a count ending in a zero byte, the elapsed stamps
+    (modulo the 16-bit timer) decide between it and 256 more."""
+    sync = kind <= K_LONG
+    ref = np.where(kind == K_LONG, end, seen)
+    after = sync & np.concatenate(([False], sync[:-1]))
+    elapsed = (np.concatenate(([0], ref[:-1])) - seen) & 0xFFFF
+    steady = after & (count >= 8) & (count <= 400)
+    if not steady.any():
+        return count
+    per_byte = np.median(elapsed[steady] / count[steady])
+    out = count.copy()
+    for i in np.flatnonzero(after & (count % 256 == 0)):
+        more = count[i] + 256
+        err = [
+            ((elapsed[i] - c * per_byte + 0x8000) % 0x10000) - 0x8000
+            for c in (count[i], more)
+        ]
+        out[i] = more if abs(err[1]) < abs(err[0]) else count[i]
+    return out
 
 
 @dataclasses.dataclass
@@ -55,14 +79,17 @@ class Records:
 
     @classmethod
     def parse(cls, raw):
-        """Records from the drive's bytes."""
+        """Records from the drive's bytes; a sync seen at the byte path's first
+        reads leaves a wrap of the count's low byte uncounted, so a count ending
+        in a zero byte after a sync record is settled by the stamps."""
         rec = np.frombuffer(bytes(raw), np.uint8).reshape(-1, RECLEN).astype(np.int64)
         kind = rec[:, 0]
         seen = (
             t2_value(rec[:, 1], rec[:, 2], STAMP_HI[kind]) + STAMP_LO[kind]
         ) & 0xFFFF
         end = (t2_value(rec[:, 3], rec[:, 4], END_HI) + END_LO) & 0xFFFF
-        return cls(kind, seen, end, rec[:, 5] | rec[:, 6] << 8)
+        count = rec[:, 5] | rec[:, 6] << 8
+        return cls(kind, seen, end, _unwrapped(kind, seen, end, count))
 
     @property
     def cumulative(self):
@@ -100,6 +127,23 @@ class Records:
         lo = np.maximum(lo, 0).astype(float)
         est = np.where(np.isinf(hi), lo, (lo + hi) / 2)
         return count, est, lo, hi
+
+    def revolution_cycles(self):
+        """Index period in cycles from the index records' stamps (the 16-bit T2
+        unwrapped around a 300 rpm revolution), or None without two records."""
+        seen = self.seen[self.kind == K_INDEX]
+        if len(seen) < 2:
+            return None
+        d = (seen[:-1] - seen[1:]) & 0xFFFF
+        turns = np.round((NOMINAL_REV - d) / 0x10000)
+        return float(np.median(d + 0x10000 * np.maximum(turns, 0)))
+
+    def cell(self, nominal):
+        """Cycles per cell at the speed the pass measured: ``nominal`` (cycles per
+        cell for a disk written at 300 rpm, read at 300 rpm) scaled by the index
+        period, or ``nominal`` itself without one."""
+        rev = self.revolution_cycles()
+        return nominal if rev is None else nominal * rev / NOMINAL_REV
 
     def cells(self, cell):
         """Sync pulse width in cells (SYNC low cycles over ``cell`` cycles) per sync."""

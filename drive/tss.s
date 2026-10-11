@@ -22,15 +22,16 @@
 ; 12, 19, 28 or 19 cycles after lo (19 for the long kind too); the long kind reads the end lo 7 cycles
 ; after the poll that saw SYNC high and hi 4 after lo. Between seen
 ; sequences SYNC is read at most 13 cycles apart (the byte path), 11 at the
-; idle loop's turn and 6 or 8 otherwise (29 once at each index level change
+; idle loop's turn and 6 or 8 otherwise (33 once at each index level change
 ; and not at all while a record is stored), so a two-cell pulse (12.6 cycles at
 ; zone 3, 310 rpm) is always seen; a one-cell pulse is seen when a read
-; falls inside it. V is sampled at most 32 cycles apart in the idle loop;
+; falls inside it. V is sampled at most 26 cycles apart in the idle loop;
 ; a byte that landed before a sync is counted right after the sync's
 ; stamps, and from the first byte after a sync (7 cells after its end) on,
 ; samples come at most 45 cycles apart and clear V within 5, so no byte
 ; ready merges with the next at a byte period of 50 cycles or more; no
-; instruction between two samples touches V (adc, sbc, bit and plp would). The two syncs a tail separates are
+; instruction between two samples touches V (adc, sbc, bit and plp would)
+; and every count is followed by a data port read. The two syncs a tail separates are
 ; a byte or more apart: a sync starting within the record store of the
 ; previous one is not seen. The index is polled every eighth byte, at most
 ; 0.4 ms apart.
@@ -47,6 +48,7 @@ VIA1PA   = $1801
 T2CL     = $1808
 T2CH     = $1809
 VIA2PB   = $1C00
+VIA2PA   = $1C01
 PCR2     = $1C0C
 WD       = $2000
 WD_INDEX = $02
@@ -64,8 +66,8 @@ ST_SLOW    = $80
 K_LONG   = 5
 K_INDEX  = 6
 RECLEN   = 8
-POLLS    = 8                    ; SYNC reads per idle body, V every fourth
-RPOLLS   = 4                    ; SYNC reads per release body
+POLLS    = 6                    ; SYNC reads per idle body, V every third
+RPOLLS   = 2                    ; SYNC reads per release body
 
 ZP      = $60
 revs    = ZP + 0                ; rising index edges to end at (0: none)
@@ -112,9 +114,14 @@ start:  lda VIA1PA
         clv
         jmp pl
 
-; Byte ready: counted, then the index every eighth byte.
+; Byte ready: counted and the data port read (without the read the 1571 at
+; 2 MHz raises no byte ready for the next byte after a sync), then the index
+; every eighth byte.
 byte:   iny
         clv
+        lda VIA2PB
+        BR bpl, seen
+        cpx VIA2PA              ; the port read re-arms byte ready
         lda VIA2PB
         BR bpl, seen
         tya
@@ -141,14 +148,12 @@ ipoll:  lda VIA2PB
 wrap:   inc cnth
         jmp ipoll
 
-; Idle loop: SYNC every 6 cycles, V every fourth read; X counts bodies.
+; Idle loop: SYNC every 6 cycles, V every third read; X counts bodies.
 pl:
-.repeat POLLS / 4
+.repeat POLLS / 3
         lda VIA2PB
         BR bpl, seen
         BR bvs, byte
-        lda VIA2PB
-        BR bpl, seen
         lda VIA2PB
         BR bpl, seen
         lda VIA2PB
@@ -188,6 +193,16 @@ r4:     stx tsh
         lda #4
         jmp t2
 
+done:   lda #0
+fail:   ora status
+        sta status
+        lda PCR2
+        and #PCR_SOE_MASK
+        ora #PCR_SOE_OFF
+        sta PCR2
+        lda status
+        rts
+
 ; The release loop and the rest in the next page: no timed branch crosses.
         .res $0400 - *, $EA
 rw:
@@ -207,6 +222,7 @@ rel:    lda T2CL                ; release poll + 7
         bvc rc
         iny                     ; a byte that landed before the sync
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 rc:     stx teh
         ldx ri
 s3:     sta REC + 3, x
@@ -220,6 +236,7 @@ t1:     stx tsl
 t2:     bvc tc
         iny                     ; a byte that landed before the sync
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 tc:     jsr put
         ldx #0
         jmp pl
@@ -229,6 +246,7 @@ tc:     jsr put
 edge:   bvc :+
         iny
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 :       stx ilev
         txa
         and #WD_INDEX
@@ -240,6 +258,7 @@ edge:   bvc :+
         bvc :+
         iny
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 :       lda #K_INDEX
         jsr put
         dec revs
@@ -250,7 +269,10 @@ edge:   bvc :+
 
 ; Store the record of kind A with stamp a = tsl/tsh and the byte count,
 ; then restart the count; bytes landing meanwhile belong to the next record
-; (V sampled at most 45 cycles apart from the count store on).
+; (V sampled at most 45 cycles apart from the count store on). A sync seen
+; at the byte path's first reads leaves a wrap of Y uncounted: no sync
+; follows a sync record within a byte, so the host reads a zero count after
+; a sync record as 256.
 put:    sta kind
         ldx ri
         tya
@@ -262,6 +284,7 @@ s6:     sta REC + 6, x
         bvc :+
         iny
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 :       lda kind
 s0:     sta REC, x
         lda tsl
@@ -269,6 +292,7 @@ s1:     sta REC + 1, x
         bvc :+
         iny
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 :       lda tsh
 s2:     sta REC + 2, x
         txa                     ; next record: no adc, which would set V
@@ -281,6 +305,7 @@ s2:     sta REC + 2, x
         bvc :+
         iny
         clv
+        cpx VIA2PA              ; the port read re-arms byte ready
 :       rts
 
 ; Next record page; the last one ends the pass from inside put.
@@ -291,7 +316,8 @@ page:   inc rpg
         bvc setpg               ; V sampled inside the page turn too
         iny
         clv
-        bvc setpg
+        cpx VIA2PA              ; the port read re-arms byte ready
+        jmp setpg
 full:   pla
         pla
         pla
@@ -308,12 +334,3 @@ setpg:  lda rpg
         sta s6 + 2
         rts
 
-done:   lda #0
-fail:   ora status
-        sta status
-        lda PCR2
-        and #PCR_SOE_MASK
-        ora #PCR_SOE_OFF
-        sta PCR2
-        lda status
-        rts

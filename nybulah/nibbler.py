@@ -169,6 +169,7 @@ class Capture:  # pylint: disable=too-many-instance-attributes
         rec = self.records
         if rec is None or not rec.is_sync.any():
             return None
+        cell = rec.cell(cell)
         count, est, lo, hi = rec.pulses(cell)
         hi = np.where(np.isinf(hi), -1.0, hi)
         idx, rev = self.parsed.index, self.revolution_bytes()
