@@ -60,8 +60,10 @@ def sdr_writes(cbm):
 
 
 def check_stream(mech, cap):
-    """The capture is one contiguous run of the latched bytes, and every sync it
-    reports lies there with its true length inside its bounds."""
+    """The capture is one contiguous run of the latched bytes, every sync it
+    reports lies there with its true length inside its bounds, and every sync
+    inside it that stayed low longer than the longest wait for a SYNC read
+    (``START_LATE``) is reported."""
     data, times = log_bytes(mech.log)
     want, first = bytes(cap.data), -1
     while first < 0 or data[first : first + len(want)] != want:
@@ -80,6 +82,9 @@ def check_stream(mech, cap):
         true.append(low[k[0]])
     cell = 2 * cap.cell_cycles
     assert np.median(np.abs(np.array(true) - est[done])) < 4 * cell
+    inside = (at >= 1) & (at < len(want)) & (low > fmt.START_LATE)
+    missed = np.setdiff1d(at[inside], pos)
+    assert missed.size == 0, f"syncs longer than START_LATE not reported at {missed}"
 
 
 @pytest.mark.parametrize("zone", sorted(ZONE_TRACKS))
