@@ -824,24 +824,25 @@ Cycle tables (t = 0 at an SDR write, from the code):
 
 | path | status reads | data register read | next SDR write |
 |---|---|---|---|
-| `dl` data loop | 24 (28 with a count carry), then every 28 (ATN on each pass); 36 after a pass that sees bit 15 change, 45 when it counts a wrap | 13 after the read that sees DRQ (37) | 41 (45) |
-| `dfirst`, `s4`, `s28` into `dl` | 42 | | |
-| `w0` before the first DRQ | every 31 or less (28, then 18 or 31, around a bit 15 change); 45 around queuing a KEEP | 9 or 11 after the read that sees DRQ | 11 after the data register read |
+| `dl` data loop | 24, then every 28 (ATN on each pass); a pass that sees bit 15 change reads again 27 after (`dw`), then 18 after that (27 when it counts a wrap); 27 (`dw`) when the poll after a write sees bit 15 change | 13 after a `dl` read that sees DRQ (37), 9 after a `dw` read (36) | 41 (40) |
+| `dfirst`, `s4`, `s28` into `dl` | 35 (`dfirst`), 38 (`s4`, `s28`), then `dl` 11 after | 9 after it | |
+| `w0` before the first DRQ | every 31 or less: 27 then 24; 28 then 18, or 31 counting a wrap, around a bit 15 change; 26 then 27 around queuing a KEEP | 9 or 11 after the read that sees DRQ | 11 after the data register read |
 | `send` (one metadata byte, w0) | -14, 4, 28; `w0` again at 39 | 12 after -14 (no metadata write), 13 (DRQ at 4), 37 (at 28) | metadata at 0, data at 40 or 48 |
 | `plain` (WD idle) | | | 40 |
 
-Bounds (the shifter flags a byte within 39 cycles; a byte waits in the data
-register for at most 64 cycles before the next one overwrites it, 32 us at 250
-kbit/s):
+Bounds (the shifter flags a byte within 39 cycles; the WD drops a read byte
+left in the data register for more than 41 to 56 cycles, well short of the 64-cycle
+byte time: `drive/rtpoll.s` on hardware loses nothing at waits up to 41 and bytes
+throughout at 56; `simwd` drops it after `DRQ_WINDOW` = 41):
 
 | quantity | worst case | budget | margin |
 |---|---|---|---|
-| SDR write spacing | 40 (`send` s4 path), 41 (`dl`) | > 39 | 1 cycle |
-| byte waiting in `dl` | 41 (28 + 13); 58 (45 + 13) in the pass that counts a wrap | 64 | 6 |
-| first byte, from `w0` | read 56 after arrival (45 + 11, the KEEP pass; 42 otherwise); second byte read 122 after the first's arrival | 64; 128 (third arrival) | 8; 6 |
-| first byte during a metadata write | arrival after -14; second byte read at 95 | > 114 | 19 |
-| backlog | writes 41 apart against bytes 64 apart | | drains 23 cycles a byte |
-| CLK for metadata | asserted at -4, released at 16 to 24 | adapter samples 4-14 | 2 cycles |
+| SDR write spacing | 40 (`send` s4 path, `dw`), 41 (`dl`) | > 39 | 1 cycle |
+| byte waiting in `dl` | 41 (28 + 13, a read or a write's data read to the next poll); 40 (31 + 9, `dw` after a write); 40 (27 + 13) after a pass that counts a wrap | 41 | 0 |
+| first byte, from `w0` | 40 (31 + 9, `w0b` after a pass that counts a wrap; 36 around a KEEP) | 41 | 1 |
+| second byte (a byte time after the first) | 31 after `dfirst`, 37 after `s4`, 27 after `s28` | 41 | 4 |
+| backlog | writes 40 or 41 apart against bytes 64 apart | | drains 23 cycles a byte |
+| CLK for metadata | asserted at -4, released at 19 to 24 (`send`), 26 (`plain`, which the VICE receiver, polling every 11 cycles and 23 per byte taken, needs) | adapter samples 4-14 | 5 cycles |
 | ATN seen | every pass of `dl` and `w0` | adapter holds ATN 8622 us | |
 
 Wraps are counted from timer B itself, as in `mfm_1581` (see "Without
@@ -850,9 +851,11 @@ high byte against `phase`, its value at the last poll, and bit 15 rising is a wr
 `phase` is taken at entry. No loop reads ICR, which loses the timer B flag to a read
 in the cycle before the underflow (VICE `cia_do_update_tb`), so an ICR-counted
 stream reads an index period one wrap short now and then. `w0` takes its status
-read before the new phase, so a DRQ there leaves the wrap to `dl`'s first pass; `dl`
-takes the new phase before its next status read, so a DRQ that comes every pass
-cannot defer it; it counts the timeout in Y.
+read before the new phase, so a DRQ there leaves the wrap to `dl`'s first pass.
+`dl` polls timer B on each pass and after each write (not the one that carries the
+count); bit 15 changed reads the status again (`dw`) before taking the new phase,
+and a DRQ seen there leaves it to the poll after that byte's write, whose `dw` read
+the next byte, a byte time later, cannot reach. `dl` counts the timeout in Y.
 
 A stamp is the wrap count and `phase`, both from the last poll, then timer B high,
 low, high, the low byte read 19 cycles after its start (after the first byte's SDR
@@ -903,7 +906,9 @@ before its DRQ wait, so it is written within one status poll of the DRQ; a token
 read between runs, inside the byte time the WD shifts the last one. The first byte
 is ready before the Write Track command goes out (the WD gives up unless it is
 written within three of its byte clocks). Read loops read the data register within
-one poll plus 13 cycles.
+one poll plus 11 cycles; a poll that sees timer B bit 15 change reads the status
+again before taking the new phase or counting a wrap (`TBLOOP`), so no byte waits
+past the WD's window (`tools/drqwait.py` measures each read path on `simwd`).
 
 Times (index edges, the first byte of Read Address, Restore) count timer B wraps
 from timer B itself: each wait polls the high byte, and bit 15 rising is a wrap. A
@@ -926,7 +931,9 @@ VICE (GPL, read for behaviour only) agrees with the model on Read Track: the
 command is matched on its top four bits, so `$E8` is Read Track with h set
 (`drive/iec/wd1770.c:119,137`); BUSY rises 24 us after the write and MO with it
 (`wd1770.c:230-250`); bytes start at the first index edge after the command and stop
-at the next (`wd1770.c:638-672`). Its 8520 loads a written SDR byte two cycles
+at the next (`wd1770.c:638-672`). VICE delivers the media bytes on the byte grid;
+`simwd` delivers `mfm.read_track_view`: a byte per 16 cells, the count restarting at
+every A1/C2 sync word at any cell phase, at cell-accurate times. Its 8520 loads a written SDR byte two cycles
 later, flags it two cycles after the eighth CNT fall and chains a byte written
 during a transfer with no gap (`core/ciacore.c:914-929,1736-1790`); it never drops
 a written byte. Where VICE differs the model keeps the datasheet or 1581 hardware

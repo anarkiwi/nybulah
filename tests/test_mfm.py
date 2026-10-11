@@ -1,3 +1,5 @@
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -5,6 +7,9 @@ from nybulah.analysis import mfm
 from nybulah.analysis.crc import SYNC3, crc16
 from nybulah.analysis.mfm import Flag, SectorSpec
 from nybulah.analysis.sector import SectorError as E
+from nybulah.simwd import DRQ_WINDOW
+
+REFRAME = pathlib.Path(__file__).parent / "data" / "rt1581" / "reframe-1581-39.npz"
 
 CYL, SIDE = 7, 1
 PITCH = 2 * (12 + 3) + 7 + 22 + 3 + 512 + 35
@@ -340,3 +345,52 @@ def test_false_syncs_find_off_phase_sync_patterns():
     assert _word(mfm.cells([0x00, 0x29], prev=1)[15:31]) in mfm.SYNC_CELLS
     rng = np.random.default_rng(0)
     assert mfm.false_syncs(rng.integers(0, 256, 512, dtype=np.uint8), 1).size
+
+
+def test_cells_drop_the_missing_clock_of_marks():
+    assert _word(mfm.cells([0xA1], mark=[True])) == mfm.SYNC_CELLS[0]
+    assert _word(mfm.cells([0xC2], mark=[True])) == mfm.SYNC_CELLS[1]
+    assert _word(mfm.cells([0x4E], mark=[True])) == _word(mfm.cells([0x4E]))
+
+
+def _field(body, after):
+    """Read Track view of 12 $00, three A1*, body, its CRC and after, from the byte
+    after the last A1*; (bytes, cells between deliveries)."""
+    crc = crc16(np.asarray(body, np.uint8), SYNC3)
+    data = np.r_[np.zeros(12), [mfm.A1] * 3, body, crc >> 8, crc & 0xFF, after]
+    mark = np.zeros(len(data), bool)
+    mark[12:15] = True
+    view, ends = mfm.read_track_view(data.astype(np.uint8), mark)
+    i = int(np.searchsorted(ends, 16 * 16))
+    return view[i:], np.diff(ends[i - 1 :])
+
+
+def test_read_track_view_frames_and_reframes():
+    """In phase a sync run reads $14 (the C2 pattern across $00 A1*, its clock bits at
+    the old phase) then two A1, the third A1* restarting 5 cells on without a byte."""
+    data = np.r_[np.full(20, mfm.GAP_BYTE), np.zeros(12), [mfm.A1] * 3, mfm.IDAM]
+    mark = np.isin(np.arange(len(data)), [32, 33, 34])
+    view, ends = mfm.read_track_view(data.astype(np.uint8), mark)
+    assert view.tobytes() == bytes([0x4E] * 20 + [0] * 12 + [0x14, 0xA1, 0xA1, 0xFE])
+    assert ends[32] - ends[31] == 11 and ends[33] - ends[32] == 21
+    rng = np.random.default_rng(1)
+    noise = rng.integers(0, 256, 600, dtype=np.uint8)
+    view, ends = mfm.read_track_view(noise)
+    assert ends[-1] <= 16 * len(noise) and (np.diff(ends) != 16).any()
+    assert not np.array_equal(view[: len(noise)], noise[: len(view)])
+
+
+def test_read_track_view_matches_the_1581():
+    """1581 cylinder 39 Read Track: side 0 sector 1's data (an off-phase C2 at byte 9.6)
+    and side 1 sector 1's ID (one at byte 4.4) read as modelled, or with the byte
+    before a short DRQ interval lost to a drive reading within DRQ_WINDOW."""
+    hw = np.load(REFRAME)
+    for body, after, got, short in (
+        (np.r_[mfm.DAM, hw["ref"]], [0xFF], hw["data_exact"], hw["data_short"]),
+        ([mfm.IDAM, 39, 1, 1, 2], [mfm.GAP_BYTE] * 20, hw["id_exact"], hw["id_short"]),
+    ):
+        view, gaps = _field(body, after)
+        assert np.array_equal(view[: len(got)], got)
+        i = int(np.flatnonzero(gaps < 16)[0])
+        assert 4 * gaps[i] <= DRQ_WINDOW
+        assert np.array_equal(np.delete(view, i - 1)[: len(short)], short)

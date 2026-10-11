@@ -15,7 +15,8 @@ from nybulah.link import BASE, WATCHDOG_IDLE_S
 from nybulah.monitor import Monitor, drivecode
 from nybulah.sim import Drive1581
 from nybulah.r1581 import ST_BUSY, ST_T0
-from nybulah.simwd import CPU_HZ, NEVER, STATUS_VALID, T0_NEVER, WTRK, MfmMedia, Wd
+from nybulah.simwd import CPU_HZ, DRQ_WINDOW, NEVER, STATUS_VALID, T0_NEVER, WTRK
+from nybulah.simwd import MfmMedia, Wd
 from nybulah.simwd import stream_track
 
 DEV = 9
@@ -32,6 +33,24 @@ def sectors(cyl, side):
 @pytest.fixture(name="media", scope="module")
 def media_fixture():
     return MfmMedia.formatted(sectors=sectors)
+
+
+def track_view(media, cyl):
+    """Read Track's bytes of side 0 (media head 1) of cyl, and which of them the next
+    follows within 16 cells (a re-frame): those a drive may lose."""
+    view, ends = mfm.read_track_view(*media.track(cyl, 1)[:2])
+    return view, np.r_[np.diff(ends) < 16, False]
+
+
+def read_as(got, view, short):
+    """got is a prefix of view less some short bytes."""
+    k = 0
+    for v, drop in zip(view, short):
+        if k < len(got) and got[k] == v:
+            k += 1
+        elif not drop:
+            break
+    return k == len(got)
 
 
 def no_stops(drive):
@@ -255,6 +274,7 @@ def test_write_track_and_sectors_ram():
         got, status = drive.read_sector(3, r)
         assert np.array_equal(got, data[r - 1])
         assert bool(status & mfm.ST_DELETED) == (r == 6)
+    assert 0 < sim.wd.drq_wait <= DRQ_WINDOW
     drive.close()
     no_stops(sim)
 
@@ -276,15 +296,16 @@ def test_stream_read_track_revolutions(media):
     drive.side(0)
     cap = drive.read_track(2)
     assert cap.meta["adapter"] == "done" and cap.meta["drive_end"] == "done"
-    want, _, _ = media.track(20, 1)
+    view, short = track_view(media, 20)
+    assert short.any()
     for rev in cap.revolutions():
-        assert len(want) - 1 <= len(rev) <= len(want)
-        assert np.array_equal(rev, want[: len(rev)])
+        assert read_as(rev, view, short) and len(rev) >= len(view) - short.sum() - 1
     turns = np.diff(cap.rev_start_us) / drive.period_us
     assert np.allclose(turns, np.round(turns), atol=1e-3) and (turns >= 1).all()
     assert (np.diff(writes) >= 40).all()
     span = cap.rev_end_us - cap.rev_start_us
-    assert np.all(np.abs(span - len(want) * mfm.BYTE_US) < 2 * mfm.BYTE_US)
+    assert np.all(np.abs(span - mfm.TRACK_BYTES * mfm.BYTE_US) < 2 * mfm.BYTE_US)
+    assert 0 < sim.wd.drq_wait <= DRQ_WINDOW
     no_stops(sim)
 
 
@@ -308,6 +329,7 @@ def test_stream_sectors_and_ids(media):
     ] == pytest.approx(1, abs=1e-3)
     angle = (ids.id_us - ids.index_us[0]) % drive.period_us / drive.period_us
     assert np.all(np.diff(angle[ids.ids[:, 2] > 1][:9]) > 0)
+    assert 0 < sim.wd.drq_wait <= DRQ_WINDOW
     no_stops(sim)
 
 
@@ -608,7 +630,8 @@ def test_cli_streamprobe(cli_rig, media, tmp_path):
         cbm,
     )
     assert out["adapter"] == ["done", "done"] and out["drive"] == ["done", "done"]
-    assert 6249 <= out["revolution_bytes"][0] <= 6250
+    view, short = track_view(media, 39)
+    assert len(view) - short.sum() - 1 <= out["revolution_bytes"][0] <= len(view)
     assert {tuple(i[:3]) for i in out["ids"]} >= {(39, 0, r) for r in range(1, 11)}
     info = cli.main(["info", str(save)])
     assert info
@@ -630,7 +653,8 @@ def test_cli_streamprobe_sequence_of_hw11(media, monkeypatch, tmp_path):
     )
     assert out["home"]["source"] == "tr00" and out["home"]["homed"]
     assert out["adapter"] == ["done", "done"] and out["drive"] == ["done", "done"]
-    assert out["track_stream"]["bytes"] >= 2 * 6249
+    view, short = track_view(media, 39)
+    assert out["track_stream"]["bytes"] >= 2 * (len(view) - short.sum() - 1)
     assert {tuple(i[:3]) for i in out["ids"]} >= {(39, 0, r) for r in range(1, 11)}
     assert cbm.drive.wd.pulses == 2 * 39
     no_stops(cbm.drive)
@@ -721,7 +745,9 @@ def test_cli_streamprobe_reports_the_track_stream_when_a_later_step_fails(
     assert out["home"]["homed"] and out["home"]["restore"]["result"] == 0
     stream = out["track_stream"]
     assert (stream["adapter"], stream["drive_end"]) == ("done", "done")
-    assert stream["bytes"] >= 6249 and stream["rev_status"] == [0x80]
+    view, short = track_view(media, 39)
+    assert stream["bytes"] >= len(view) - short.sum() - 1
+    assert [st & ~mfm.ST_LOST for st in stream["rev_status"]] == [0x80]
     assert sim.wd.cylinder == 0
     no_stops(sim)
 
@@ -864,11 +890,11 @@ def test_poll_track_reads_a_revolution(media, pad):
     _, sim, drive = stream_rig(media)
     drive.motor(True)
     status, n, ring = drive.poll_track(pad)
-    assert status & ST_BUSY == 0
-    assert abs(n - mfm.TRACK_BYTES) < 16 and len(ring) == r1581.POLL_RING
-    sec = mfm.decode_track(ring).sectors
-    whole = sec[sec["data_pos"] + mfm.SECTOR_BYTES + 3 <= len(ring)]
-    assert len(whole) >= 7 and whole["data_ok"].all()
+    view, short = track_view(media, 37)
+    assert status & ST_BUSY == 0 and len(ring) == r1581.POLL_RING
+    assert len(view) - short.sum() <= n <= len(view)
+    assert read_as(ring[::-1], view[::-1], short[::-1])
+    assert (mfm.decode_track(ring).sectors["id_ok"]).sum() >= 7
     with pytest.raises(ValueError):
         drive.poll_track(0)
     no_stops(sim)

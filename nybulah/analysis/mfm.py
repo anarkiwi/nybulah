@@ -134,14 +134,54 @@ def _run(sync, depth, circular):
 
 
 SYNC_CELLS = (0x4489, 0x5224)  # A1 and C2 with their missing clock
+MISSING_CLOCK = (10, 8)  # cell of A1*, C2* left without its clock
+SYNC_BYTE_CELLS = 7  # cells since the last byte or sync from which a sync delivers one
+_WEIGHTS = 1 << np.arange(15, -1, -1)
 
 
-def cells(data, prev=0):
+def cells(data, prev=0, mark=None):
     """MFM cells (clock, data per bit, most significant first) of bytes written after
-    a byte ending in bit ``prev``."""
-    bits = np.unpackbits(np.asarray(data, np.uint8))
+    a byte ending in bit ``prev``; ``mark`` flags A1*/C2* missing a clock."""
+    data = np.asarray(data, np.uint8)
+    bits = np.unpackbits(data)
     before = np.concatenate(([prev & 1], bits[:-1]))
-    return np.stack((1 - (before | bits), bits), axis=1).ravel()
+    c = np.stack((1 - (before | bits), bits), axis=1).ravel()
+    if mark is not None:
+        for v, k in zip((A1, C2), MISSING_CLOCK):
+            c[16 * np.flatnonzero(np.asarray(mark, bool) & (data == v)) + k] = 0
+    return c
+
+
+@njit(cache=True)
+def mfm_word(v, prev, mark):
+    """16 MFM cells of byte v after data bit prev; a marked A1/C2 misses its clock."""
+    x = 0
+    for i in range(7, -1, -1):
+        d = v >> i & 1
+        x, prev = x << 2 | (1 - (prev | d)) << 1 | d, d
+    if mark and v in (A1, C2):
+        x &= ~(1 << 15 - MISSING_CLOCK[1 if v == C2 else 0])
+    return x
+
+
+@njit(cache=True)
+def data_bits(x):
+    """Data bits of 16 cells."""
+    v = 0
+    for i in range(7, -1, -1):
+        v = v << 1 | x >> 2 * i & 1
+    return v
+
+
+@njit(cache=True)
+def is_sync(x):
+    """16 cells are an A1 or C2 sync word."""
+    return x in SYNC_CELLS  # pylint: disable=unsupported-membership-test
+
+
+def _words(c):
+    """The 16-cell word starting at each cell of ``c``."""
+    return np.lib.stride_tricks.sliding_window_view(c, 16) @ _WEIGHTS
 
 
 def false_syncs(data, prev=0):
@@ -151,10 +191,33 @@ def false_syncs(data, prev=0):
     c = cells(data, prev)
     if len(c) < 16:
         return np.zeros(0, np.int64)
-    words = np.lib.stride_tricks.sliding_window_view(c, 16) @ (
-        1 << np.arange(15, -1, -1)
-    )
-    return np.flatnonzero(np.isin(words, SYNC_CELLS))
+    return np.flatnonzero(np.isin(_words(c), SYNC_CELLS))
+
+
+def read_track_view(data, mark=None):
+    """``(bytes, end cells)`` Read Track delivers over one revolution from the index: a
+    byte per 16 cells, the count restarting at every sync word at any cell phase (the mark
+    detector stays on). A sync SYNC_BYTE_CELLS or more after the restart delivers the
+    data bits at the old phase; modelled as certain. Cells before the index are the track's.
+    """
+    data = np.asarray(data, np.uint8)
+    n = 16 * len(data)
+    mark = np.zeros(len(data), bool) if mark is None else np.asarray(mark, bool)
+    c = cells(np.r_[data[-1:], data], data[-2 % len(data)], np.r_[mark[-1:], mark])
+    words = _words(c)
+    syncs = np.flatnonzero(np.isin(words, SYNC_CELLS))
+    syncs = syncs[syncs > 0]
+    starts = np.r_[0, syncs]
+    count = (np.r_[syncs, n + 1] - starts - 1) // 16
+    k = np.arange(count.sum()) - np.repeat(np.cumsum(count) - count, count) + 1
+    frames = np.repeat(starts, count) + 16 * k
+    b = (syncs - starts[:-1] - 1) % 16 + 1
+    keep = b >= SYNC_BYTE_CELLS
+    ends = np.r_[frames, syncs[keep]]
+    order = np.argsort(ends, kind="stable")
+    src = np.r_[frames, syncs[keep] - (b[keep] & 1)][order]
+    out = np.packbits((words[src, None] >> np.arange(14, -1, -2)) & 1, axis=1)
+    return out.ravel(), ends[order]
 
 
 def find_marks(data, mark=None, circular=False):

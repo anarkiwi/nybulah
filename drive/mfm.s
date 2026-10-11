@@ -153,14 +153,20 @@ wrap:   eor phase
 done:
 .endmacro
 
-; TBPOLL inline in a wait, back to again unless a wrap used up the timeout;
-; inline and on zero page so that a read loop's pass that counts a wrap
-; still takes the DRQ within a byte time. A clobbered.
-.macro TBLOOP again
+; TBPOLL inline in a read loop, back to again unless a wrap used up the
+; timeout: bit 15 changed reads the status again first, a DRQ going to take
+; with the phase left to the next poll, so a pass taking the new phase or
+; counting a wrap still takes the DRQ within the WD's window (mfmstream.s).
+; A clobbered.
+.macro TBLOOP again, take
         lda CIA_TBHI
         eor phase
         bpl again
-        eor phase
+        WDTEST
+        lda WDSTAT
+        and #ST_DRQ
+        bne take
+        lda CIA_TBHI
         sta phase
         bpl again
         inc wraps
@@ -386,11 +392,11 @@ ral:    WDTEST
         lda WDSTAT
         lsr
         and #ST_DRQ >> 1                ; DRQ before BUSY: the last byte may wait
-        bne :+
+        bne rad
         bcc rae
-        TBLOOP ral
+        TBLOOP ral, rad
         jmp tmout
-:       WDTEST
+rad:    WDTEST
         lda WDDAT
         sta P_ID,y
         tya
@@ -461,17 +467,16 @@ rsl:    WDTEST
         and #ST_DRQ >> 1                ; DRQ before BUSY: the last byte may wait
         bne rsd
         bcc rse
-        TBLOOP rsl
+        TBLOOP rsl, rsd
         jsr restrk
         jmp tmout
+; Y is the count's low byte (count and Y start at 0).
 rsd:    WDTEST
         lda WDDAT
         sta (ptr),y
         iny
         bne :+
         inc ptr + 1
-:       inc count
-        bne :+
         inc count + 1
 :       dex
         bne rsl
@@ -480,7 +485,8 @@ rsd:    WDTEST
         lda #>$8000                     ; full: later bytes go to ROM
         sta ptr + 1
         jmp rsl
-rse:    jsr wait
+rse:    sty count
+        jsr wait
         jsr restrk
         ldx count
         ldy count + 1
