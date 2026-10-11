@@ -691,6 +691,13 @@ Streaming needs firmware v12 or later (a 1581 stream v14: its keepalives fall
 in the gap v12 and v13 cut short) and the plugin from the same tree (branch
 `xum1541-stream`, the image's default).
 
+A stream reports every sync of 28 ones or more at any zone and DOS syncs
+always; shorter ones only when a SYNC read falls inside the pulse
+(protocol.md, Sync detection). For short syncs run `syncprobe` with
+`--sense N`, which streams the track and then times every SYNC pulse with
+the sensor pass: on drive 8 the pattern disk's 10-ones sync at halftrack 30
+is a one-cell pulse the stream never reports and the sensor records.
+
 Flash `xum1541-ZOOMFLOPPY-v14.hex` as below (`info` must print
 `model 2 version 14`, `devinfo` firmware version 14). Then, in order, with
 drive 8 the 1571 and a formatted disk inserted:

@@ -576,6 +576,63 @@ revolution-long run without syncs (`test_index_lands_at_its_edge_in_a_run_withou
 `misc/x_timing.py` steps the compiled `srq_stream8` (6-clock fall wait)
 against these bounds and `misc/srq_timing_test.c` checks them.
 
+### Sync detection
+
+The stream reads SYNC only between bytes, so it reports a sync when one of
+its reads falls inside the pulse. A sync low for more than `START_LATE` (125
+cycles, the longest wait for a SYNC read on the data paths, which the host's
+bounds already assume) is always reported; `check_stream` asserts it. Shorter
+pulses depend on where they fall:
+
+- after a byte lands `nw` writes it 12 to 21 cycles later, `pwo` polls the
+  index and `nw`'s first SYNC read comes 33 after the write: 45 to 54 after
+  the landing, then every 15 cycles (32 across the ATN and T1 check every
+  256 polls, 42 when a T1 period passed); the 256th-byte and index-edge
+  detours of `pwo` add up to 21;
+- after a metadata byte (INDEX, SYNC_END) the backlog drains through `pwb`,
+  `ee` and `mpw`, which read no SYNC until a V sample finds no byte waiting:
+  at zone 3 and 310 rpm that is about six bytes.
+
+A sync of n ones asserts SYNC for about n - 8 cells on the hardware (sensor
+pass, below; the simulator's mechanism gives n - 9), starting 10 - k cells
+after the last byte landed when that byte ended in k ones. The guaranteed
+minimum therefore is the sync still low 125 cycles after it started:
+
+| zone | cell at 300 / 310 rpm | guaranteed ones at 300 / 310 rpm |
+|---|---|---|
+| 3 | 6.5 / 6.29 | 28 / 28 |
+| 2 | 7.0 / 6.77 | 26 / 27 |
+| 1 | 7.5 / 7.26 | 25 / 26 |
+| 0 | 8.0 / 7.74 | 24 / 25 |
+
+DOS syncs (40 ones) are always reported. Shorter syncs usually are: the share
+on random sync tracks at 310 rpm in simulation (`tools/sync_coverage.py`,
+which also prints the read site before each missed pulse):
+
+| ones | 10 | 12 | 14 | 16 | 18 | 20 | 22 | 24+ |
+|---|---|---|---|---|---|---|---|---|
+| zone 3 | 12 % | 60 % | 66 % | 98 % | 99 % | 96 % | 98 % | 100 % |
+| zone 0 | 36 % | 75 % | 100 % | 100 % | 100 % | 100 % | 100 % | 100 % |
+
+The misses below 24 ones at zone 3 are pulses around a metadata write and
+its backlog; those at 10 to 14 ones are also pulses inside the post-write
+window, where k decides it: the pattern disk's 10-ones sync at halftrack 30 follows 7
+latched ones, so its one-cell pulse starts about 19 cycles after the byte and
+is never reported (issue #59), while at halftracks 32 and 34 (k = 2) it is
+reported in about 85 percent of revolutions (`tools/sync_pulse.py` tabulates
+saved captures by region and revolution).
+
+The loop cannot close the window. Seeing a one-cell pulse at zone 3 needs a
+SYNC read every 6 cycles, which is one `lda VIA2PB; bpl` and nothing else:
+the sensor pass's whole loop. Reads every 13 cycles (two-cell pulses) cost
+18 to 24 cycles per byte period of 50.3 next to about 13 for the byte and 15
+for the index poll, which is the 8.7-cycle margin above and then some; a
+schedule built that way lost a byte per revolution on the INDEX path at
+zone 3 and could not be placed (`tools/stream_trace.py` prints the latches,
+port reads, writes and sites around the first lost byte of a simulated
+stream). Syncs shorter than the table go through the sensor pass:
+`syncprobe` streams a track and senses it.
+
 ### Host decoding
 
 `Stream.syncs(cell)` pairs SYNC_START/SYNC_END first in first out, adds
@@ -591,8 +648,9 @@ and the disk map use as for RAM captures.
 
 `tests/test_stream.py` streams every zone at 300 and 310 rpm on the timed
 1571 with the adapter model: every latched byte arrives in order, every sync
-lies inside its bounds, writes are 40 or more cycles apart, and no stream read
-hits either stop (`Mechanism.bumps`, `inner_stops`). Tracks written at 300
+lies inside its bounds, every sync low for more than `START_LATE` is
+reported, writes are 40 or more cycles apart, and no stream read hits either
+stop (`Mechanism.bumps`, `inner_stops`). Tracks written at 300
 rpm and read at 310 give the shortest byte period: index edges at several
 phases of a sync-free run, and random syncs, lose no byte
 (`test_index_edges_drop_no_byte_at_the_shortest_byte_period`). A sync whose
@@ -604,7 +662,7 @@ merge on their index edges.
 ## 1571 sync sensor pass (drive/tss.s)
 
 A stream reads SYNC only between bytes, so a pulse of one or two cells can
-fall between its reads (issue #59). The sensor pass reads nothing but SYNC
+fall between its reads (Sync detection above). The sensor pass reads nothing but SYNC
 and byte ready: `Nibbler.sense_syncs` loads `tss_1571.bin` at `$0300` over the
 seek code, switches the drive to 2 MHz (s4) and calls it; the drive records
 every SYNC pulse with VIA1 T2 stamps and the byte-ready count since the
