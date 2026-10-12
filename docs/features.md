@@ -43,7 +43,8 @@ Restore bounded to the estimated cylinder and confirmed by TR00
 
 Read D64 on both drives and D71 on a 1571, with error bytes and retries that
 merge the best read of each sector. Write D64/D71, verifying every track by
-re-capture. `--archive` keeps every raw capture so images can be re-derived
+re-capture. Read raw G64/G71 images, and write any raw image fitted to the
+drive's measured revolution, optionally from the index on a 1571. `--archive` keeps every raw capture so images can be re-derived
 ([disk.md](disk.md#disk-operations)).
 
 ## Analysis

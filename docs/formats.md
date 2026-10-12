@@ -1,7 +1,9 @@
 # Image formats
 
 `nybulah.formats.load(path)` (or `loads(bytes, name)`) sniffs the format and
-returns a `DiskImage`. Its `tracks` map a key to a list of `Capture`s. The key
+returns a `DiskImage`. A directory loads as nibbler capture records when it
+holds `read-*.npz` records (`read --archive`), otherwise as a KryoFlux stream
+set. Its `tracks` map a key to a list of `Capture`s. The key
 is the halftrack (2 = track 1), with `SIDE1` (0x80) set for the second side.
 Each `Capture` holds:
 
@@ -14,7 +16,8 @@ Each `Capture` holds:
   16 MHz clocks, with one revolution normalised to 300 rpm;
 - for NIB, NB2 and NBZ, `framed`: the byte-ready capture from
   `analysis.capture.framed_capture`. In this case `bits` is its restored
-  stream.
+  stream. Nibbler capture records (`from_nibbler`) keep the record itself
+  as `framed`, or the index edges of a stream.
 
 Cycles are found per segment for NIB-family captures and from the continuous
 bit stream for flux, P64 and G64 sources (see [analysis](analysis.md)).
@@ -46,6 +49,7 @@ From the command line:
 | D64 | yes | yes | sector data, error bytes | everything below the sector level |
 | D81 | yes | yes | 1581 sector data, error bytes | everything below the sector level |
 | IMD | yes | yes | per-track sector IDs (order, C/H maps), sizes, deleted marks, data errors | gaps, ID CRC errors, data without ID |
+| nibbler capture records (directory) | yes | via `read --archive` | every capture with sync lengths, byte times, index edges of streams | — |
 | 1581 capture npz | yes | yes | Read Track revolutions, Read Address ID lists, times, index edges | sub-byte timing |
 
 ## 1581 MFM images

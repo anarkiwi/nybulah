@@ -5,9 +5,15 @@ nybulah read  --dev 10 disk.d64            # 35 tracks (--tracks 40), error byte
 nybulah read  --dev 8  disk.d71            # 1571, both sides
 nybulah write --dev 8  disk.d71            # format, write, verify every track
 nybulah read  --dev 10 disk.d64 --transport s3 --retries 4 --archive caps/
+nybulah read  --dev 10 disk.g64 --archive caps/  # raw (--halftracks, --tracks 40)
+nybulah read  --dev 8  disk.g71            # 1571, raw, both sides
+nybulah write --dev 8  disk.g64 --align index  # any raw image; 1571 index starts
+nybulah convert caps/ disk.g64             # raw image from the archive
 ```
 
-The image type comes from the file suffix. D71 needs a 1571. `--archive DIR`
+The image type comes from the file suffix: reads take `.d64`, `.d71`, `.d81`,
+`.g64` or `.g71`, writes a sector image or any raw image `formats.load`
+reads (G64, G71, NIB, NB2, NBZ, P64, SCP, KryoFlux). D71 and G71 need a 1571. `--archive DIR`
 saves every capture (reads, write probes and verifies) as a `.npz` record.
 `nybulah.nibbler.Capture.load` reads a record back, and every image can be
 re-derived from the records. `write` exits with an error if a track never
@@ -21,6 +27,7 @@ verified.
 | Nibbler | `nybulah.nibbler` | Talks to `track.s` through any `Monitor` (s1-s4), or streams (1571, s4, firmware v12). Returns `Capture` records |
 | Passes | `nybulah.passes` | Host model of the capture passes: sample windows, anchors, merge |
 | Disk | `nybulah.disk` | Track jobs: decodes with `nybulah.analysis`, formats tracks, verifies |
+| Raw disk | `nybulah.rawdisk` | Raw track jobs: captures to G64, fits raw tracks to the drive, writes and verifies them |
 | Simulator | `nybulah.sim`, `simdisk`, `simfast`, `simhost` | py65 drive model with media, stepper, VIA2 and WD1770 index; its compiled mirror; host stand-ins |
 
 ## Drive routines
@@ -205,6 +212,50 @@ track's.
 4. Each track is verified by capture and decode against the error bytes that
    `format_track` reproduces (20–24, 27, 29). Unverified tracks are rewritten
    up to `--retries` times.
+
+**Raw reading** (`.g64`, `.g71`):
+
+1. The head is located and calibrated as for a sector read.
+2. Each track (and with `--halftracks` each halftrack) is captured from a
+   sync, or streamed, until a capture repeats and decodes with no sector
+   error, at most `--retries` + 1 times. `--archive` keeps every capture as
+   `read-*.npz`.
+3. `formats.image.to_g64` keeps each track's best revolution: fewest sector
+   errors, then highest repetition. `convert caps/ disk.g64` builds the
+   same image from the archive.
+
+**Raw writing** (any raw image, through `to_g64`):
+
+1. `revolution_cells` measures the drive's cells per revolution on the first
+   track, as for a sector write. Each track is written at its own density
+   (the most common one of a per-byte speed map), with capacity
+   `cells_at(cells0, density)` less `MEASURED_TOLERANCE`.
+2. **Fitting.** A longer track is shortened without touching data. First its
+   sync runs lose ones, longest first, down to the shortest sync the
+   verifying capture is sure to report (`sync_floor`: SYNC low longer than a
+   RAM TS pass's widest gap between PB7 polls, or a stream's longest wait for
+   a SYNC read, at 310 rpm). Then the gaps before syncs (the bits before a
+   sync that repeat every byte) lose whole fill bytes, longest first, down to
+   one. A track that still does not fit is refused. Halftracks and absent
+   tracks are not written.
+3. The rest of the revolution is filled with the track's own gap byte, as
+   framed after its sync, from its longest gap.
+4. **Verifying.** Each track is re-captured and its revolution found as for a
+   read. With every sync cut to `SYNC_MIN_BITS` ones, the written bytes must
+   appear whole in that revolution at some rotation. A track without syncs
+   is captured from now with the bytes alone. Unverified tracks are
+   rewritten up to `--retries` times; `write` exits with an error if any
+   never verified.
+5. **Alignment.** `--align index` (1571 only; a 1541 has no index sensor and
+   is refused) fills the track with its gap byte, then writes the track from
+   the index, so each track's byte 0, and the skew between tracks that the
+   image holds, follows the index. The write may not wrap onto its own
+   start, so the capacity is rounded down to whole pages. The verify
+   capture starts at the index too, and the track's byte 0 must sit at most
+   `ALIGN_BITS` (4 bytes) after the capture start: the write's byte 0 enters
+   the shift register at the second byte ready after it sees the index, the
+   capture latches its first byte within a byte of seeing it, and either
+   index poll can see the edge up to a byte late.
 
 ## Head location
 
