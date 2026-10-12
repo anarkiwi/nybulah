@@ -20,6 +20,7 @@ from .analysis.sector import (
 )
 from .formats.d64 import BAM_TRACK, D64
 from .formats.d71 import D71, SIDE_TRACKS
+from .formats.g64 import SIDE1
 from .nibbler import NPAGES, ST_NOSYNC, TrackError
 
 SIDE1_TRACK_BASE = SIDE_TRACKS
@@ -29,16 +30,23 @@ PROBE_TRIES = 3
 
 @dataclasses.dataclass(frozen=True)
 class TrackJob:
-    """One physical track: head side, physical track, header track number."""
+    """One physical track: head side, physical track, header track number, and
+    ``half`` 1 for the halftrack inside it."""
 
     side: int
     track: int
     header: int
+    half: int = 0
 
     @property
     def halftrack(self):
         """Head position."""
-        return 2 * self.track
+        return 2 * self.track + self.half
+
+    @property
+    def key(self):
+        """Image track key: halftrack, with SIDE1 for the second side."""
+        return self.halftrack | (SIDE1 if self.side else 0)
 
     @property
     def sectors(self):
@@ -69,8 +77,9 @@ class Archive:
 
     def __call__(self, kind, job, cap):
         if self.root is not None:
-            key = (kind, job.side, job.track)
-            name = f"{kind}-s{job.side}-t{job.track:02d}-{self.count[key]}.npz"
+            key = (kind, job.side, job.halftrack)
+            half = ".5" if job.half else ""
+            name = f"{kind}-s{job.side}-t{job.track:02d}{half}-{self.count[key]}.npz"
             self.count[key] += 1
             cap.save(self.root / name)
         return cap
@@ -143,7 +152,7 @@ def probe_cells(cap):
     return 8 * int(cap.positions[whole[0]]) + int(cap.hidden[whole[0]])
 
 
-def revolution_cells(nib, halftrack, archive=None, density=0):
+def revolution_cells(nib, halftrack, archive=None, density=0, side=0):
     """Bit cells per revolution this drive writes at ``density`` (destroys the track).
 
     Writes filler ending in a single sync over more than one revolution, then
@@ -152,10 +161,10 @@ def revolution_cells(nib, halftrack, archive=None, density=0):
     """
     archive = archive if isinstance(archive, Archive) else Archive(archive)
     stream = bytes([GAP_BYTE]) * (NPAGES * 256 - PROBE_SYNC) + b"\xff" * PROBE_SYNC
-    nib.write_track(halftrack, stream, density=density)
-    job = TrackJob(0, halftrack // 2, halftrack // 2)
+    nib.write_track(halftrack, stream, density=density, side=side)
+    job = TrackJob(side, halftrack // 2, halftrack // 2)
     for attempt in range(1, PROBE_TRIES + 1):
-        cap = nib.capture(halftrack, density=density, start="sync")
+        cap = nib.capture(halftrack, density=density, start="sync", side=side)
         cells = probe_cells(archive("probe", job, cap))
         if cells is not None:
             return cells
@@ -175,10 +184,10 @@ def cells_at(cells0, density):
     return cells0 * bit_rate(density) / bit_rate(0)
 
 
-def revolution_stream(payload, cells, lead=None):
+def revolution_stream(payload, cells, lead=None, fill=GAP_BYTE):
     """Bytes to write so ``payload`` covers its place on a revolution of ``cells``.
 
-    ``lead`` $55 bytes precede the payload (default: all the filler, so the
+    ``lead`` ``fill`` bytes precede the payload (default: all the filler, so the
     payload lands last); filler after it fills the stream to whole pages
     covering a fast revolution, ending before a slow one brings the payload
     back.
@@ -197,7 +206,7 @@ def revolution_stream(payload, cells, lead=None):
             f" leads of {total - capacity}..{total - len(payload)} fit"
         )
     tail = total - lead - len(payload)
-    return bytes([GAP_BYTE]) * lead + bytes(payload) + bytes([GAP_BYTE]) * tail
+    return bytes([fill]) * lead + bytes(payload) + bytes([fill]) * tail
 
 
 def track_stream(job, data, errors, disk_id, cells0):

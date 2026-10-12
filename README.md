@@ -12,14 +12,14 @@ writes them back.
 
 | drive | `read` | `write` | needs |
 |---|---|---|---|
-| 1541 | D64 from raw GCR captures | D64 | 8 KB RAM expansion at `$8000-$9FFF` |
-| 1571 | D64, D71 (streamed with firmware v12) | D64, D71 | 8 KB RAM expansion at `$6000-$7FFF` for writes and RAM passes |
+| 1541 | D64, G64 from raw GCR captures | D64, raw images | 8 KB RAM expansion at `$8000-$9FFF` |
+| 1571 | D64, D71, G64, G71 (streamed with firmware v12) | D64, D71, raw images | 8 KB RAM expansion at `$6000-$7FFF` for writes and RAM passes |
 | 1581 | D81 | D81 | nothing (any DOS ROM) |
 
 `--archive DIR` keeps every raw capture (GCR, sync lengths, byte times, or
 1581 track data) so images can be re-derived
-([disk.md](docs/disk.md)). Raw-track writing is a library API
-(`nybulah.nibbler`).
+([disk.md](docs/disk.md)). Raw images are any of the image formats below
+that hold GCR tracks.
 
 Image formats (`info`, `convert`, `map`, `flux`): NIB, NB2, NBZ, G64, G71,
 P64, SCP, KryoFlux, D64, D71, D81, IMD ([formats.md](docs/formats.md)).
@@ -45,6 +45,9 @@ nybulah hwcheck --devs 8 10 --proto s3          # identify drives, probe RAM, be
 nybulah read --dev 10 --transport s3 disk.d64   # 1541: read with error bytes
 nybulah read --dev 8 --transport s4 disk.d71    # 1571: both sides, streamed
 nybulah write --dev 8 --transport s4 disk.d71   # format, write, verify every track
+nybulah read --dev 10 --archive caps/ disk.g64  # raw: best revolution of every track
+nybulah write --dev 8 --align index disk.g64    # raw: fit, write, verify; starts at the index
+nybulah convert caps/ disk.g64                  # raw image from a read --archive directory
 nybulah read --dev 9 --transport s4 disk.d81    # 1581: D81 with error bytes
 nybulah pattern verify --dev 8 --halftrack 36  # test track against its truth
 nybulah info disk.g64                           # per-track kind, cycle, errors
@@ -63,7 +66,7 @@ nybulah survey CORPUS --out survey/             # corpus statistics and threshol
 - [features.md](docs/features.md): transports, capture, analysis and format features
 - [hardware.md](docs/hardware.md): bus sessions, hardware check, probes, firmware, transfer rates
 - [protocol.md](docs/protocol.md): X, burst X, SRQ and streaming wire protocols
-- [disk.md](docs/disk.md): drive routines, capture passes, D64/D71 reading and writing, head location
+- [disk.md](docs/disk.md): drive routines, capture passes, D64/D71 and raw image reading and writing, head location
 - [analysis.md](docs/analysis.md): GCR, revolution detection, faults, disk map, flux view, MFM
 - [formats.md](docs/formats.md): image formats, flux decoding, licences
 - [scenarios.md](docs/scenarios.md): track scenarios in preserved images

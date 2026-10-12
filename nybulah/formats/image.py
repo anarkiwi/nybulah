@@ -4,6 +4,7 @@ Every format loads into a :class:`DiskImage`: per track key (halftrack, with
 ``SIDE1`` for the second side) a list of :class:`Capture` bit streams.
 """
 
+import importlib
 import pathlib
 from dataclasses import dataclass, field, replace
 
@@ -32,6 +33,7 @@ from .p64 import P64, STRONG, P64Track, read_p64, track_from_bits, track_times
 from .scp import read_scp
 
 P64_WEAK_REVOLUTIONS = 5
+CAPTURE_PATTERN = "read-*.npz"
 SIDE1_TRACK_BASE = 35
 LAYOUTS = {
     "cylinders": lambda tnr: (2 * (tnr >> 1) + FIRST_HALFTRACK) | (SIDE1 * (tnr & 1)),
@@ -204,20 +206,26 @@ def from_kryoflux(streams, layout=None, progress=False):
     return _from_flux("kryoflux", tracks, candidates, fallback, layout, progress)
 
 
+def track_zone(speed):
+    """Density of a G64 track: its zone, or the most common of a per-byte map."""
+    speed = np.asarray(speed)
+    return (
+        int(np.bincount(speed.ravel(), minlength=4).argmax())
+        if speed.ndim
+        else int(speed)
+    )
+
+
 def from_g64(g64):
     """One circular capture per G64/G71 track."""
     image = DiskImage("g71" if g64.halftracks > 84 else "g64", source=g64)
     if g64.ext is not None:
         image.meta["ext"] = g64.ext
     for key, track in g64.tracks.items():
-        speed = np.asarray(track.speed)
-        zone = (
-            int(np.bincount(speed.ravel(), minlength=4).argmax())
-            if speed.ndim
-            else int(speed)
-        )
         image.tracks[key] = [
-            Capture(to_bits(track.data), zone, True, speed=track.speed)
+            Capture(
+                to_bits(track.data), track_zone(track.speed), True, speed=track.speed
+            )
         ]
     return image
 
@@ -310,11 +318,36 @@ def loads(buf, name="", **options):
     return image
 
 
+def from_nibbler(cap):
+    """``(key, Capture)`` of a :class:`nybulah.nibbler.Capture`: a stream with two
+    index edges keeps them, anything else keeps its record as ``framed``, so
+    revolutions are found per segment."""
+    key = cap.halftrack | (SIDE1 if cap.side else 0)
+    index = getattr(cap, "index_bits", lambda: None)()
+    if index is not None and len(index) > 1:
+        return key, Capture(segments(cap).bits, cap.density, index=index)
+    return key, Capture(segments(cap).bits, cap.density, framed=cap)
+
+
+def load_captures(folder, pattern=CAPTURE_PATTERN):
+    """``{halftrack | side: [Capture]}`` from saved nibbler capture records."""
+    nibbler = importlib.import_module(f"{__package__.rpartition('.')[0]}.nibbler")
+    captures = {}
+    for path in sorted(pathlib.Path(folder).glob(pattern)):
+        key, cap = from_nibbler(nibbler.Capture.load(path))
+        captures.setdefault(key, []).append(cap)
+    return captures
+
+
 def load(path, **options):
-    """Load any supported image; a KryoFlux stream loads its whole set."""
+    """Load any supported image; a directory of nibbler read records loads as
+    their captures, a KryoFlux stream as its whole set."""
     path = pathlib.Path(path)
     if not (path.is_dir() or STREAM_NAME.search(path.name)):
         return loads(path.read_bytes(), path.name, **options)
+    captures = load_captures(path) if path.is_dir() else None
+    if captures:
+        return DiskImage("capture", captures, source=path)
     folder, prefix = (path, None) if path.is_dir() else (path.parent, _stem(path.name))
     streams = {
         (int(m.group(1)), int(m.group(2))): read_stream(item.read_bytes())

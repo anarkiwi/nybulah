@@ -116,6 +116,33 @@ def test_read_and_write_commands(monkeypatch, tmp_path):
     assert (read_d64(target.read_bytes()).data == image.data).all()
 
 
+def test_raw_write_read_and_convert_commands(monkeypatch, tmp_path):
+    import numpy as np
+
+    from nybulah import rawdisk
+    from nybulah.formats import D64, G64, d64_to_g64, write_g64
+
+    rng = np.random.default_rng(6)
+    g64 = d64_to_g64(D64(rng.integers(0, 256, (683, 256), np.uint8)), progress=False)
+    source = tmp_path / "in.g64"
+    source.write_bytes(write_g64(G64({k: g64.tracks[k] for k in (2, 4)})))
+    cbm = disk_cli(monkeypatch, "1541")
+    with pytest.raises(ValueError, match="no index sensor"):
+        cli.main(["write", "--dev", "10", "--align", "index", str(source)], cbm)
+    out = cli.main(["write", "--dev", "10", str(source)], cbm)
+    assert out["failed"] == [] and out["skipped"] == [] and len(out["tracks"]) == 2
+    jobs = rawdisk.raw_jobs
+    monkeypatch.setattr(rawdisk, "raw_jobs", lambda t, s, h: jobs(2, s, h))
+    cbm = disk_cli(monkeypatch, "1541", cbm.drive.mech.media)
+    target, caps = tmp_path / "out.g64", tmp_path / "caps"
+    out = cli.main(["read", "--dev", "10", str(target), "--archive", str(caps)], cbm)
+    assert out["tracks"] == 2 and out["unformatted"] == []
+    converted = tmp_path / "conv.g64"
+    out = cli.main(["convert", str(caps), str(converted)])
+    assert out["source"] == "capture" and out["tracks"] == 2
+    assert converted.read_bytes() == target.read_bytes()
+
+
 def test_disk_command_refusals(monkeypatch, tmp_path):
     import numpy as np
 
@@ -127,7 +154,17 @@ def test_disk_command_refusals(monkeypatch, tmp_path):
         cli.main(["write", "--dev", "10", str(path)], disk_cli(monkeypatch, "1541"))
     with pytest.raises(ValueError, match="expected"):
         cli.main(
-            ["read", "--dev", "10", str(tmp_path / "x.g64")],
+            ["read", "--dev", "10", str(tmp_path / "x.nib")],
+            disk_cli(monkeypatch, "1541"),
+        )
+    with pytest.raises(ValueError, match="need a raw image"):
+        cli.main(
+            ["read", "--dev", "10", "--halftracks", str(tmp_path / "x.d64")],
+            disk_cli(monkeypatch, "1541"),
+        )
+    with pytest.raises(ValueError, match="needs a 1571"):
+        cli.main(
+            ["read", "--dev", "10", str(tmp_path / "x.g71")],
             disk_cli(monkeypatch, "1541"),
         )
     with pytest.raises(ValueError, match="transport"):

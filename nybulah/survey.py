@@ -6,7 +6,6 @@ are written as columnar ``part-NNNNN.npz`` files so a scan can resume.
 """
 
 import hashlib
-import importlib
 import io
 import json
 import multiprocessing
@@ -19,7 +18,6 @@ from dataclasses import dataclass
 import numpy as np
 from tqdm import tqdm
 
-from .analysis.capture import segments
 from .analysis.cycle import TrackKind, lag_window
 from .analysis.gcr import (
     bits_per_revolution,
@@ -48,9 +46,9 @@ from .analysis.sector import (
 from .formats.g64 import SIDE1
 from .formats.image import (
     SIDE1_TRACK_BASE,
-    Capture,
     DiskImage,
     best_revolution,
+    load_captures,
     loads,
 )
 from .formats.nib import write_nib
@@ -666,25 +664,6 @@ def scan(root, out, workers=18, limit=None, progress=True):
 def survey_captures(captures):
     """Survey captures keyed by halftrack: ``{key: [formats.image.Capture]}``."""
     return survey_image(DiskImage("capture", captures))
-
-
-def load_captures(folder, pattern="read-*.npz"):
-    """``{halftrack | side: [Capture]}`` from saved nibbler capture records.
-
-    Each keeps its record as ``framed``, so revolutions are found per segment.
-    """
-    nibbler = importlib.import_module(f"{__package__}.nibbler")
-    captures = {}
-    for path in sorted(pathlib.Path(folder).glob(pattern)):
-        cap = nibbler.Capture.load(path)
-        key = cap.halftrack | (SIDE1 if cap.side else 0)
-        index = getattr(cap, "index_bits", lambda: None)()
-        captures.setdefault(key, []).append(
-            Capture(segments(cap).bits, cap.density, index=index)
-            if index is not None and len(index) > 1
-            else Capture(segments(cap).bits, cap.density, framed=cap)
-        )
-    return captures
 
 
 class Survey:

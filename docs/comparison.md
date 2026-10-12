@@ -14,7 +14,7 @@ pages, cited per row. Entries marked (U) rest on a single secondary source.
 | Index alignment on a stock 1571 | WD1770 index sensor | needs an index-hole sensor mod | no | n/a |
 | Revolution detection | significance test against sector headers | byte matching in a fixed window | n/a | n/a |
 | Recovery from bus stalls | without power cycling (firmware v9+) | no | no | n/a |
-| Write-back | D64/D71/D81, verified by re-capture | yes (nibwrite) | sectors | from emulation |
+| Write-back | D64/D71/D81 and raw images, verified by re-capture | yes (nibwrite) | sectors | from emulation |
 | Licence | Apache-2.0 | GPL-3.0 | GPL-2.0 | GPL-3.0 |
 
 Sources: [nibtools](https://github.com/rittwage/nibtools),
@@ -89,26 +89,23 @@ copier.
 | Ultra Copy II | yes / yes / ? | yes | ? | ? | ? | data in gaps | above 35 | no | scanning copier | [c64copyprotection](https://www.c64copyprotection.com/ultra-copy-ii/) |
 | MNIB | yes / yes / no | ? | per zone, detected | flags killers, no-sync | no write-back | ? | 36–41 | required | N to NIB | [project page](http://www.tim-schuermann.de/c64/de/2003/mnib.html) |
 | nibtools | yes / yes / no | read and write | detected or forced | skip killers, reduce or fix syncs | sector 0, longest gap/sync, skew, timer, index hole | fix bad GCR; protection handlers | to 41 | parallel, or SRQ on a 1571 | N, NIB/G64 write | [readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt) |
-| nybulah | RAM expansion / SRQ or RAM / WD177x | library | per track | measured sync lengths, killer class | 1571 index start only | analysed: illegal GCR, weak regions, MFM weak bytes | library to halftrack 84; CLI 35 or 40 | no | capture and analysis; D64/D71/D81 write | [features.md](features.md) |
+| nybulah | RAM expansion / SRQ or RAM / WD177x | read | per track | measured sync lengths, killer class, sync reduction on write | 1571 index start only | analysed: illegal GCR, weak regions, MFM weak bytes | library to halftrack 84; CLI 35 or 40 | no | capture and analysis; D64/D71/D81 and raw G64 write | [features.md](features.md) |
 
 ## Gaps
 
 Capabilities of the tools above that nybulah does not have:
 
-- **Raw image write-back.** `write` takes D64, D71 and D81 only; the
-  library's `Nibbler.write_track` is not driven from G64, NIB, NBZ or P64.
-  ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt))
-- **Track alignment and skew on write.** No policy aligning track starts to
-  sector 0, the longest gap or sync, a skew, a timer or an index hole; index
-  starts work on a 1571 only.
+- **Track alignment and skew on write.** `write --align index` puts every
+  track's start at the index on a 1571 only; no policy aligns track starts to
+  sector 0, the longest gap or sync, a skew or a timer.
   ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt),
   [protection methods](https://www.commodoregames.net/copyprotection/protection-methods.asp))
 - **Fat tracks.** Not detected and not reproduced
   ([scenarios.md](scenarios.md#how-each-scenario-presents-and-what-handles-it);
   [nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt)).
-- **Halftrack and 41–42 track imaging from the CLI.** `read --tracks`
-  offers 35 or 40 whole tracks to a sector image; raw captures exist only
-  through `--archive`.
+- **41–42 track imaging and halftrack writes from the CLI.** `read --tracks`
+  offers 35 or 40 tracks (`--halftracks` adds the halftracks between them);
+  a raw `write` skips halftracks.
   ([c64copyprotection: Burst Nibbler](https://www.c64copyprotection.com/deep-scan-burst-nibbler/),
   [MNIB](http://www.tim-schuermann.de/c64/de/2003/mnib.html))
 - **Protection-specific handlers and parameters** (V-MAX, RapidLok, Vorpal;
@@ -116,10 +113,6 @@ Capabilities of the tools above that nybulah does not have:
   ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt),
   [commodoregames](https://www.commodoregames.net/copyprotection/copy-tools-parameters.asp),
   [Super Snapshot v5 manual](https://rr.pokefinder.org/rrwiki/images/c/c0/Super_Snapshot_v5.0_Operating_Manual.pdf))
-- **Fitting raw tracks to the target drive** (sync and gap reduction,
-  capacity matched to measured RPM); D64 formatting already uses the
-  measured capacity.
-  ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt))
 - **Reproducing bad GCR, no-flux and weak regions on write.** Unformatted
   tracks are written as captured read noise.
   ([nibtools readme](https://github.com/OpenCBM/nibtools/blob/master/readme.txt))
