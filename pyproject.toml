@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nybulah"
-version = "0.1.0"
+version = "0.1.1"
 description = "Commodore 1541/1571 nibbler over OpenCBM without a parallel cable"
 readme = "README.md"
 license = {text = "Apache-2.0"}
