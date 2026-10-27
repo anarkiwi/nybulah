@@ -35,8 +35,9 @@ COPY --from=opencbm . /src
 
 FROM opencbm-src-${OPENCBM_SOURCE} AS opencbm-build
 WORKDIR /src
-RUN make -f LINUX/Makefile opencbm plugin-xum1541 \
-    && make -f LINUX/Makefile DESTDIR=/out install install-plugin-xum1541
+# Ubuntu 26.04's GCC defaults to C23, which rejects OpenCBM's bundled dfu-programmer (bool enum).
+RUN make -f LINUX/Makefile USER_CFLAGS=-std=gnu17 opencbm plugin-xum1541 \
+    && make -f LINUX/Makefile USER_CFLAGS=-std=gnu17 DESTDIR=/out install install-plugin-xum1541
 
 FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS opencbm-git
 RUN apt-get update && apt-get install -y --no-install-recommends libusb-1.0-0 \
