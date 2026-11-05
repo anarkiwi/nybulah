@@ -7,7 +7,7 @@ ARG OPENCBM_IMAGE=anarkiwi/opencbm:latest
 ARG OPENCBM_REPO=https://github.com/anarkiwi/OpenCBM
 ARG OPENCBM_REF=3c8c358e8de7edcdae150da5882c0a779d6d698d
 
-FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS drivecode
+FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS drivecode
 RUN apt-get update && apt-get install -y --no-install-recommends cc65 make \
     && rm -rf /var/lib/apt/lists/*
 COPY drive/ /src/drive/
@@ -16,7 +16,7 @@ RUN mkdir -p /out && make -C /src/drive OUT=/out
 FROM scratch AS drivecode-bin
 COPY --from=drivecode /out/ /
 
-FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS opencbm-deps
+FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS opencbm-deps
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cc65 git libncurses-dev libusb-1.0-0-dev \
@@ -39,7 +39,7 @@ WORKDIR /src
 RUN make -f LINUX/Makefile USER_CFLAGS=-std=gnu17 opencbm plugin-xum1541 \
     && make -f LINUX/Makefile USER_CFLAGS=-std=gnu17 DESTDIR=/out install install-plugin-xum1541
 
-FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS opencbm-git
+FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS opencbm-git
 RUN apt-get update && apt-get install -y --no-install-recommends libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=opencbm-build /out/usr/local/bin/ /usr/local/bin/
@@ -55,7 +55,7 @@ FROM ${OPENCBM_IMAGE} AS opencbm-image
 
 # VICE (GPL, run as a separate program) built headless from a pinned release
 # tarball; its bundled ROMs stay in the image (data/C64, C128, DRIVES).
-FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS vice-build
+FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS vice-build
 ARG VICE_VERSION=3.10
 ARG VICE_SHA256=8e5bac18cbcb9f192380ad3ef881f8790f5b75c41d7b3da65d831985d864d6d1
 ENV DEBIAN_FRONTEND=noninteractive
@@ -81,7 +81,7 @@ FROM scratch AS vice
 COPY --from=vice-build /opt/vice/ /opt/vice/
 
 # Python dependencies are resolved on plain Ubuntu so an OpenCBM change keeps them cached.
-FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS pydeps
+FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS pydeps
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /venv
