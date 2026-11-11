@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Digest-pinned base images held in an OCI layout so builds never resolve them
-# against a registry.
+# Digest-pinned images held in an OCI layout so CI never re-downloads them.
 #   basecache.sh key            cache key over every pinned FROM
 #   basecache.sh fetch          rebuild the layout, reusing images already in it
 #   basecache.sh up             start buildkitd from the layout, print build contexts
