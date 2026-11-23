@@ -1,7 +1,7 @@
-"""Build a G64 from a ``read --archive`` folder with every seam cut inside a sync.
+"""Build a G64 from capture archives with every seam cut inside a sync.
 
-Each revolution runs from inside a sync to the same point of that sync's copy
-one index period later, so the seam falls in a sync and the length is exact.
+A revolution runs mid-sync to the same point one period later; sectors bad in it
+are spliced, sync to sync, from revolutions where they decode.
 Usage: ``python tools/captures_g64.py OUT.g64 CAPS/read-*.npz [MORE/GLOB ...]``.
 """
 
@@ -116,33 +116,81 @@ def whole_bytes(rev):
     return np.packbits(rev[: len(rev) - len(rev) % 8])
 
 
+def sync_bytes(rev):
+    """G64 bytes of a revolution whose seam is inside a sync: padded there with
+    ones, so the sync only lengthens (trimming could take it below 10 bits)."""
+    return np.packbits(np.concatenate([rev, np.ones(-len(rev) % 8, np.uint8)]))
+
+
+def _mid_syncs(bits, circular):
+    starts, lengths = runs_of_ones(bits, circular=circular)
+    return starts + lengths, starts + lengths // 2
+
+
+def _sector_span(bits, header_end, circular):
+    """Mid of the sync ending at ``header_end`` to mid of the second sync after it
+    (data block sync, then the next header's), unwrapped; None if not found."""
+    ends, mids = _mid_syncs(bits, circular)
+    hit = np.flatnonzero(ends == header_end)
+    if hit.size == 0 or (not circular and hit[0] + 2 >= len(mids)):
+        return None
+    i, j = int(hit[0]), int(hit[0]) + 2
+    stop = int(mids[j % len(mids)]) + (len(bits) if j >= len(mids) else 0)
+    return int(mids[i]), stop
+
+
+def splice(rev, track, sources):
+    """``rev`` with each bad sector replaced, header sync to next header sync, by
+    its span from the first of ``sources`` (bit streams) where it decodes; the
+    splices fall mid-sync like the seam. Returns ``(rev, spliced sectors)``."""
+    done = []
+    for sector in np.flatnonzero(decode_track(rev, track).errors != SectorError.OK):
+        for src in sources:
+            good = decode_track(src, track)
+            if good.errors[sector] != SectorError.OK:
+                continue
+            here = _sector_span(
+                rev, int(decode_track(rev, track).offsets[sector]), True
+            )
+            there = _sector_span(src, int(good.offsets[sector]), False)
+            if here is None or there is None:
+                continue
+            ring = np.concatenate([rev, rev])
+            rev = np.concatenate(
+                [ring[here[1] : here[0] + len(rev)], src[slice(*there)]]
+            )
+            done.append(int(sector))
+            break
+    return rev, done
+
+
 def build(captures):
     """``(G64, report)`` from ``{key: [Capture]}``."""
     out, report = G64(), {}
     for key in tqdm(sorted(captures), desc="g64", unit="trk"):
         track = (key & 0x7F) // 2
-        cuts = [c for c in (best_cut(cap, track) for cap in captures[key]) if c]
-        cap, bits, cycle = best_revolution(captures[key], key)
-        err, data, how = errors(bits, track), revolution_bytes(bits, cycle), "index"
+        caps = captures[key]
+        cuts = [c for c in (best_cut(cap, track) for cap in caps) if c]
+        cap, bits, cycle = best_revolution(caps, key)
+        err, data, row = errors(bits, track), revolution_bytes(bits, cycle), {}
+        row["cut"] = "index"
         if cuts:
-            best = min(cuts, key=lambda c: c[0])
-            if best[0] <= err:
-                err, data, how = best[0], whole_bytes(best[1]), "sync-cut"
+            best_err, rev = min(cuts, key=lambda c: c[0])
+            if best_err:
+                sources = [np.asarray(c.bits, np.uint8) for c in caps]
+                rev, row["spliced"] = splice(rev, track, sources)
+                best_err = errors(rev, track)
+            if best_err <= err:
+                err, data, row["cut"] = best_err, sync_bytes(rev), "sync-cut"
         elif len(runs_of_ones(bits)[0]) == 0:
-            reps = [r for r in (repeat_cut(c) for c in captures[key]) if r]
+            reps = [r for r in (repeat_cut(c) for c in caps) if r]
             if reps:
                 agreement, rev = max(reps, key=lambda r: r[0])
-                data, how = whole_bytes(rev), f"repeat-cut {agreement:.4f}"
+                data, row["cut"] = whole_bytes(rev), "repeat-cut"
+                row["agreement"] = round(agreement, 4)
         speed = cap.speed if cap.speed is not None else cap.zone
         out.tracks[key] = G64Track(data, speed)
-        report[key] = {
-            "track": key / 2,
-            "errors": err,
-            "cut": how,
-            "kind": cycle.kind.name,
-            "match": round(float(cycle.match), 4),
-            "bytes": len(data),
-        }
+        report[key] = {"track": key / 2, "errors": err, **row, "bytes": len(data)}
     return out, report
 
 
