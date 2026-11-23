@@ -1,9 +1,8 @@
-"""Compiled drive simulator: py65's 6502 with the drive's memory map, VIA1, CIA, disk.
+"""Compiled drive simulator: jennings' 6502 with the drive's memory map, VIA1, CIA, disk.
 
 ``run_drive`` executes whole instructions as Drive1541.step, Via, Cia (simcia) and
-simdisk.Mechanism would; an instruction needing Python (unimplemented opcode, raising
-access, unfetched track, corrupt hook) runs through py65, then any mechanism update owed.
-"""
+simdisk.Mechanism would; an instruction needing Python (illegal opcode, raising access,
+unfetched track, corrupt hook) runs through jennings, then any mechanism update owed."""
 
 # pylint: disable=too-many-return-statements,too-many-branches
 
@@ -14,13 +13,13 @@ import operator
 import weakref
 
 import numpy as np
-from py65.devices.mpu6502 import MPU
+from jennings.devices.mpu6502 import MPU
 
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA
 from .sim import ACR_T1_FREERUN, FDC, IO_ACCESS_CYCLE, IRQ_T1, IRQ_T2, OPEN, RAM
 from .sim import CIA, PA_FSDIR, RETURN_TRAP, ROM, VIA1, VIA2, Bus, SimTimeout
 from .sim import PB_ATN_IN, PB_ATNA, PB_CLK_IN, PB_CLK_OUT, PB_DATA_IN, PB_DATA_OUT
-from .sim import Drive1541, Drive1571, Drive1581
+from .sim import official, Drive1541, Drive1571, Drive1581
 from .sim import HOST_LENGTHS, HOST_PROGRAMS, PUT, REL, SAMPLE, SET, SHL, WAIT
 from .simdisk import CA1_FLAG, CELL_EPS, CPU_HZ, HT_MAX, HT_STOP
 from .simdisk import INDEX_FRACTION, PB_INPUTS, PB_MOTOR, PB_PHASE, PB_SYNC, PB_WE
@@ -80,7 +79,7 @@ BRANCHES |= {"VC": "V0", "VS": "V1"}
 
 
 def decode(name):
-    """(kind, p1, p2) of a py65 mnemonic: registers, flags and deltas as parameters."""
+    """(kind, p1, p2) of a jennings mnemonic: registers, flags and deltas as parameters."""
     if name[:2] in ("LD", "ST"):
         return KINDS.index(name[:2]), REGS[name[2]], 0
     if name[0] == "T":
@@ -101,7 +100,7 @@ def tables():
     """Per opcode: kind (-1 unimplemented), mode, cycles, extra cycles, p1, p2."""
     out = np.full((256, 6), -1, np.int64)
     for i, (name, mode) in enumerate(MPU.disassemble):
-        if MPU.instruct[i].__name__ != "inst_not_implemented":
+        if official(i, name):
             kind, p1, p2 = decode(name)
             mode = MODES.index(mode)
             out[i] = kind, mode, MPU.cycletime[i], MPU.extracycles[i], p1, p2
@@ -545,7 +544,7 @@ def sbc(s, data):
 
 @kernel
 def rmw(s, kind, t):
-    """py65's shifts, rotates, increments and decrements of t."""
+    """jennings' shifts, rotates, increments and decrements of t."""
     if kind in (INC, DEC):
         t = (t + (1 if kind == INC else -1)) & 0xFF
     else:
@@ -560,7 +559,7 @@ def rmw(s, kind, t):
 
 @kernel
 def operate(s, kind, reg, data):
-    """py65's instructions that read an operand value."""
+    """jennings' instructions that read an operand value."""
     if kind == LD:
         s[reg] = data
         nz(s, data)
@@ -638,7 +637,7 @@ def control(s, amap, store, kind, mode, p1, p2, pc):
 
 @kernel
 def effective(s, amap, store, mode, extra, pc):
-    """(address, page-crossing cycles) of a memory operand, as py65 computes it."""
+    """(address, page-crossing cycles) of a memory operand, as jennings computes it."""
     b = peek(amap, store, pc)
     if mode == M_ZPG:
         return b, 0
@@ -906,7 +905,8 @@ def unpack(drive, s, f, cells, ev):
     """Write run's state back to the Python objects."""
     mech = drive.mech
     for (idx, _, names), obj in ((MPU_GROUP, drive.mpu), (VIA_GROUP, drive.via1)):
-        vars(obj).update(zip(names, s[idx].tolist()))
+        for name, value in zip(names, s[idx].tolist()):
+            setattr(obj, name, value)
     drive.via1.regs[:] = s[VREGS : VREGS + 16].astype(np.uint8).tobytes()
     unpack_cia(drive.cia, s)
     drive.cycles, drive.pb_out = int(s[CYC]), int(s[PBOUT])
@@ -937,14 +937,14 @@ def unpack(drive, s, f, cells, ev):
 
 
 def python_step(drive, lines):
-    """One py65 instruction; whether it changed the drive's IEC lines."""
+    """One jennings instruction; whether it changed the drive's IEC lines."""
     before = drive.drive_lines()
     drive.step()
     return lines and drive.drive_lines() != before
 
 
 def finish(drive, s, code):
-    """Python's share of a stop: a deferred update or a py65 step (its cycles)."""
+    """Python's share of a stop: a deferred update or a jennings step (its cycles)."""
     if code == DEFERRED:
         if s[RESAMPLE]:
             drive.mech._resample(int(s[DEFER]))  # pylint: disable=protected-access

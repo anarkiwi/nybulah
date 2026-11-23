@@ -1,26 +1,26 @@
-"""The compiled drive model (nybulah.simfast) against py65 and the Python devices."""
+"""The compiled drive model (nybulah.simfast) against jennings and the Python devices."""
 
 import numpy as np
 import pytest
-from py65.assembler import Assembler
-from py65.devices.mpu6502 import MPU
+from jennings.assembler import Assembler
+from jennings.devices.mpu6502 import MPU
 
 from nybulah import simcia, simfast
 from nybulah.monitor import Monitor
 from nybulah.opencbm import IEC_DATA, IEC_SRQ
 from nybulah.nibbler import Nibbler
-from nybulah.sim import Drive1541, Drive1571, SimIOWrite, SimTimeout
+from nybulah.sim import Drive1541, Drive1571, SimIOWrite, SimTimeout, official
 from nybulah.simhost import SimCBM
 from nybulah.simdisk import Media, disk_drive
 
 HIGH = (0x00, 0x01, 0x03, 0x07, 0x18, 0x1C, 0x20, 0x40, 0x60, 0x80, 0xC0, 0xFF)
 LOW = (0x00, 0x01, 0x04, 0x05, 0x08, 0x09, 0x0C, 0x0D, 0x0F, 0x10, 0xFE, 0xFF)
 LINKS = {"drive", "media", "bus", "mpu", "via1", "cia", "mech", "memory", "corrupt"}
-SKIP = LINKS | {"fast", "tracks", "_cells", "excycles", "addcycles"}
+SKIP = LINKS | {"fast", "tracks", "_cells", "excycles", "addcycles", "_vm", "_cache"}
 
 
 def snapshot(obj):
-    """Attributes of obj other than links, hooks and py65's per-instruction scratch."""
+    """Attributes of obj other than links, hooks and jennings' per-instruction scratch."""
     out = {}
     for k, v in vars(obj).items():
         if k in SKIP or callable(v):
@@ -31,9 +31,19 @@ def snapshot(obj):
     return out
 
 
+def mpu_registers(drive):
+    """The register file, which jennings holds outside the instance dict."""
+    mpu = drive.mpu
+    return dict(zip("axyspPC", (mpu.a, mpu.x, mpu.y, mpu.sp, mpu.p, mpu.pc)))
+
+
 def state(drive):
-    """Everything py65, Via, Mechanism and Media hold for a drive."""
-    out = [snapshot(drive), snapshot(drive.mpu), snapshot(drive.via1)]
+    """Everything jennings, Via, Mechanism and Media hold for a drive."""
+    out = [
+        snapshot(drive),
+        snapshot(drive.mpu) | mpu_registers(drive),
+        snapshot(drive.via1),
+    ]
     out.append(drive.bus.host_lines)
     out.append(None if drive.cia is None else snapshot(drive.cia))
     if drive.mech is not None:
@@ -58,7 +68,7 @@ def registers(drive):
 
 
 def pair(make):
-    """(py65 drive, compiled drive) built alike."""
+    """(jennings drive, compiled drive) built alike."""
     ref, fast = make(), make()
     ref.fast, fast.fast = False, True
     assert simfast.eligible(fast) and not simfast.eligible(ref)
@@ -138,9 +148,7 @@ def lockstep(ref, fast, instructions):
     return raised
 
 
-IMPLEMENTED = [
-    i for i, f in enumerate(MPU.instruct) if f.__name__ != "inst_not_implemented"
-]
+IMPLEMENTED = [i for i, (name, _) in enumerate(MPU.disassemble) if official(i, name)]
 
 
 def random_program(rng, drive):
@@ -152,12 +160,12 @@ def random_program(rng, drive):
 
 
 @pytest.mark.parametrize("make", [Drive1541, Drive1571, mechanism_drive("1571")])
-def test_every_opcode_matches_py65(make):
+def test_every_opcode_matches_jennings(make):
     opcode_trials(make, 24, 1)
 
 
 @pytest.mark.parametrize("seed", range(3))
-def test_random_programs_match_py65(seed):
+def test_random_programs_match_jennings(seed):
     rng = np.random.default_rng(seed)
     ref, fast = pair(mechanism_drive("1541"))
     for _ in range(40):
@@ -187,18 +195,18 @@ def test_bulk_runs_match_single_steps():
 
 
 class Twin:
-    """Monitor over a py65 drive and a compiled one: equal after every routine,
+    """Monitor over a jennings drive and a compiled one: equal after every routine,
     instruction by instruction for the first ``window`` of each."""
 
     def __init__(self, ref, fast, window):
         self.ref, self.fast, self.window = ref, fast, window
-        self.py65 = [0, 0]
+        self.jennings = [0, 0]
         for i, d in enumerate((ref, fast)):
             d.mpu.step = self.counted(d.mpu.step, i)
 
     def counted(self, step, i):
         def wrapped():
-            self.py65[i] += 1
+            self.jennings[i] += 1
             return step()
 
         return wrapped
@@ -240,17 +248,17 @@ def twin_rig(g64, model, window, **kw):
 @pytest.mark.parametrize(
     "model, start", [("1541", "now"), ("1541", "sync"), ("1571", "index")]
 )
-def test_drive_programs_match_py65(g64, model, start):
+def test_drive_programs_match_jennings(g64, model, start):
     twin, nib = twin_rig(g64, model, 3000)
     nib.capture(36, start=start)
     nib.write_track(40, bytes(range(256)) * 20)
     nib.capture(40, side=1 if model == "1571" else 0)
     nib.close()
     assert twin.fast.mech.log == twin.ref.mech.log
-    assert twin.py65[1] < twin.py65[0] / 1000
+    assert twin.jennings[1] < twin.jennings[0] / 1000
 
 
-def test_corrupt_writes_match_py65(g64):
+def test_corrupt_writes_match_jennings(g64):
     twin, nib = twin_rig(g64, "1541", 0)
     for d in (twin.ref, twin.fast):
         d.mech.corrupt = lambda key, cell, bit: bit ^ (cell % 97 == 0)
@@ -259,7 +267,7 @@ def test_corrupt_writes_match_py65(g64):
 
 
 @pytest.mark.parametrize("proto", ["s1", "s2"])
-def test_bus_transfers_match_py65(proto):
+def test_bus_transfers_match_jennings(proto):
     rng = np.random.default_rng(2)
     data = rng.integers(0, 256, 700, dtype=np.uint8).tobytes()
     drives = []
@@ -274,7 +282,7 @@ def test_bus_transfers_match_py65(proto):
     assert not differences(drives[0], drives[1])
 
 
-def test_transfer_times_out_like_py65():
+def test_transfer_times_out_like_jennings():
     for fast in (False, True):
         cbm = SimCBM(Drive1541(device=10), dev=10, budget=500)
         cbm.drive.fast = fast
@@ -288,7 +296,7 @@ def test_transfer_times_out_like_py65():
             cbm.s2_write(b"\x01")
 
 
-def test_ineligible_drives_run_on_py65():
+def test_ineligible_drives_run_on_jennings():
     drive = disk_drive("1541", Media())
     drive.fast = True
     drive.mech.media.turns = lambda now: 0.0
@@ -302,10 +310,10 @@ def test_ineligible_drives_run_on_py65():
     assert drive.cycles == 12
 
 
-def test_decoded_tables_follow_py65():
+def test_decoded_tables_follow_jennings():
     names = [n for n, _ in MPU.disassemble]
     kinds = simfast.OPS[:, 0]
-    assert (kinds >= 0).sum() == len(IMPLEMENTED)
+    assert (kinds >= 0).sum() == len(IMPLEMENTED) == 151
     assert {simfast.KINDS[k] for k in kinds[kinds >= 0]} >= {"LD", "BR", "TR"}
     assert all(
         simfast.KINDS[kinds[i]] in names[i] or kinds[i] < simfast.ADC
@@ -314,7 +322,7 @@ def test_decoded_tables_follow_py65():
 
 
 def test_interpreted_kernels_match_compiled(g64, monkeypatch):
-    """The kernels as plain Python agree with py65 too (and are measured by coverage)."""
+    """The kernels as plain Python agree with jennings too (and are measured by coverage)."""
     for module in (simfast, simcia):
         for name, obj in vars(module).items():
             if hasattr(obj, "py_func"):
@@ -322,13 +330,13 @@ def test_interpreted_kernels_match_compiled(g64, monkeypatch):
     opcode_trials(mechanism_drive("1571"), 2, 4)
     twin, nib = twin_rig(g64, "1571", 200)
     nib.write_track(4, bytes(range(256)) * 4, start="index")
-    test_bus_transfers_match_py65("s2")
-    test_cia_shift_out_matches_py65(1)
+    test_bus_transfers_match_jennings("s2")
+    test_cia_shift_out_matches_jennings(1)
     assert twin.ref.mech.log == twin.fast.mech.log
 
 
 def assemble(org, *lines):
-    """py65-assembled code at org; "lbl:" lines define labels for later branches."""
+    """jennings-assembled code at org; "lbl:" lines define labels for later branches."""
     asm, out, labels = Assembler(MPU()), bytearray(), {}
     for line in lines:
         if line.endswith(":"):
@@ -383,7 +391,7 @@ SHIFT_IN = assemble(0x400, *SETUP, "lda #$01", "sta $400e", *shift_in(0x20), "rt
 
 
 @pytest.mark.parametrize("delay", [0, 2])
-def test_cia_shift_out_matches_py65(delay):
+def test_cia_shift_out_matches_jennings(delay):
     ref, fast = pair(Drive1571)
     for d in (ref, fast):
         d.cia.delay = delay
@@ -400,7 +408,7 @@ def test_cia_shift_out_matches_py65(delay):
     assert fast.halted and not differences(ref, fast)
 
 
-def test_cia_shift_in_matches_py65():
+def test_cia_shift_in_matches_jennings():
     ref, fast = pair(Drive1571)
     for d in (ref, fast):
         d.load(0x400, SHIFT_IN)

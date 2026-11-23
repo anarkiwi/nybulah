@@ -1,15 +1,15 @@
 """Cycle-stepped 1541/1571, IEC bus and xum1541 model: drive code without hardware.
 
-py65 6502 with the model's address decoding, VIA1 port B on an open-collector bus with
+jennings 6502 with the model's address decoding, VIA1 port B on an open-collector bus with
 ATN auto-acknowledge, VIA1 timers 1 and 2 and the 1571's 6526 (SRQ, DATA through the
 drivers VIA1 PA1 turns) clocked by the CPU cycle counter; VIA2 and the WD1770 come from
-nybulah.simdisk, simfast runs drives compiled unless NYBULAH_SIM=py65, simhost hosts.
+nybulah.simdisk, simfast runs drives compiled unless NYBULAH_SIM=jennings, simhost hosts.
 """
 
 import os
 
 import numpy as np
-from py65.devices.mpu6502 import MPU
+from jennings.devices.mpu6502 import MPU
 
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
 from .simwd import Wd
@@ -23,6 +23,21 @@ PB_DATA_IN, PB_DATA_OUT, PB_CLK_IN, PB_CLK_OUT, PB_ATNA, PB_ATN_IN = (
     0x80,
 )
 RETURN_TRAP = 0xFFF0
+OFFICIAL = frozenset(
+    "ADC AND ASL BCC BCS BEQ BIT BMI BNE BPL BRK BVC BVS CLC CLD CLI CLV CMP CPX CPY "
+    "DEC DEX DEY EOR INC INX INY JMP JSR LDA LDX LDY LSR NOP ORA PHA PHP PLA PLP ROL "
+    "ROR RTI RTS SBC SEC SED SEI STA STX STY TAX TAY TSX TXA TXS TYA".split()
+)
+UNOFFICIAL_SBC = {0xEB}
+
+
+def official(op, name):
+    """Whether an opcode is one of the 151 documented ones."""
+    return (
+        name in OFFICIAL and op not in UNOFFICIAL_SBC and (name != "NOP" or op == 0xEA)
+    )
+
+
 RAM, ROM, VIA1, OPEN, IO, VIA2, FDC, CIA = range(8)
 ACR_T1_FREERUN, IRQ_T1, IRQ_T2 = 0x40, 0x40, 0x20
 IO_ACCESS_CYCLE = 3
@@ -493,11 +508,12 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
         self.cycles = 0
         self.pb_out = 0
         self.mpu = MPU(memory=_Memory(self))
+        self.mpu.bus_dummies = False
         self.halted = True
         self.resets_to_boot, self._pending = resets_to_boot, 0
         self.mech = None
         self._pc = -1
-        self.fast = os.environ.get("NYBULAH_SIM") != "py65"
+        self.fast = os.environ.get("NYBULAH_SIM") != "jennings"
         self.dos_addresses()
 
     def dos_addresses(self):
@@ -596,8 +612,9 @@ class Drive1541:  # pylint: disable=too-many-instance-attributes
     def call(self, addr):
         """Start executing at addr; an RTS from there halts the CPU."""
         mpu = self.mpu
-        mpu.sp = 0xFF
-        mpu.stPushWord(RETURN_TRAP - 1)
+        ret = RETURN_TRAP - 1
+        mpu.memory[0x1FF], mpu.memory[0x1FE] = ret >> 8, ret & 0xFF
+        mpu.sp = 0xFD
         mpu.pc = addr
         self.halted, self._pending = False, self.resets_to_boot
 

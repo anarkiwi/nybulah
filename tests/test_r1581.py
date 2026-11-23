@@ -883,7 +883,7 @@ def test_status_edges_follow_the_index_after_a_seek(media):
     no_stops(sim)
 
 
-@pytest.mark.parametrize("pad", [1, 3])
+@pytest.mark.parametrize("pad", [1, 2])
 def test_poll_track_reads_a_revolution(media, pad):
     """drive/rtpoll.s: one revolution through a fixed poll, the ring's last bytes in
     order, its sectors decoding; pad out of range refused."""
