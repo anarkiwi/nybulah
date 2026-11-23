@@ -148,7 +148,7 @@ def lockstep(ref, fast, instructions):
     return raised
 
 
-IMPLEMENTED = [i for i, (name, _) in enumerate(MPU.disassemble) if official(i, name)]
+IMPLEMENTED = [i for i in range(256) if official(i)]
 
 
 def random_program(rng, drive):

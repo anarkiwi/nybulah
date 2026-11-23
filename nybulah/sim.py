@@ -10,6 +10,7 @@ import os
 
 import numpy as np
 from jennings.devices.mpu6502 import MPU
+from jennings.opcodes import ILLEGAL_OPCODES
 
 from .opencbm import IEC_ATN, IEC_CLOCK, IEC_DATA, IEC_SRQ, OpenCBMError
 from .simwd import Wd
@@ -23,19 +24,11 @@ PB_DATA_IN, PB_DATA_OUT, PB_CLK_IN, PB_CLK_OUT, PB_ATNA, PB_ATN_IN = (
     0x80,
 )
 RETURN_TRAP = 0xFFF0
-OFFICIAL = frozenset(
-    "ADC AND ASL BCC BCS BEQ BIT BMI BNE BPL BRK BVC BVS CLC CLD CLI CLV CMP CPX CPY "
-    "DEC DEX DEY EOR INC INX INY JMP JSR LDA LDX LDY LSR NOP ORA PHA PHP PLA PLP ROL "
-    "ROR RTI RTS SBC SEC SED SEI STA STX STY TAX TAY TSX TXA TXS TYA".split()
-)
-UNOFFICIAL_SBC = {0xEB}
 
 
-def official(op, name):
+def official(op):
     """Whether an opcode is one of the 151 documented ones."""
-    return (
-        name in OFFICIAL and op not in UNOFFICIAL_SBC and (name != "NOP" or op == 0xEA)
-    )
+    return op not in ILLEGAL_OPCODES
 
 
 RAM, ROM, VIA1, OPEN, IO, VIA2, FDC, CIA = range(8)

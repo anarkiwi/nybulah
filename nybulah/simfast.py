@@ -100,7 +100,7 @@ def tables():
     """Per opcode: kind (-1 unimplemented), mode, cycles, extra cycles, p1, p2."""
     out = np.full((256, 6), -1, np.int64)
     for i, (name, mode) in enumerate(MPU.disassemble):
-        if official(i, name):
+        if official(i):
             kind, p1, p2 = decode(name)
             mode = MODES.index(mode)
             out[i] = kind, mode, MPU.cycletime[i], MPU.extracycles[i], p1, p2
