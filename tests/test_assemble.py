@@ -116,6 +116,29 @@ def rotation_of(rev, cut):
     return int(np.flatnonzero(np.all(windows[: len(rev)] == cut[:128], axis=1))[0])
 
 
+@pytest.mark.parametrize("track", [3, 20, 27, 33])
+def test_header_period_is_the_revolution_without_index(track):
+    rev = dos_revolution(
+        track, data=sectors(17 if track > 30 else 21 if track < 18 else 18)
+    )
+    cap = captured(rev, 777, 2.3, index_error=0)
+    cap = Capture(cap.bits, cap.zone)
+    assert abs(asm.header_period(cap.bits, track) - len(rev)) <= 2
+    assert abs(asm.capture_period(cap, track) - len(rev)) <= 2
+    assert asm.header_period(cap.bits, track + 1) is None
+
+
+def test_best_cut_never_takes_a_cut_holding_a_sector_twice(monkeypatch):
+    rev = dos_revolution()
+    cap = Capture(captured(rev, 777, 2.3, index_error=0).bits, 3)
+    monkeypatch.setattr(asm, "capture_period", lambda c, t=None: int(len(rev) * 1.15))
+    assert asm.best_cut(cap, 3) is None
+    monkeypatch.undo()
+    err, cut = asm.best_cut(cap, 3)
+    assert err == 0 and len(cut) == len(rev)
+    assert (decode_track(cut, 3).copies == 1).all()
+
+
 def test_repeat_cut_recovers_a_syncless_revolution_with_and_without_index():
     rev = syncless()
     cap = captured(rev, 777, 2.5, index_error=4)

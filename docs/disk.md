@@ -291,13 +291,17 @@ python tools/vice_boot.py fixed.g64 --video pal --screenshot boot.ppm
    source replaces an earlier one's track whole. `--tracks N` drops tracks
    above N. Per track:
    - The period of a capture is its mean index period with two or more
-     index marks, else (a stream that never saw the index) the shift near
-     the zone's nominal revolution at which the bits best agree with
-     themselves (FFT autocorrelation).
+     index marks, else (a stream that never saw the index, such as the
+     second side of a flippy whose index window the sensor misses) the
+     median distance between successive headers of the same sector, else
+     for a track without headers the shift near the zone's nominal
+     revolution at which the bits best agree with themselves (FFT
+     autocorrelation, which can lock onto a false peak on formatted data).
    - **sync-cut**: one revolution runs from the middle of a sync to the same
      point of that sync's copy one period later, so its length comes from
      the data, not the index timing.
-     The cut with the fewest sector errors is kept. A sector bad in it is
+     A cut holding any sector header twice spans more than a revolution and
+     is never kept; of the rest, the one with the fewest sector errors is. A sector bad in it is
      spliced from another revolution or capture where it decodes (below).
      The revolution is padded to whole bytes with ones at the seam, which
      only lengthens the sync there.

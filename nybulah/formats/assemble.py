@@ -11,7 +11,7 @@ import pathlib
 import numpy as np
 from tqdm import tqdm
 
-from ..analysis.gcr import bits_per_revolution, runs_of_ones
+from ..analysis.gcr import bits_per_revolution, decode_bits, runs_of_ones
 from ..analysis.sector import SectorError, decode_track
 from .g64 import G64, G64Track
 from .image import (
@@ -51,13 +51,17 @@ def errors(bits, track):
 
 
 def best_cut(capture, track, limit=16):
-    """``(errors, bits)`` of the best sync-cut revolution, or None."""
+    """``(errors, bits)`` of the best sync-cut revolution, or None. A cut holding
+    a sector header twice spans more than a revolution and is never chosen."""
     bits = np.asarray(capture.bits, np.uint8)
-    period = capture_period(capture)
+    period = capture_period(capture, track)
     if period is None:
         return None
-    cuts = sync_cuts(bits, period)[:limit]
-    scored = ((errors(bits[a:b], track), bits[a:b]) for a, b in cuts)
+    scored = []
+    for a, b in sync_cuts(bits, period)[:limit]:
+        dec = decode_track(bits[a:b], track)
+        if dec.copies is None or not (dec.copies > 1).any():
+            scored.append((int((dec.errors != SectorError.OK).sum()), bits[a:b]))
     return min(scored, key=lambda s: s[0], default=None)
 
 
@@ -94,13 +98,36 @@ def self_period(bits, nominal, spread=0.2, tail=2048):
     return lo + int(np.argmax(corr[lo:hi]))
 
 
-def capture_period(capture):
+def header_period(bits, track):
+    """Median distance between successive headers of the same sector of ``track``
+    (checksum-valid, sync-framed), or None without a repeat."""
+    starts, lengths = runs_of_ones(bits)
+    ends = (starts + lengths)[starts + lengths + 80 <= len(bits)]
+    if len(ends) == 0:
+        return None
+    hdr, valid = decode_bits(bits[ends[:, None] + np.arange(80)])
+    good = (
+        (hdr[:, 0] == 8)
+        & valid[:, :6].all(axis=1)
+        & (np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0)
+        & (hdr[:, 3] == track)
+    )
+    sector, pos = hdr[good, 2], ends[good]
+    order = np.lexsort((pos, sector))
+    sector, pos = sector[order], pos[order]
+    gaps = np.diff(pos)[sector[1:] == sector[:-1]]
+    return int(np.median(gaps)) if len(gaps) else None
+
+
+def capture_period(capture, track=None):
     """Bits per revolution: the mean index period with two or more index marks,
-    else the self-agreement shift near the zone's nominal length, or None."""
+    else the recurrence of ``track``'s sector headers, else the self-agreement
+    shift near the zone's nominal length, or None."""
     if capture.index is not None and len(capture.index) >= 2:
         return int(round(np.diff(np.asarray(capture.index)).mean()))
     bits = np.asarray(capture.bits, np.uint8)
-    return self_period(bits, bits_per_revolution(capture.zone))
+    period = header_period(bits, track) if track is not None else None
+    return period or self_period(bits, bits_per_revolution(capture.zone))
 
 
 def repeat_cut(capture, floor=0.99):
