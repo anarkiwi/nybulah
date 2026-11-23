@@ -11,8 +11,8 @@ import pathlib
 import numpy as np
 from tqdm import tqdm
 
-from ..analysis.gcr import bits_per_revolution, decode_bits, runs_of_ones
-from ..analysis.sector import SectorError, decode_track
+from ..analysis.gcr import bits_per_revolution, runs_of_ones
+from ..analysis.sector import SectorError, decode_track, sync_headers
 from .g64 import G64, G64Track
 from .image import (
     CAPTURE_PATTERN,
@@ -101,18 +101,9 @@ def self_period(bits, nominal, spread=0.2, tail=2048):
 def header_period(bits, track):
     """Median distance between successive headers of the same sector of ``track``
     (checksum-valid, sync-framed), or None without a repeat."""
-    starts, lengths = runs_of_ones(bits)
-    ends = (starts + lengths)[starts + lengths + 80 <= len(bits)]
-    if len(ends) == 0:
-        return None
-    hdr, valid = decode_bits(bits[ends[:, None] + np.arange(80)])
-    good = (
-        (hdr[:, 0] == 8)
-        & valid[:, :6].all(axis=1)
-        & (np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0)
-        & (hdr[:, 3] == track)
-    )
-    sector, pos = hdr[good, 2], ends[good]
+    ends, rows = sync_headers(bits)
+    mine = rows[:, 3] == track
+    sector, pos = rows[mine, 2], ends[mine]
     order = np.lexsort((pos, sector))
     sector, pos = sector[order], pos[order]
     gaps = np.diff(pos)[sector[1:] == sector[:-1]]

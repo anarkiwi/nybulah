@@ -290,11 +290,24 @@ def merge_decodes(a, b):
     return out
 
 
+def sync_headers(bits, circular=False):
+    """``(ends, rows)``: the sync end before each checksum-valid header block and
+    its decoded bytes; a non-circular stream drops headers running past its end."""
+    bits = np.asarray(bits, dtype=np.uint8)
+    starts, lengths = runs_of_ones(bits, circular=circular)
+    empty = np.zeros(0, np.int64), np.zeros((0, 8), np.uint8)
+    if len(starts) == 0 or lengths[0] >= len(bits):
+        return empty
+    ends = (starts + lengths) % len(bits)
+    if not circular:
+        ends = ends[ends + 80 <= len(bits)]
+        if len(ends) == 0:
+            return empty
+    hdr, valid = decode_bits(_windows(bits, ends, 80))
+    ok = valid_headers(hdr, valid)
+    return ends[ok], hdr[ok]
+
+
 def header_tracks(bits):
     """Track numbers in the checksum-valid sector headers of a circular bit stream."""
-    bits = np.asarray(bits, dtype=np.uint8)
-    starts, lengths = runs_of_ones(bits, circular=True)
-    if len(starts) == 0 or lengths[0] >= len(bits):
-        return np.zeros(0, np.uint8)
-    hdr, valid = decode_bits(_windows(bits, (starts + lengths) % len(bits), 80))
-    return hdr[valid_headers(hdr, valid), 3]
+    return sync_headers(bits, circular=True)[1][:, 3]
