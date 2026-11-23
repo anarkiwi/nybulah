@@ -349,10 +349,10 @@ def listening_port(pid):
     return None
 
 
-def command_line(machine, port, drives, history_lines, warp=True):
+def command_line(machine, port, drives, history_lines, warp=True, extra=()):
     """Emulator arguments for {unit: (model, image)} with true drive emulation, every
     other unit off, no sound, a fixed random seed, the binary monitor on port (0: one
-    the system picks)."""
+    the system picks), then ``extra`` (e.g. ``-ntsc``)."""
     args = [shutil.which(machine) or machine, "-default", "+logcolorize", "+sound"]
     args += ["-seed", "1", "-binarymonitor"]
     args += ["-binarymonitoraddress", f"ip4://127.0.0.1:{port}"]
@@ -363,7 +363,7 @@ def command_line(machine, port, drives, history_lines, warp=True):
         if model:
             args += [f"-drive{unit}truedrive", f"-drive{unit}idle", "0"]
             args += [f"-{unit}", str(image)] if image is not None else []
-    return args
+    return args + list(extra)
 
 
 class Vice:
@@ -373,13 +373,19 @@ class Vice:
     CPU history for :meth:`history`."""
 
     def __init__(
-        self, drives, machine="x64sc", history_lines=200_000, timeout=60.0, warp=True
-    ):
+        self,
+        drives,
+        machine="x64sc",
+        history_lines=200_000,
+        timeout=60.0,
+        warp=True,
+        extra=(),
+    ):  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self.machine, self.drives = machine, dict(drives)
         self.port = None
         self._tmp = pathlib.Path(tempfile.mkdtemp(prefix="vice-"))
         self.log = self._tmp / "vice.log"
-        args = command_line(machine, 0, self.drives, history_lines, warp)
+        args = command_line(machine, 0, self.drives, history_lines, warp, extra)
         env = os.environ | {"HOME": str(self._tmp)}
         with open(self.log, "wb") as log:
             self.proc = subprocess.Popen(  # pylint: disable=consider-using-with
