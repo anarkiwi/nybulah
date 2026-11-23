@@ -4,7 +4,7 @@ import argparse
 
 from . import bench, bus, diskcmd, homeprobe, hwcheck, pattern, ramcheck, ramprobe
 from . import ramtest, streamprobe, syncprobe
-from .imagecmd import Convert, Flux, Info, Map
+from .imagecmd import Assemble, Convert, Flux, Info, Map, Patch
 from .survey import Survey
 from .tool import run
 
@@ -24,6 +24,7 @@ COMMANDS = {
 }
 
 COMMANDS.update(convert=Convert, info=Info, map=Map, survey=Survey, flux=Flux)
+COMMANDS.update(assemble=Assemble, patch=Patch)
 
 
 def main(argv=None, cbm=None):

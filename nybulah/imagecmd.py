@@ -1,4 +1,5 @@
-"""convert, info, map and flux subcommands: image files only, no drive needed."""
+"""convert, info, map, flux, assemble and patch subcommands: image files only,
+no drive needed."""
 
 import argparse
 import json
@@ -11,7 +12,7 @@ from .analysis import mfm
 from .analysis.diskmap import Cls, disk_map, load_thresholds
 from .analysis.mfmmap import mfm_disk_map
 from .analysis.sector import SectorError
-from .formats import d81, imd, mfmcap
+from .formats import assemble, d81, imd, mfmcap
 from .formats import image as images
 from .formats.d64 import write_d64
 from .formats.g64 import write_g64
@@ -266,3 +267,111 @@ class Flux:
         )
         print(json.dumps(out))
         return out
+
+
+def _numbers(text):
+    lo, _, hi = text.partition("-")
+    return list(range(int(lo), int(hi or lo) + 1))
+
+
+def _donor_spec(text):
+    path, sep, items = text.rpartition(":")
+    if not (sep and path and items):
+        raise argparse.ArgumentTypeError(f"{text}: expected IMAGE:LIST")
+    return pathlib.Path(path), items.split(",")
+
+
+def tracks_spec(text):
+    """``IMAGE:12,13,36-41`` as ``(path, [track])``."""
+    path, items = _donor_spec(text)
+    return path, [t for item in items for t in _numbers(item)]
+
+
+def sectors_spec(text):
+    """``IMAGE:12/6,17/0-3`` as ``(path, {track: [sector]})``."""
+    path, items = _donor_spec(text)
+    picks = {}
+    for item in items:
+        track, sep, sectors = item.partition("/")
+        if not sep:
+            raise argparse.ArgumentTypeError(f"{item}: expected TRACK/SECTOR")
+        picks.setdefault(int(track), []).extend(_numbers(sectors))
+    return path, picks
+
+
+def _patch_options(ap):
+    ap.add_argument(
+        "--tracks-from",
+        action="append",
+        default=[],
+        type=tracks_spec,
+        metavar="IMAGE:T[,T-T]",
+        help="replace whole tracks with those of another image (repeatable)",
+    )
+    ap.add_argument(
+        "--sectors-from",
+        action="append",
+        default=[],
+        type=sectors_spec,
+        metavar="IMAGE:T/S[,T/S-S]",
+        help="splice sectors, sync to sync, from another image (repeatable; "
+        "applied after --tracks-from)",
+    )
+
+
+def _patched(g64, report, args):
+    assemble.patch(g64, report, args.tracks_from, args.sectors_from)
+    args.target.write_bytes(write_g64(g64))
+    rows = [report[k] for k in sorted(report)]
+    for row in rows:
+        print(json.dumps(row))
+    out = {
+        "target": str(args.target),
+        "tracks": rows,
+        "ok": not any(row.get("failed") for row in rows),
+    }
+    print(json.dumps({k: v for k, v in out.items() if k != "tracks"}))
+    return out
+
+
+class Assemble:
+    """Build a G64 from capture archives with every seam inside a sync, then patch it.
+
+    Each SOURCE is a ``read --archive`` directory or a quoted ``DIR/GLOB`` of
+    capture records; a later source replaces a whole track of earlier ones.
+    """
+
+    NEEDS_ADAPTER = False
+
+    @staticmethod
+    def add_arguments(ap):
+        ap.add_argument("target", type=pathlib.Path)
+        ap.add_argument("sources", nargs="+", help="capture DIR or DIR/GLOB")
+        ap.add_argument("--tracks", type=int, default=42, help="highest track kept")
+        _patch_options(ap)
+
+    @staticmethod
+    def execute(args, _cbm=None):
+        g64, report = assemble.assemble(assemble.merged(args.sources, args.tracks))
+        return _patched(g64, report, args)
+
+
+class Patch:
+    """Patch an image into a G64: whole tracks or single sectors from other images.
+
+    Sectors are spliced from the middle of their header sync to the middle of
+    the next header's sync, and every patched track is decoded again.
+    """
+
+    NEEDS_ADAPTER = False
+
+    @staticmethod
+    def add_arguments(ap):
+        ap.add_argument("source", type=pathlib.Path)
+        ap.add_argument("target", type=pathlib.Path)
+        _patch_options(ap)
+        _layout_option(ap)
+
+    @staticmethod
+    def execute(args, _cbm=None):
+        return _patched(images.to_g64(_load(args), True), {}, args)
