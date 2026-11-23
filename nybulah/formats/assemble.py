@@ -52,10 +52,10 @@ def errors(bits, track):
 
 def best_cut(capture, track, limit=16):
     """``(errors, bits)`` of the best sync-cut revolution, or None."""
-    if capture.index is None or len(capture.index) < 2:
-        return None
-    period = int(round(np.diff(np.asarray(capture.index)).mean()))
     bits = np.asarray(capture.bits, np.uint8)
+    period = capture_period(capture)
+    if period is None:
+        return None
     cuts = sync_cuts(bits, period)[:limit]
     scored = ((errors(bits[a:b], track), bits[a:b]) for a, b in cuts)
     return min(scored, key=lambda s: s[0], default=None)
@@ -94,14 +94,20 @@ def self_period(bits, nominal, spread=0.2, tail=2048):
     return lo + int(np.argmax(corr[lo:hi]))
 
 
+def capture_period(capture):
+    """Bits per revolution: the mean index period with two or more index marks,
+    else the self-agreement shift near the zone's nominal length, or None."""
+    if capture.index is not None and len(capture.index) >= 2:
+        return int(round(np.diff(np.asarray(capture.index)).mean()))
+    bits = np.asarray(capture.bits, np.uint8)
+    return self_period(bits, bits_per_revolution(capture.zone))
+
+
 def repeat_cut(capture, floor=0.99):
     """``(agreement, bits)`` of one revolution of a sync-less capture: the mode
     of the window lags fixes its length, the seam sits mid-run of that lag."""
     bits = np.asarray(capture.bits, np.uint8)
-    if capture.index is not None and len(capture.index) >= 3:
-        period = int(round(np.diff(np.asarray(capture.index)).mean()))
-    else:
-        period = self_period(bits, bits_per_revolution(capture.zone))
+    period = capture_period(capture)
     if period is None:
         return None
     starts, lags, agree = window_lags(bits, period)

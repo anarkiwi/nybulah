@@ -90,6 +90,21 @@ def test_sync_cuts_need_two_syncs():
     assert asm.best_cut(Capture(np.zeros(1000, np.uint8), 3), 3) is None
 
 
+@pytest.mark.parametrize("index", [None, np.zeros(0, np.int64)])
+def test_assemble_sync_cuts_a_capture_without_index_marks(index):
+    data = sectors()
+    rev = dos_revolution(data=data)
+    cap = captured(rev, 2345, 2.1, index_error=0)
+    cap.index = index
+    assert asm.capture_period(cap) == len(rev)
+    g64, report = asm.assemble({6: [cap]})
+    assert report[6]["cut"] == "sync-cut" and report[6]["errors"] == 0
+    bits = g64_bits(g64, 3)
+    assert len(bits) == len(rev) and rotation_of(rev, bits) >= 0
+    assert np.array_equal(np.roll(rev, -rotation_of(rev, bits)), bits)
+    assert np.array_equal(decode_track(bits, 3).data, data)
+
+
 def syncless(n=49932):
     rev = (RNG.random(n) < 0.5).astype(np.uint8)
     rev[rev.cumsum() % 9 == 0] = 0

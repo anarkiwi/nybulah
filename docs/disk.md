@@ -290,17 +290,20 @@ python tools/vice_boot.py fixed.g64 --video pal --screenshot boot.ppm
    capture directory (its `read-*.npz`) or a quoted `DIR/GLOB`; a later
    source replaces an earlier one's track whole. `--tracks N` drops tracks
    above N. Per track:
-   - **sync-cut**: in a capture with index marks, one revolution runs from
-     the middle of a sync to the same point of that sync's copy one index
-     period later, so its length comes from the data, not the index timing.
+   - The period of a capture is its mean index period with two or more
+     index marks, else (a stream that never saw the index) the shift near
+     the zone's nominal revolution at which the bits best agree with
+     themselves (FFT autocorrelation).
+   - **sync-cut**: one revolution runs from the middle of a sync to the same
+     point of that sync's copy one period later, so its length comes from
+     the data, not the index timing.
      The cut with the fewest sector errors is kept. A sector bad in it is
      spliced from another revolution or capture where it decodes (below).
      The revolution is padded to whole bytes with ones at the seam, which
      only lengthens the sync there.
-   - **repeat-cut**: a track without syncs is cut at the lag at which the
-     next revolution agrees (the index period, or the FFT autocorrelation
-     peak near the nominal length without index marks), seamed in the
-     middle of its longest agreeing stretch and trimmed to whole bytes.
+   - **repeat-cut**: a track without syncs is cut at the lag from the
+     period at which the next revolution agrees, seamed in the middle of
+     its longest agreeing stretch and trimmed to whole bytes.
    - **index**: otherwise the best index-to-index revolution, as `convert`.
 3. **Patch.** When a copy's own recording of a track or sector cannot be
    read, `nybulah patch IN OUT.g64` (or the same options on `assemble`)
