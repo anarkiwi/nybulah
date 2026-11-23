@@ -10,6 +10,7 @@ from nybulah.nibbler import (
     ST_NOSYNC,
     Capture,
     Nibbler,
+    SyncsNotLocated,
     ZP_SIZE,
     TrackError,
     t2_value,
@@ -50,7 +51,9 @@ def test_hidden_ones_complete_the_run(make_rig, g64):
     bits = cap.bits()
     assert len(bits) == 8 * len(cap.data) + cap.hidden.sum() + 10
     cap = nib.capture(36, start="sync", timing="none")
-    assert cap.positions.size == 0 and cap.tb is None and cap.ts is None
+    assert cap.tb is None and cap.ts is None and cap.timing == "none"
+    with pytest.raises(SyncsNotLocated):
+        _ = cap.positions
     with pytest.raises(ValueError):
         nib.capture(36, timing="later")
 
@@ -236,3 +239,28 @@ def test_capture_through_monitor_transport(g64, image, proto):
     assert (dec.data == image.data[image.span(18)]).all()
     cbm.settle()
     assert cbm.drive.dump(0x60, ZP_SIZE) == zp and cbm.drive.responsive
+
+
+def test_untimed_capture_refuses_a_bit_stream(make_rig, g64, image, tmp_path):
+    """Bytes with unlocated syncs must not pass for a sync-less stream: decoding
+    them used to report a formatted track as headerless."""
+    _, nib = make_rig("1571", Media.from_g64(g64))
+    timed = nib.capture(6, start="sync", timing="syncs")
+    assert (decode_track(timed, 3, image.disk_id).errors == SectorError.OK).all()
+    untimed = nib.capture(6, start="sync", timing="none")
+    for use in (untimed.bits, lambda: decode_track(untimed, 3)):
+        with pytest.raises(SyncsNotLocated, match="timing='syncs'"):
+            use()
+    untimed.save(tmp_path / "none.npz")
+    with pytest.raises(SyncsNotLocated):
+        Capture.load(tmp_path / "none.npz").bits()
+
+
+def test_nosyncs_capture_is_one_stream(make_rig):
+    cells = 8 * 6000
+    noise = (np.random.default_rng(3).random(cells) < 0.5).astype(np.uint8)
+    noise[np.arange(cells) % 7 == 0] = 0
+    _, nib = make_rig("1541", Media({(0, 36): noise}))
+    nib.halftrack = 36
+    cap = nib.capture(36, density=2, timing="nosyncs")
+    assert cap.positions.size == 0 and len(cap.bits()) == 8 * cap.valid_bytes

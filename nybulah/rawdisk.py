@@ -231,11 +231,11 @@ def _verify_capture(
 ):  # pylint: disable=too-many-arguments
     """A capture of a written track: from the index when aligned (RAM passes, as
     the write needs the expansion RAM anyway), else a stream, else from a sync
-    when the track has one, else from now with the bytes alone."""
+    when the track has one, else from now with the bytes alone (a sync-less payload)."""
     if nib.streaming and not aligned:
         return nib.stream(job.halftrack, side=job.side, density=density)
     start = "index" if aligned else "sync" if synced else "now"
-    timing = "syncs" if synced else "none"
+    timing = "syncs" if synced else "nosyncs"
     return nib.capture(job.halftrack, density, start, job.side, timing)
 
 
