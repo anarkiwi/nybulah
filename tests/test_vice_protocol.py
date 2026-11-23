@@ -349,3 +349,8 @@ def test_first_keep_spans_start_to_the_first_keepalive():
     assert vb.first_keep(rows) == 290
     assert vb.first_keep(rows[:3]) is None
     assert vb.first_keep(rows[3:]) is None
+
+
+def test_command_line_appends_extra_options():
+    args = vice.command_line("x64sc", 0, {8: ("1541", "d.g64")}, 10, extra=["-ntsc"])
+    assert args[-1] == "-ntsc" and "-8" in args
