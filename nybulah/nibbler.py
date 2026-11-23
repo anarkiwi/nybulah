@@ -35,7 +35,7 @@ ST_STOPPED_TS = ST_STOPPED | ST_FULL
 START = {"now": 0, "sync": 1, "index": 2, "anchor": 3}
 USER_STARTS = ("now", "sync", "index")
 BITS, TB, TS = 0, 1, 2
-TIMING = {"full": (TB, TS), "syncs": (TS,), "none": ()}
+TIMING = {"full": (TB, TS), "syncs": (TS,), "nosyncs": (), "none": ()}
 CAPTURE_VERSION = 2
 STREAM_VERSION = 4
 WD_INDEX = 0x02
@@ -75,6 +75,11 @@ V1_POLL, V1_BYTE_TO_POLL = 9, 24
 V1_RELEASE_GAPS = (6, 11)
 V1_LOOP, V1_WAIT_BASE = 17, 65
 V1_ACCURACY = 3
+
+
+class SyncsNotLocated(ValueError):
+    """Bytes from a completed BITS pass with no timing pass (``timing="none"``):
+    sync-framed, but where the syncs fell and how long they ran is unknown."""
 
 
 class TrackError(IOError):
@@ -138,6 +143,7 @@ class Capture:  # pylint: disable=too-many-instance-attributes
     stream: np.ndarray | None = None
     sensed: np.ndarray | None = None
     sensed_status: int = 0
+    timing: str | None = None
 
     ARRAYS = ("data", "table", "result", "tb", "tb_result", "ts", "ts_result")
     ARRAYS += ("stream", "sensed")
@@ -241,6 +247,13 @@ class Capture:  # pylint: disable=too-many-instance-attributes
             return passes.merge_tb(self.data, base, self.tb, ts, anchored, rev, end)
         if ts is not None:
             return passes.merge_ts(self.data, base, ts, self.cell_cycles, anchored, rev)
+        if self.timing != "nosyncs" and len(self.data) and not self.status & ST_STOPPED:
+            how = f"timing={self.timing!r}" if self.timing else "no timing passes"
+            raise SyncsNotLocated(
+                f"halftrack {self.halftrack}: captured with {how}, so its syncs were"
+                " never located and its bit stream cannot be restored; capture with"
+                " timing='syncs' or 'full', or 'nosyncs' for a track known to have none"
+            )
         none = np.zeros(0, np.int64)
         return passes.Syncs(none, none, none, none, none, len(self.data))
 
@@ -797,7 +810,9 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
 
         ``start`` is "now", "sync" (just after a sync) or "index" (1571).
         ``timing`` "full" times every sync (TB and TS passes), "syncs" only
-        locates them (TS), "none" keeps the bytes alone.
+        locates them (TS), "nosyncs" keeps the bytes of a track the caller knows
+        has no syncs, "none" keeps the bytes alone (no bit stream: its syncs
+        raise :class:`SyncsNotLocated`).
         """
         self._check(side, start)
         if timing not in TIMING:
@@ -922,6 +937,7 @@ class Nibbler:  # pylint: disable=too-many-instance-attributes
             density,
             start,
             NPAGES,
+            timing=timing,
             **extra,
         )
 

@@ -1,7 +1,7 @@
 """Capture halftracks at every density, saving each capture for analysis.
 
-A 1571 streams (homed on its sensor); a 1541 takes --captures RAM passes per
-density after locating its head as ``read`` does.
+A 1571 streams (homed on its sensor), or with --ram takes RAM passes; a 1541
+takes --captures RAM passes per density after locating its head as ``read`` does.
 Usage: ``python tools/density_scan.py --dev 8 --halftracks 2 4 --out DIR``.
 """
 
@@ -40,13 +40,17 @@ class DensityScan:
         ap.add_argument("--densities", type=int, nargs="+", default=[0, 1, 2, 3])
         ap.add_argument("--captures", type=int, default=3, help="1541 passes each")
         ap.add_argument("--transport", default="s3", help="1541 transport")
+        ap.add_argument(
+            "--ram", action="store_true", help="1571: RAM passes, not streams"
+        )
         ap.add_argument("--out", type=pathlib.Path, required=True)
 
     @staticmethod
     def execute(args, cbm):
         """Locate once, then capture each (halftrack, density)."""
         args.out.mkdir(parents=True, exist_ok=True)
-        ram = identify_model(cbm, args.dev) == "1541"
+        is1541 = identify_model(cbm, args.dev) == "1541"
+        ram = is1541 or args.ram
         reps = args.captures if ram else 1
         jobs = [
             (h, d, n)
@@ -54,12 +58,12 @@ class DensityScan:
             for d in args.densities
             for n in range(reps)
         ]
-        session = located if ram else streamprobe.homed
+        session = located if is1541 else streamprobe.homed
         with session(args, cbm) as (nib, report):
             print(json.dumps(report))
             for halftrack, density, n in tqdm(jobs, desc="scan", unit="cap"):
                 if ram:
-                    cap = nib.capture(halftrack, density, "now", args.side, "none")
+                    cap = nib.capture(halftrack, density, "sync", args.side, "syncs")
                     row = {"halftrack": halftrack, "bytes": len(cap.data)}
                 else:
                     cap = nib.stream(halftrack, args.revolutions, args.side, density)

@@ -86,8 +86,14 @@ up to three passes and merges them (`nybulah.passes`) into one `Capture`.
 | TS | per SYNC: bytes counted so far, release-wait length | positions, and the length of long syncs (TB's 8-bit timer wraps) |
 
 `timing="full"` (default) runs all three, `"syncs"` only BITS and TS (exact
-positions, lengths to about a tenth of the run: what decoding needs), and
-`"none"` BITS alone. Disk reads and verifies use `"syncs"`.
+positions, lengths to about a tenth of the run: what decoding needs),
+`"nosyncs"` BITS alone for a track the caller knows has no syncs (a sync-less
+raw write's verify), and `"none"` BITS alone. Disk reads and verifies use
+`"syncs"`. BITS bytes are sync-framed but carry no sync runs, so a `"none"`
+capture (or an older record with neither TB nor TS) that holds bytes from a
+completed pass has no bit stream: its `syncs`, `positions`, `bits()` and
+`decode_track` raise `SyncsNotLocated` rather than read it as a track without
+syncs. The timing asked for is stored with the capture.
 
 **Alignment.** TB and TS start after an anchor: up to 8 bytes chosen from
 the BITS pass that occur at one angle of the track and that the drive's
