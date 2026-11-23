@@ -29,7 +29,7 @@ verified.
 | Passes | `nybulah.passes` | Host model of the capture passes: sample windows, anchors, merge |
 | Disk | `nybulah.disk` | Track jobs: decodes with `nybulah.analysis`, formats tracks, verifies |
 | Raw disk | `nybulah.rawdisk` | Raw track jobs: captures to G64, fits raw tracks to the drive, writes and verifies them |
-| Simulator | `nybulah.sim`, `simdisk`, `simfast`, `simhost` | py65 drive model with media, stepper, VIA2 and WD1770 index; its compiled mirror; host stand-ins |
+| Simulator | `nybulah.sim`, `simdisk`, `simfast`, `simhost` | jennings drive model with media, stepper, VIA2 and WD1770 index; its compiled mirror; host stand-ins |
 
 ## Drive routines
 

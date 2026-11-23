@@ -1,11 +1,11 @@
-"""The 1581 drive (sim.Drive1581): 8520, WD177x and bus in py65 and compiled, hosts."""
+"""The 1581 drive (sim.Drive1581): 8520, WD177x and bus in jennings and compiled, hosts."""
 
 import re
 
 import numpy as np
 import pytest
-from py65.assembler import Assembler
-from py65.devices.mpu6502 import MPU
+from jennings.assembler import Assembler
+from jennings.devices.mpu6502 import MPU
 from test_simfast import IMPLEMENTED, LOW, assemble, pair, registers, snapshot
 from test_simfast import shift_in, step_both
 
@@ -36,7 +36,7 @@ def wd_access(line):
 
 
 def asm(org, *lines, wdtest=True):
-    """Two-pass py65 assembly with "lbl:" labels; wdtest puts a nop before any WD
+    """Two-pass jennings assembly with "lbl:" labels; wdtest puts a nop before any WD
     access that would start at an address ending in %00 (mfmmacro.src WDTEST)."""
     labels = {}
     for _ in range(2):
@@ -59,7 +59,7 @@ def make(**kw):
 
 
 def state(drive):
-    """Everything py65, the CIA, the WD and the media hold."""
+    """Everything jennings, the CIA, the WD and the media hold."""
     vars_ = {k: v for k, v in snapshot(drive).items() if k != "wd"}
     return [
         vars_,
@@ -96,7 +96,7 @@ def test_memory_map():
 
 
 @pytest.mark.parametrize("seed", range(3))
-def test_every_opcode_matches_py65(seed):
+def test_every_opcode_matches_jennings(seed):
     rng = np.random.default_rng(seed)
     ref, fast = pair(make())
     ram = rng.integers(0, 256, 0x2000, dtype=np.uint8).tobytes()
@@ -128,7 +128,7 @@ def random_program(rng, drive):
 
 
 @pytest.mark.parametrize("seed", range(4))
-def test_random_programs_match_py65(seed):
+def test_random_programs_match_jennings(seed):
     rng = np.random.default_rng(seed)
     ref, fast = pair(make(spinup=1000))
     for _ in range(30):

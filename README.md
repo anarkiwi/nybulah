@@ -83,7 +83,7 @@ docker run --rm -v "$PWD:/app" -w /app nybulah:test python -m pytest -n auto
 ```
 
 Drive code is ca65 assembly in `drive/`, run in tests on a compiled drive
-simulator (`nybulah.simfast`; `NYBULAH_SIM=py65` selects the reference model)
+simulator (`nybulah.simfast`; `NYBULAH_SIM=jennings` selects the reference model)
 and on VICE's drive emulation (`--target test-vice`, `pytest -m vice`;
 [vice.md](docs/vice.md)).
 
