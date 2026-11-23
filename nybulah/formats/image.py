@@ -21,7 +21,7 @@ from ..analysis.cycle import (
     lag_window,
 )
 from ..analysis.flux import ROTATION_TICKS, decode_flux, estimate_zone
-from ..analysis.gcr import decode_bits, runs_of_ones, sectors_per_track, to_bits
+from ..analysis.gcr import runs_of_ones, sectors_per_track, to_bits
 from ..analysis.sector import SectorError, decode_track, sync_headers
 from .convert import _score, d64_to_g64, g64_to_d64, revolution_bytes
 from .d64 import read_d64
