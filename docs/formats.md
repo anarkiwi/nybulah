@@ -35,6 +35,9 @@ From the command line:
 - `nybulah convert in out` converts any readable format to `.g64`, `.g71`,
   `.d64` or `.p64`. Its output lists those tracks under `unformatted`.
 - `nybulah info file` prints the per-track summary.
+- `nybulah assemble` and `nybulah patch` build a G64 from capture records
+  and patch tracks or sectors from other images
+  ([disk.md](disk.md#assembling-and-patching-g64-images)).
 
 | Format | Read | Write | Keeps | Loses |
 |---|---|---|---|---|

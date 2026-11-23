@@ -9,6 +9,7 @@ nybulah read  --dev 10 disk.g64 --archive caps/  # raw (--halftracks, --tracks 4
 nybulah read  --dev 8  disk.g71            # 1571, raw, both sides
 nybulah write --dev 8  disk.g64 --align index  # any raw image; 1571 index starts
 nybulah convert caps/ disk.g64             # raw image from the archive
+nybulah assemble disk.g64 caps/            # seams in syncs (assembling and patching below)
 ```
 
 The image type comes from the file suffix: reads take `.d64`, `.d71`, `.d81`,
@@ -262,6 +263,79 @@ track's.
    the shift register at the second byte ready after it sees the index, the
    capture latches its first byte within a byte of seeing it, and either
    index poll can see the edge up to a byte late.
+
+## Assembling and patching G64 images
+
+A G64 holds one revolution per track, and every seam in it is a place a drive
+reads as bits that never followed each other on the disk. `nybulah assemble`
+and `nybulah patch` (`formats.assemble`) put every seam inside a sync: a run
+of ones reads the same however it is joined, provided it stays at least 10
+bits long, so the drive resynchronises there and no sector is cut.
+
+```sh
+nybulah read --dev 8 --archive caps/ disk.g64
+python tools/density_scan.py --dev 8 --halftracks 72 74 --densities 2 --out scan/
+nybulah assemble disk.g64 caps/ 'scan/h7[24]-d2-*.npz'
+nybulah patch disk.g64 fixed.g64 --tracks-from ref.g64:36-38 --sectors-from ref.g64:18/6,20/0-2
+python tools/vice_boot.py fixed.g64 --video pal --screenshot boot.ppm
+```
+
+1. **Capture.** `read --archive caps/` keeps every capture of every track.
+   A protection track read by the loader at a density other than its own
+   needs captures at that density: `tools/density_scan.py` takes several
+   multi-revolution captures per halftrack and density (`--captures` RAM
+   passes on a 1541, `--revolutions` streams on a 1571) and saves each as
+   `hHH-dD-N.npz`.
+2. **Assemble.** `nybulah assemble OUT.g64 SOURCE...` loads each SOURCE, a
+   capture directory (its `read-*.npz`) or a quoted `DIR/GLOB`; a later
+   source replaces an earlier one's track whole. `--tracks N` drops tracks
+   above N. Per track:
+   - The period of a capture is its mean index period with two or more
+     index marks, else (a stream that never saw the index) the shift near
+     the zone's nominal revolution at which the bits best agree with
+     themselves (FFT autocorrelation).
+   - **sync-cut**: one revolution runs from the middle of a sync to the same
+     point of that sync's copy one period later, so its length comes from
+     the data, not the index timing.
+     The cut with the fewest sector errors is kept. A sector bad in it is
+     spliced from another revolution or capture where it decodes (below).
+     The revolution is padded to whole bytes with ones at the seam, which
+     only lengthens the sync there.
+   - **repeat-cut**: a track without syncs is cut at the lag from the
+     period at which the next revolution agrees, seamed in the middle of
+     its longest agreeing stretch and trimmed to whole bytes.
+   - **index**: otherwise the best index-to-index revolution, as `convert`.
+3. **Patch.** When a copy's own recording of a track or sector cannot be
+   read, `nybulah patch IN OUT.g64` (or the same options on `assemble`)
+   takes it from another image of the same title, such as a preservation
+   reference, in any format `formats.load` reads:
+   - `--tracks-from IMAGE:12,13,36-41` replaces whole tracks with the
+     donor's best revolutions;
+   - `--sectors-from IMAGE:12/6,17/0-3` splices sectors: each runs from the
+     middle of its header sync to the middle of the next header's sync, in
+     both the target and the donor revolution, so both joints are syncs of
+     the original length. Ones padded at the trailing joint keep the track
+     whole bytes, and bit 0 of the track stays where it was unless it lay in
+     the replaced sector.
+
+   Both options repeat; track replacements apply before sector splices. IN
+   may be any loadable image, converted as `convert` does.
+4. **Report.** One JSON line per assembled or patched track gives its
+   `cut`, the sector `errors` after re-decoding, `bytes`, the `spliced` and
+   `unspliced` sectors, the `source` of a replaced track and, per spliced
+   sector, the image it came `from`. A patch that could not be applied is
+   listed under `failed` with its reason (no track in the donor or the
+   target, sector not decodable in the donor, sync not found, sector not
+   decodable after the splice), and the last line, `{"target", "ok"}`,
+   has `ok` false; the command then exits with status 1.
+5. **Boot check.** `tools/vice_boot.py IMAGE` (in the `test-vice` image)
+   attaches the G64 to a true-drive 1541 in VICE, types `LOAD"*",8,1` at
+   READY and samples the C64 and drive PCs, VIC mode and text screen for
+   `--steps` over `--seconds` of warp. `--video pal|ntsc` picks the
+   machine, `--feed STEP:TEXT` types TEXT before a sample step (repeatable),
+   `--screenshot FILE` saves the last frame as a PPM, `--dump-drive PREFIX`
+   saves drive RAM at each step, and `--trace N` logs the first N drive
+   port writes (density, head step, drive PC).
 
 ## Head location
 

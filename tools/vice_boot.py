@@ -9,6 +9,7 @@ import collections
 import json
 import pathlib
 import shutil
+import struct
 import tempfile
 import time
 
@@ -18,6 +19,8 @@ from nybulah.vice import MAIN, OP_STORE, Vice
 
 KEY_WAIT = 0xE5CD
 DRIVE8 = 1
+DRIVE_RAM = 0x800
+DISPLAY_GET, PALETTE_GET = 0x84, 0x91
 
 
 def screen_text(mon):
@@ -30,6 +33,28 @@ def screen_text(mon):
         for c in (b & 0x7F for b in codes)
     )
     return [chars[i : i + 40] for i in range(0, 1000, 40)]
+
+
+def screenshot(mon, path):
+    """The VIC-II's visible frame as a binary PPM (binary monitor display/palette get)."""
+    body = mon.command(DISPLAY_GET, bytes([1, 0]))
+    head = struct.unpack_from("<I", body)[0]
+    width, _, x0, y0, inner_w, inner_h, bpp = struct.unpack_from("<6HB", body, 4)
+    size = struct.unpack_from("<I", body, 4 + head)[0]
+    pixels = body[8 + head : 8 + head + size]
+    if bpp != 8:
+        raise ValueError(f"display is {bpp} bpp, expected 8")
+    pal = mon.command(PALETTE_GET, bytes([1]))
+    count, at, colours = struct.unpack_from("<H", pal)[0], 2, []
+    for _ in range(count):
+        colours.append(pal[at + 1 : at + 4])
+        at += 1 + pal[at]
+    rows = (
+        pixels[(y0 + y) * width + x0 : (y0 + y) * width + x0 + inner_w]
+        for y in range(inner_h)
+    )
+    rgb = b"".join(colours[i] for row in rows for i in row)
+    pathlib.Path(path).write_bytes(b"P6 %d %d 255\n" % (inner_w, inner_h) + rgb)
 
 
 def sample(vice):
@@ -72,7 +97,7 @@ def trace_port(vice, limit, timeout):
 
 
 def boot(
-    image, seconds, steps, command, trace=0, extra=()
+    image, seconds, steps, command, trace=0, extra=(), dump=None, shot=None, feeds=()
 ):  # pylint: disable=too-many-arguments,too-many-positional-arguments
     """Samples taken while ``image`` boots on unit 8."""
     work = pathlib.Path(tempfile.mkdtemp(prefix="boot-"))
@@ -99,12 +124,20 @@ def boot(
                     )
                 )
             rows = []
-            for _ in tqdm(range(steps), desc="boot", unit="step"):
+            typed = dict(feeds)
+            for step in tqdm(range(steps), desc="boot", unit="step"):
+                if step in typed:
+                    vice.mon.feed(typed[step])
                 vice.mon.resume()
                 time.sleep(seconds / steps)
                 vice.mon.stop()
                 rows.append(sample(vice))
+                if dump:
+                    ram = vice.mon.mem_get(0, DRIVE_RAM, space=DRIVE8)
+                    pathlib.Path(f"{dump}-{len(rows):03d}.bin").write_bytes(ram)
             screen = screen_text(vice.mon)
+            if shot:
+                screenshot(vice.mon, shot)
         return rows, screen
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -118,6 +151,16 @@ def main():
     ap.add_argument("--trace", type=int, default=0, help="drive port writes to log")
     ap.add_argument("--video", choices=("ntsc", "pal"), default="ntsc")
     ap.add_argument("--quiet", action="store_true", help="omit the screen")
+    ap.add_argument(
+        "--feed",
+        action="append",
+        default=[],
+        help="STEP:TEXT typed before that sample step (repeatable)",
+    )
+    ap.add_argument("--screenshot", help="save the final frame as a PPM")
+    ap.add_argument(
+        "--dump-drive", help="save drive RAM at each step as PREFIX-NNN.bin"
+    )
     ap.add_argument("--command", default='LOAD"*",8,1\r')
     args = ap.parse_args()
     rows, screen = boot(
@@ -127,6 +170,9 @@ def main():
         args.command,
         args.trace,
         [f"-{args.video}"],
+        args.dump_drive,
+        args.screenshot,
+        [(int(f.split(":", 1)[0]), f.split(":", 1)[1]) for f in args.feed],
     )
     for row in rows:
         print(json.dumps({k: hex(v) if "pc" in k else v for k, v in row.items()}))

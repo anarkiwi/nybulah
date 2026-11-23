@@ -21,7 +21,7 @@ writes them back.
 ([disk.md](docs/disk.md)). Raw images are any of the image formats below
 that hold GCR tracks.
 
-Image formats (`info`, `convert`, `map`, `flux`): NIB, NB2, NBZ, G64, G71,
+Image formats (`info`, `convert`, `map`, `flux`, `assemble`, `patch`): NIB, NB2, NBZ, G64, G71,
 P64, SCP, KryoFlux, D64, D71, D81, IMD ([formats.md](docs/formats.md)).
 
 ## Install
@@ -48,6 +48,8 @@ nybulah write --dev 8 --transport s4 disk.d71   # format, write, verify every tr
 nybulah read --dev 10 --archive caps/ disk.g64  # raw: best revolution of every track
 nybulah write --dev 8 --align index disk.g64    # raw: fit, write, verify; starts at the index
 nybulah convert caps/ disk.g64                  # raw image from a read --archive directory
+nybulah assemble disk.g64 caps/ 'scan/*.npz'    # raw image with every seam inside a sync
+nybulah patch disk.g64 out.g64 --sectors-from ref.g64:18/6  # tracks or sectors from another image
 nybulah read --dev 9 --transport s4 disk.d81    # 1581: D81 with error bytes
 nybulah pattern verify --dev 8 --halftrack 36  # test track against its truth
 nybulah info disk.g64                           # per-track kind, cycle, errors
@@ -66,7 +68,7 @@ nybulah survey CORPUS --out survey/             # corpus statistics and threshol
 - [features.md](docs/features.md): transports, capture, analysis and format features
 - [hardware.md](docs/hardware.md): bus sessions, hardware check, probes, firmware, transfer rates
 - [protocol.md](docs/protocol.md): X, burst X, SRQ and streaming wire protocols
-- [disk.md](docs/disk.md): drive routines, capture passes, D64/D71 and raw image reading and writing, head location
+- [disk.md](docs/disk.md): drive routines, capture passes, D64/D71 and raw image reading and writing, assembling and patching G64s, head location
 - [analysis.md](docs/analysis.md): GCR, revolution detection, faults, disk map, flux view, MFM
 - [formats.md](docs/formats.md): image formats, flux decoding, licences
 - [scenarios.md](docs/scenarios.md): track scenarios in preserved images
