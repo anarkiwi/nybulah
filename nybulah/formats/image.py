@@ -21,8 +21,8 @@ from ..analysis.cycle import (
     lag_window,
 )
 from ..analysis.flux import ROTATION_TICKS, decode_flux, estimate_zone
-from ..analysis.gcr import decode_bits, runs_of_ones, sectors_per_track, to_bits
-from ..analysis.sector import HEADER_ID, SectorError, decode_track
+from ..analysis.gcr import runs_of_ones, sectors_per_track, to_bits
+from ..analysis.sector import SectorError, decode_track, sync_headers
 from .convert import _score, d64_to_g64, g64_to_d64, revolution_bytes
 from .d64 import read_d64
 from .g64 import FIRST_HALFTRACK, G64, SIDE1, G64Track, read_g64
@@ -116,17 +116,8 @@ def best_revolution(captures, key):
 
 def header_track(bits):
     """Most common track number in the valid sector headers of ``bits``, or None."""
-    starts, lengths = runs_of_ones(bits)
-    ends = (starts + lengths)[starts + lengths + 80 <= len(bits)]
-    if len(ends) == 0:
-        return None
-    hdr, valid = decode_bits(bits[ends[:, None] + np.arange(80)])
-    ok = (
-        (hdr[:, 0] == HEADER_ID)
-        & valid[:, :6].all(axis=1)
-        & (np.bitwise_xor.reduce(hdr[:, 1:6], axis=1) == 0)
-    )
-    return int(np.bincount(hdr[ok, 3]).argmax()) if ok.any() else None
+    rows = sync_headers(bits)[1]
+    return int(np.bincount(rows[:, 3]).argmax()) if len(rows) else None
 
 
 def _expected_tracks(key):
